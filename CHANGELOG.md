@@ -5,6 +5,18 @@ rebrand below were written under this project's previous name — FLODE —
 and are kept exactly as originally written for historical accuracy rather
 than edited to say "Circuitry" throughout.
 
+## [2.0.6] — 2026-09-07 — Fixed Duplicate Edges on Empty If/Else Decompile
+
+### Fixed
+- Decompiling an automation whose YAML contained an explicit empty
+  `then: []` or `else: []` placeholder on an `if` action produced a
+  duplicate pass-through node and a duplicate edge in the resulting
+  graph, because the decompiler treated an empty array as real content.
+  Found via real-automation round-trip testing (decompile, then
+  recompile, then verify the two are behaviorally equivalent), which
+  surfaced one automation that failed to recompile at all as a result.
+  Fixed by checking for actual entries rather than array presence.
+
 ## [2.0.5] — 2026-09-07 — Discoverable False Branch on Condition Nodes
 
 ### Fixed

@@ -3175,7 +3175,8 @@ async parse(yamlString: string): Promise<ParseResult> {
     // Detect trigger-id routing: a single `condition: trigger` with no else.
     // The `id` field can be a string or an array of strings in HA YAML.
     const triggerConditionIds: string[] | null = (() => {
-      if (ifAction.else || ifConditions.length !== 1) return null;
+      const elseIsEmpty = !ifAction.else || (Array.isArray(ifAction.else) && ifAction.else.length === 0);
+      if (!elseIsEmpty || ifConditions.length !== 1) return null;
       const cond = ifConditions[0] as Record<string, unknown>;
       if (cond?.condition !== 'trigger') return null;
       const rawId = cond?.id;
@@ -3214,8 +3215,17 @@ async parse(yamlString: string): Promise<ParseResult> {
     const lastConditionId = conditionNodes[conditionNodes.length - 1].id;
 
     // Parse 'then' sequence (true branch) - connects from last condition
-    if (ifAction.then) {
-      const thenSequence = Array.isArray(ifAction.then) ? ifAction.then : [ifAction.then];
+    const thenSequence = Array.isArray(ifAction.then)
+      ? ifAction.then
+      : ifAction.then
+        ? [ifAction.then]
+        : [];
+    // `then: []` is a no-op in HA (identical to omitting `then` entirely)
+    // -- an empty array is truthy in JS, so this checks actual content
+    // instead of just key presence (see the matching `ifAction.else` fix
+    // just below for the real bug this caused, found via real-automation
+    // round-trip testing, 2026-09-07).
+    if (thenSequence.length > 0) {
       const thenResult = this.parseActions(thenSequence, {
         warnings,
         previousNodeIds: [lastConditionId],
@@ -3250,8 +3260,24 @@ async parse(yamlString: string): Promise<ParseResult> {
 
     // Parse 'else' sequence (false branch) - connects from FIRST condition only
     // (This matches the expected behavior: only the first condition handles the else path)
-    if (ifAction.else) {
-      const elseSequence = Array.isArray(ifAction.else) ? ifAction.else : [ifAction.else];
+    const elseSequence = Array.isArray(ifAction.else)
+      ? ifAction.else
+      : ifAction.else
+        ? [ifAction.else]
+        : [];
+    // `else: []` is a no-op in HA (identical to omitting `else` entirely)
+    // -- an empty array is truthy in JS, so this checks actual content
+    // instead of just key presence. Getting this wrong was a real bug
+    // (found via real-automation round-trip testing, 2026-09-07): an explicit
+    // `else: []` was wrongly treated as "has content", so
+    // parseActions([]) produced a pass-through terminal node (the
+    // condition itself, forwarded unchanged) that got pushed into
+    // outputNodeIds/falsePathOutputIds *in addition to* the identical id
+    // `then: []` had already pushed there via the exact same bug -- two
+    // entries for the same physical node, which downstream connection
+    // logic then read as two separate edges to the next node instead of
+    // one, corrupting the decompiled graph with duplicate edges.
+    if (elseSequence.length > 0) {
       // Mark firstConditionId as a false-path source via falsePathConditionIds
       // (not conditionNodeIds, which means "true"-path) so parseActions'
       // createEdgesFromCurrent assigns 'false' to the very first edge
