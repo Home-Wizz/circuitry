@@ -5,6 +5,17 @@ rebrand below were written under this project's previous name — FLODE —
 and are kept exactly as originally written for historical accuracy rather
 than edited to say "Circuitry" throughout.
 
+## [2.0.5] — 2026-09-07 — Discoverable False Branch on Condition Nodes
+
+### Fixed
+- A plain Condition node's false branch had no visible connection handle
+  unless an edge already existed on it, making the false path effectively
+  undiscoverable from the canvas alone. The false handle now always shows
+  on a plain condition, matching the behavior of the Choose and If/Else
+  blocks that share the same underlying component. Verified not to affect
+  those blocks (each carries its own presentation logic already gated by
+  block type).
+
 ---
 
 ## [0.1.0] — 2026-08-13 — Rebrand to Circuitry

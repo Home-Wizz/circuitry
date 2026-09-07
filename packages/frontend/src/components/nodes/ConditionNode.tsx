@@ -329,6 +329,17 @@ export const ConditionNode = memo(function ConditionNode({
   // representing one entity, since those icons carry real meaning of their
   // own that a device icon would replace rather than improve.
   const isPlainCondition = !data._blockKey && !isGroupCondition;
+  // Option A (2026-09-07): a bare condition's `false` handle used to only
+  // render once something was already wired to it -- a chicken-and-egg gap,
+  // since there was no way to *start* that wire. Plain conditions now always
+  // show it, so a chain (condition -> condition -> ...) can be dragged out
+  // the same way Flow's UI exposes today. Scope is deliberately narrow: only
+  // `isPlainCondition` nodes are affected. Choose/If-Else/Repeat-While/
+  // AND-OR-NOT already decide their own handle visibility via `hasFalseEdge`
+  // above (Choose's case-cards get their false edge wired programmatically by
+  // block-factories.ts's createChooseBlock, so they satisfy hasFalseEdge's
+  // first clause on their own) and are completely untouched by this change.
+  const showFalseHandle = hasFalseEdge || isPlainCondition;
   const HeaderIcon =
     isPlainCondition && primaryTarget?.domain ? getDomainIcon(primaryTarget.domain, BlockIcon) : BlockIcon;
 
@@ -660,10 +671,10 @@ export const ConditionNode = memo(function ConditionNode({
         type="source"
         position={Position.Right}
         id="true"
-        style={{ top: hasFalseEdge ? '30%' : '50%' }}
+        style={{ top: showFalseHandle ? '30%' : '50%' }}
         className="w-3! h-3! bg-success! border-success!"
       />
-      {hasFalseEdge && (
+      {showFalseHandle && (
         <Handle
           type="source"
           position={Position.Right}
@@ -680,12 +691,12 @@ export const ConditionNode = memo(function ConditionNode({
           two branch boxes now say "Click to configure then"/"...else"
           themselves (and, once configured, show what they actually do), so
           a redundant edge label would just be clutter. */}
-      {hasFalseEdge && !isIfElseBlock && (
+      {showFalseHandle && !isIfElseBlock && (
         <div className="absolute top-[30%] right-[-40px] -translate-y-1/2 transform rounded border border-success/30 bg-card px-1 py-0.5 font-medium text-[10px] text-success opacity-0 shadow-sm transition-opacity group-hover:opacity-100">
           {t('nodes:conditions.yes')}
         </div>
       )}
-      {hasFalseEdge && !isIfElseBlock && (
+      {showFalseHandle && !isIfElseBlock && (
         <div className="absolute top-[70%] right-[-36px] -translate-y-1/2 transform rounded border border-destructive/30 bg-card px-1 py-0.5 font-medium text-[10px] text-destructive opacity-0 shadow-sm transition-opacity group-hover:opacity-100">
           {t('nodes:conditions.no')}
         </div>

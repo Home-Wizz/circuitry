@@ -5,7 +5,7 @@
 
   <p><strong>Visual Flow + Node Editor for Home Assistant</strong></p>
 
-  [![Release](https://img.shields.io/badge/version-2.0.4-2F81F7?style=flat-square)](https://github.com/Home-Wizz/circuitry/releases/latest)
+  [![Release](https://img.shields.io/badge/version-2.0.5-2F81F7?style=flat-square)](https://github.com/Home-Wizz/circuitry/releases/latest)
   [![HA Version](https://img.shields.io/badge/HA-2025.8%2B-brightgreen?style=flat-square)](https://www.home-assistant.io)
   [![License](https://img.shields.io/badge/license-Apache%202.0-orange?style=flat-square)](LICENSE)
   [![HACS](https://img.shields.io/badge/HACS-custom%20repository-41BDF5?style=flat-square)](https://hacs.xyz)
