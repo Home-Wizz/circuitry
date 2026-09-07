@@ -1,0 +1,45 @@
+name: Build and Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: "yarn"
+
+      - name: Install dependencies
+        run: yarn install --immutable
+
+      - name: Build shared package
+        run: yarn workspace @circuitry/shared build
+
+      - name: Build transpiler package
+        run: yarn workspace @circuitry/transpiler build
+
+      - name: Build frontend
+        run: yarn workspace @circuitry/frontend build
+
+      - name: Run tests
+        run: yarn test
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: circuitry
+          path: custom_components/circuitry/
+          retention-days: 30

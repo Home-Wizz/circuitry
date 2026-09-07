@@ -1,0 +1,120 @@
+import type { FlowNode } from '@circuitry/shared';
+
+/**
+ * Type-safe utility functions for working with node data.
+ * Eliminates the repetitive pattern of: ((node.data as Record<string, unknown>).field as Type)
+ */
+
+/**
+ * Coerces an unknown options value into a string[] for enum-mode chip
+ * editors (IdList) — HA's own docs say these `string | list` fields accept
+ * either a bare string (single mode) or an array. Shared by
+ * NativeConditionFields.tsx (`climate.is_hvac_mode`, `select.is_option_selected`,
+ * ...) and NativeTriggerFields.tsx (`humidifier.mode_changed`,
+ * `water_heater.operation_mode_changed`) per CLAUDE.md's DRY mandate — both
+ * needed the identical coercion before this was hoisted here.
+ */
+export function toStringArray(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.filter((v): v is string => typeof v === 'string');
+  }
+  return typeof value === 'string' && value ? [value] : [];
+}
+
+/**
+ * Get a value from node data with type safety and default value support
+ */
+export function getNodeData<T = unknown>(node: FlowNode, key: string, defaultValue?: T): T {
+  const data = node.data as Record<string, unknown>;
+  const value = data[key] as T;
+  return value !== undefined && value !== null ? value : (defaultValue as T);
+}
+
+/**
+ * Get a string value from node data.
+ * Coerces legacy {value, label} option objects (stored by old code) to their `.value` string
+ * to prevent React error #31 when such objects are rendered as children.
+ */
+export function getNodeDataString(node: FlowNode, key: string, defaultValue = ''): string {
+  const raw = getNodeData<unknown>(node, key, defaultValue);
+  if (typeof raw === 'string') return raw;
+  if (typeof raw === 'object' && raw !== null && !Array.isArray(raw)) {
+    const obj = raw as Record<string, unknown>;
+    if (typeof obj.value === 'string') return obj.value;
+  }
+  return defaultValue;
+}
+
+/**
+ * Get a number value from node data
+ */
+export function getNodeDataNumber(
+  node: FlowNode,
+  key: string,
+  defaultValue?: number
+): number | undefined {
+  const value = getNodeData(node, key, defaultValue);
+  return typeof value === 'number' ? value : defaultValue;
+}
+
+/**
+ * Get a boolean value from node data
+ */
+export function getNodeDataBoolean(node: FlowNode, key: string, defaultValue = false): boolean {
+  return getNodeData(node, key, defaultValue);
+}
+
+/**
+ * Get an array value from node data
+ */
+export function getNodeDataArray<T = unknown>(
+  node: FlowNode,
+  key: string,
+  defaultValue: T[] = []
+): T[] {
+  const value = getNodeData(node, key, defaultValue);
+  return Array.isArray(value) ? value : defaultValue;
+}
+
+/**
+ * Get an object value from node data
+ */
+export function getNodeDataObject<T = Record<string, unknown>>(
+  node: FlowNode,
+  key: string,
+  defaultValue = {} as T
+): T {
+  const value = getNodeData(node, key, defaultValue);
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as T)
+    : defaultValue;
+}
+
+/**
+ * Type-safe setter helper for node data updates
+ */
+export function setNodeData(
+  updateFn: (id: string, data: Record<string, unknown>) => void,
+  nodeId: string,
+  key: string,
+  value: unknown
+) {
+  updateFn(nodeId, { [key]: value });
+}
+
+/**
+ * Helper for updating nested object properties in node data
+ */
+export function setNestedNodeData(
+  updateFn: (id: string, data: Record<string, unknown>) => void,
+  nodeId: string,
+  parentKey: string,
+  childKey: string,
+  value: unknown,
+  currentData: Record<string, unknown>
+) {
+  const parentData = (currentData[parentKey] as Record<string, unknown>) || {};
+  updateFn(nodeId, {
+    [parentKey]: { ...parentData, [childKey]: value },
+  });
+}

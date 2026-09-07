@@ -1,0 +1,73 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  build-and-upload:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: "yarn"
+
+      - name: Install dependencies
+        run: yarn install --immutable
+
+      - name: Build shared package
+        run: yarn workspace @circuitry/shared build
+
+      - name: Build transpiler package
+        run: yarn workspace @circuitry/transpiler build
+
+      - name: Build frontend
+        run: yarn workspace @circuitry/frontend build
+
+      - name: Verify www directory
+        run: |
+          ls -la custom_components/circuitry/
+          ls -la custom_components/circuitry/www/
+          ls -la custom_components/circuitry/www/assets/
+
+      - name: Create release archive
+        run: |
+          cd custom_components/circuitry
+          zip -r ../../circuitry.zip . -x "*.DS_Store"
+          tar -czf ../../circuitry.tar.gz --exclude="*.DS_Store" .
+          cd ../..
+          echo "Archive erstellt:"
+          ls -la *.zip *.tar.gz
+
+      - name: Extract Changelog section
+        id: changelog
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+          BODY=$(awk "/^## \[${VERSION}\]/{found=1; next} found && /^## \[/{exit} found{print}" CHANGELOG.md)
+          {
+            echo "body<<EOF"
+            echo "$BODY"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            circuitry.zip
+            circuitry.tar.gz
+          tag_name: ${{ github.ref_name }}
+          body: ${{ steps.changelog.outputs.body }}
+          token: ${{ secrets.GITHUB_TOKEN }}

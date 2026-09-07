@@ -1,0 +1,53 @@
+# Dependencies
+node_modules/
+# Also matches a *symlinked* node_modules (e.g. one worktree pointing at
+# another's install to avoid a redundant yarn install) -- the plain
+# `node_modules/` pattern above only matches a real directory, not a
+# symlink of that name, which is how one slipped into git history once.
+node_modules
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+
+# Build outputs
+dist/
+*.tsbuildinfo
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Test
+coverage/
+
+# Turbo
+.turbo/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Home Assistant
+custom_components/circuitry/www/
+
+# Python
+__pycache__/
+*.pyc
+
+# Manual pre-git recovery snapshot (compiled build artifacts, not source —
+# was the only rollback mechanism available before this repo had git)
+_backups/

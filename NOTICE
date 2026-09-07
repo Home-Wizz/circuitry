@@ -1,0 +1,26 @@
+Circuitry
+Copyright 2026 Home-Wizz
+
+This product is a fork of and includes software from:
+
+  FLODE
+  Copyright 2026 SH1FT-W
+  https://github.com/SH1FT-W/flode
+  Licensed under the Apache License, Version 2.0.
+
+  which is itself a fork of and includes software from:
+
+  C.A.F.E. (Complex Automation Flow Editor)
+  Copyright (c) Federico Zivolo
+  https://github.com/FezVrasta/cafe-hass
+  Licensed under the MIT License (as declared in the original project's README).
+
+The full text of the original MIT License is reproduced at the end of the
+LICENSE file in this repository and applies to all portions of the code
+that originate from the C.A.F.E. project. The full text of the Apache
+License, Version 2.0 applies to all portions of the code that originate
+from the FLODE project and to this project's own modifications.
+
+Modifications, additions, and the rebranding to Circuitry are
+Copyright 2026 Home-Wizz and are licensed under the
+Apache License, Version 2.0.

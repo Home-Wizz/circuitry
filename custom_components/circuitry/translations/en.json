@@ -1,0 +1,47 @@
+{
+  "config": {
+    "title": "Circuitry",
+    "step": {
+      "user": {
+        "title": "Set up Circuitry",
+        "description": "Circuitry is a visual automation editor for Home Assistant. It allows you to create and manage your automations using a visual flow editor.\n\nClick Submit to add Circuitry to your Home Assistant."
+      }
+    },
+    "abort": {
+      "already_configured": "Circuitry is already configured"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Circuitry Options",
+        "description": "Override the language Circuitry's own UI uses, independent of Home Assistant's active language.",
+        "data": {
+          "language": "Language"
+        }
+      }
+    }
+  },
+  "issues": {
+    "lossy_import": {
+      "title": "Circuitry couldn't fully understand an imported automation",
+      "description": "Importing **{entity_id}** into Circuitry didn't round-trip losslessly — some parts of the automation weren't recognized and may be missing or simplified in the editor:\n\n{details}\n\nCheck the automation in Circuitry and compare it against its YAML before saving, to avoid losing the unrecognized parts."
+    }
+  },
+  "services": {
+    "report_import_issue": {
+      "name": "Report lossy import",
+      "description": "Creates a Repair issue for an automation Circuitry couldn't round-trip losslessly during import. Called by Circuitry's own frontend — not meant to be used directly.",
+      "fields": {
+        "entity_id": {
+          "name": "Entity ID",
+          "description": "The automation entity that was imported."
+        },
+        "warnings": {
+          "name": "Warnings",
+          "description": "The parser warnings explaining what wasn't understood."
+        }
+      }
+    }
+  }
+}

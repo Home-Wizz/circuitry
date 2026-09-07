@@ -1,0 +1,104 @@
+import { z } from 'zod';
+import { EntityIdSchema } from './base';
+
+/**
+ * Trigger platform types supported by Home Assistant
+ */
+export const TriggerPlatformSchema = z.enum([
+  'state',
+  'time',
+  'time_pattern',
+  'event',
+  'mqtt',
+  'webhook',
+  'sun',
+  'zone',
+  'numeric_state',
+  'template',
+  'homeassistant',
+  'device',
+  'calendar',
+  'tag',
+  'geo_location',
+  'persistent_notification',
+  'conversation',
+]);
+export type TriggerPlatform = z.infer<typeof TriggerPlatformSchema>;
+
+/**
+ * Condition types supported by Home Assistant
+ */
+export const ConditionTypeSchema = z.enum([
+  'state',
+  'numeric_state',
+  'template',
+  'time',
+  'zone',
+  'and',
+  'or',
+  'not',
+  'sun',
+  'device',
+  'trigger',
+]);
+export type ConditionType = z.infer<typeof ConditionTypeSchema>;
+
+/**
+ * Target specification for service calls
+ */
+export const TargetSchema = z
+  .object({
+    entity_id: z.union([EntityIdSchema, z.array(EntityIdSchema)]).optional(),
+    area_id: z.union([z.string(), z.array(z.string())]).optional(),
+    device_id: z.union([z.string(), z.array(z.string())]).optional(),
+    label_id: z.union([z.string(), z.array(z.string())]).optional(),
+    floor_id: z.union([z.string(), z.array(z.string())]).optional(),
+  })
+  .refine(
+    (data) => {
+      // A plain truthiness check (`data.entity_id || ...`) doesn't actually
+      // enforce "at least one target specified": an empty array is truthy
+      // in JS, so `{ entity_id: [] }` — which names zero real targets —
+      // used to pass this check despite contradicting its own error
+      // message.
+      const hasValue = (v: string | string[] | undefined) =>
+        v !== undefined && (Array.isArray(v) ? v.length > 0 : v !== '');
+      return (
+        hasValue(data.entity_id) ||
+        hasValue(data.area_id) ||
+        hasValue(data.device_id) ||
+        hasValue(data.label_id) ||
+        hasValue(data.floor_id)
+      );
+    },
+    {
+      message:
+        'At least one target (entity_id, area_id, device_id, label_id, or floor_id) must be specified',
+    }
+  );
+export type Target = z.infer<typeof TargetSchema>;
+
+/**
+ * Optional target (for service calls that don't require a target)
+ */
+export const OptionalTargetSchema = z
+  .object({
+    entity_id: z.union([z.string(), z.array(z.string())]).optional(),
+    area_id: z.union([z.string(), z.array(z.string())]).optional(),
+    device_id: z.union([z.string(), z.array(z.string())]).optional(),
+    label_id: z.union([z.string(), z.array(z.string())]).optional(),
+    floor_id: z.union([z.string(), z.array(z.string())]).optional(),
+  })
+  .optional();
+
+/**
+ * Service call data - arbitrary key-value pairs
+ */
+export const ServiceDataSchema = z.record(z.string(), z.unknown());
+export type ServiceData = z.infer<typeof ServiceDataSchema>;
+
+/**
+ * Service call data template - Jinja2 templates as values
+ */
+export const ServiceDataTemplateSchema = z.record(z.string(), z.string());
+export type ServiceDataTemplate = z.infer<typeof ServiceDataTemplateSchema>;

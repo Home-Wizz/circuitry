@@ -1,0 +1,188 @@
+## Coding Guidelines
+
+- **Never use IIFEs (Immediately Invoked Function Expressions) in React components or TypeScript files.**
+  - Always extract logic into a named component or custom hook instead of using IIFEs.
+  - Use plain variables or helper functions for local logic, but prefer components for UI logic.
+  - IIFEs are forbidden in all React and TypeScript code.
+
+# Project Overview
+
+**Circuitry** (formerly FLODE) is a visual flow editor for Home Assistant automations, inspired by Node-RED. It allows users to design automations as diagrams and transpiles them to 100% native Home Assistant YAML—no vendor lock-in. Automations remain editable in HA's built-in editor.
+
+# Repository Structure
+
+```
+circuitry/
+├── packages/
+│   ├── shared/          # @circuitry/shared - Types and Zod schemas
+│   ├── frontend/        # @circuitry/frontend - React UI (Vite + Tailwind)
+│   └── transpiler/      # @circuitry/transpiler - YAML parser/generator
+├── custom_components/circuitry/  # Home Assistant integration (Python)
+└── .github/workflows/        # CI/CD pipelines
+```
+
+# Package Descriptions
+
+- **@circuitry/shared**: Zod schemas, TypeScript types, validation utilities
+- **@circuitry/frontend**: React 18 + XYFlow canvas + Zustand state + Radix UI
+- **@circuitry/transpiler**: YAML parsing, topology analysis, transpilation strategies
+
+# Key Domains/Features
+
+- Flow Canvas (trigger, condition, action, delay, wait nodes)
+- YAML Parsing & Transpilation (YamlParser, FlowTranspiler)
+- Home Assistant Integration (WebSocket API, entity/device/service registry)
+- Simulation & Trace Visualization
+- Property Editing Panels
+
+# Build System & Tooling
+
+- Yarn 4 workspaces + Turbo for orchestration
+- TypeScript 5.7 with strict mode
+- Vite for frontend builds
+- Vitest for testing, make sure to use the --run flag to avoid issues with watch mode
+- Biome for linting, and for formatting
+
+# Coding Conventions
+
+In addition to strict TypeScript rules:
+
+- **Zod for Schema Validation**: All data structures use Zod schemas in `@circuitry/shared`
+- **Zustand for State**: Single cohesive store pattern in `flow-store.ts`
+- **React Patterns**: Use `memo()` for nodes, `cn()` for class merging, and typed NodeProps
+- **Import Aliases**: `@/` for frontend, `@circuitry/*` for packages
+
+# Common Commands
+
+```bash
+yarn dev          # Watch mode
+yarn build        # Build all packages
+yarn build:ha     # Build + copy to custom_components
+yarn test         # Run tests
+yarn typecheck    # Type checking
+yarn lint:biome   # Linting
+```
+
+# Development Guidelines
+
+## Release and Commit Policy
+
+**IMPORTANT**: Never cut a new release or commit changes without first asking the user for permission.
+
+Always ask before:
+
+- Creating git commits
+- Pushing changes to the repository
+- Bumping version numbers
+- Creating new releases/tags
+- Running any git operations that modify the repository
+
+The user should have full control over when changes are committed and released.
+
+## TypeScript Code Quality
+
+**STRICT TYPING REQUIRED**: Always maintain strict TypeScript types throughout the codebase.
+
+**FORBIDDEN PRACTICES**:
+
+- Never use `as` type assertions unless absolutely necessary for external API boundaries
+- Never use `any` type - use proper type definitions or `unknown` with type guards
+- Avoid type casting hacks or workarounds
+- Don't suppress TypeScript errors with `@ts-ignore` or `@ts-expect-error`
+
+**REQUIRED PRACTICES**:
+
+- Define proper interfaces and types for all data structures
+- Use type guards for runtime type checking
+- Leverage TypeScript's strict mode features
+- Create proper type definitions for external libraries if needed
+- Use generic types appropriately for reusable components
+
+The codebase should compile with zero TypeScript errors and maintain type safety throughout.
+
+# Best Practices
+
+## Code Reusability (DRY) - VITAL AND MANDATORY
+
+**⚠️ THIS IS A NON-NEGOTIABLE REQUIREMENT ⚠️**
+
+**ZERO TOLERANCE FOR CODE DUPLICATION.** Every single piece of duplicated code is a violation of this project's core principles. Before writing ANY code, you MUST check if similar logic already exists and reuse it.
+
+**MANDATORY PRACTICES**:
+
+- **Helper Functions/Utilities**: Extract common logic into reusable helper functions or utility modules. If you write the same logic twice, you have failed.
+- **Generic Components**: Design React components to be as generic and reusable as possible, accepting props to customize behavior and appearance. Components MUST be designed for reuse from the start.
+- **Shared Types/Schemas**: Leverage `@circuitry/shared` for all common types, interfaces, and Zod schemas to ensure consistency and avoid duplication across `frontend` and `transpiler`.
+- **Custom Hooks**: For shared stateful logic in React, create custom hooks. ANY repeated stateful pattern MUST become a hook.
+- **Before Writing Code**: ALWAYS search the codebase first to check if similar functionality exists. Reuse and extend existing code rather than creating new duplicates.
+- **Refactor Immediately**: If you discover existing duplication while working, refactor it into a shared abstraction before proceeding.
+
+**ABSOLUTELY FORBIDDEN - VIOLATIONS WILL NOT BE ACCEPTED**:
+
+- **Copy-pasting code**: NEVER duplicate blocks of code under any circumstances. If you find yourself copying and pasting, STOP and create a reusable function, component, or hook instead.
+- **Redundant Type Definitions**: NEVER redefine types or interfaces that already exist in `@circuitry/shared` or can be derived from existing schemas.
+- **Similar but slightly different implementations**: If two pieces of code do similar things, they MUST be unified into a single parameterized implementation.
+- **Duplicated constants or configuration**: All shared values MUST be defined once and imported where needed.
+- **Repeated UI patterns**: Any UI pattern used more than once MUST be extracted into a reusable component.
+
+**THE RULE IS SIMPLE: If code appears more than once, it's wrong. No exceptions.**
+
+# Cutting a New Release
+
+To cut a new release, follow these steps:
+
+**Important:** Before tagging and releasing, always bump the version in `custom_components/circuitry/manifest.json` to match the new release version.
+
+**All information for the release (version number and release notes) must be automatically derived from the git commit history since the last release.**
+
+- The version number should be determined based on semantic versioning and recent changes.
+- The release notes should be compiled from user-facing changes in the commit history (new features, bug fixes, breaking changes), without requiring user input.
+
+1. **Commit your changes**
+
+- Ensure all changes are staged and committed with a clear message.
+- Bump the version in `custom_components/circuitry/manifest.json` to the new release version (e.g., "0.7.7").
+- Example:
+  ```bash
+  # Edit manifest.json and update the version field
+  git add .
+  git commit -m "Release: v0.x.x - <short description>"
+  ```
+
+2. **Create a new git tag**
+
+- Use semantic versioning (e.g., v0.7.7). For 1.x.x.
+- Example:
+  ```bash
+  git tag v0.7.7
+  ```
+
+3. **Push changes to remote**
+
+- Push your commits and tags to the remote repository.
+- Example:
+  ```bash
+  git push origin main
+  git push origin --tags
+  ```
+
+4. **Create a GitHub release**
+
+- Use the GitHub CLI (`gh`) to create a release.
+- **Include the changelog in the GitHub release notes. Do NOT create a literal CHANGELOG.md file.**
+- The changelog must be compiled automatically from the git commit history since the last release, focusing on user-facing changes:
+  - New features
+  - Bug fixes
+  - Breaking changes
+- Example:
+
+```bash
+# IMPORTANT: Use real newlines in the --notes argument, not literal \n. For multiline notes, write each line on a new line inside the string.
+gh release create v0.7.7 --title "Circuitry v0.7.7" --notes "<release notes>"
+```
+
+5. **Verify release on GitHub**
+
+- Check the Releases page to confirm the new release is published.
+
+**Note:** Do not cut a release without explicit user approval. Always confirm before pushing tags or creating releases.

@@ -1,0 +1,396 @@
+@import '@xyflow/react/dist/style.css' layer(base);
+
+@import 'tailwindcss';
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-border: hsl(var(--border));
+  --color-input: hsl(var(--input));
+  --color-ring: hsl(var(--ring));
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+
+  --color-secondary: hsl(var(--secondary));
+  --color-secondary-foreground: hsl(var(--secondary-foreground));
+
+  --color-destructive: hsl(var(--destructive));
+  --color-destructive-foreground: hsl(var(--destructive-foreground));
+
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+
+  --color-accent: hsl(var(--accent));
+  --color-accent-foreground: hsl(var(--accent-foreground));
+
+  --color-popover: hsl(var(--popover));
+  --color-popover-foreground: hsl(var(--popover-foreground));
+
+  --color-card: hsl(var(--card));
+  --color-card-foreground: hsl(var(--card-foreground));
+
+  --color-warning: hsl(var(--warning));
+  --color-warning-foreground: hsl(var(--warning-foreground));
+
+  --color-success: hsl(var(--success));
+  --color-success-foreground: hsl(var(--success-foreground));
+
+  --color-info: hsl(var(--info));
+  --color-info-foreground: hsl(var(--info-foreground));
+
+  /* Node-type colors — trigger/condition/action derive from HA's
+     warning/info/success-color at runtime (lib/ha-theme.ts);
+     delay/wait/variables are Circuitry-only hues without an HA equivalent. */
+  --color-trigger: hsl(var(--trigger));
+  --color-trigger-foreground: hsl(var(--trigger-foreground));
+
+  --color-condition: hsl(var(--condition));
+  --color-condition-foreground: hsl(var(--condition-foreground));
+
+  --color-action: hsl(var(--action));
+  --color-action-foreground: hsl(var(--action-foreground));
+
+  --color-delay: hsl(var(--delay));
+  --color-delay-foreground: hsl(var(--delay-foreground));
+
+  --color-wait: hsl(var(--wait));
+  --color-wait-foreground: hsl(var(--wait-foreground));
+
+  --color-variables: hsl(var(--variables));
+  --color-variables-foreground: hsl(var(--variables-foreground));
+
+  --color-start: hsl(var(--start));
+  --color-start-foreground: hsl(var(--start-foreground));
+
+  --color-join: hsl(var(--join));
+  --color-join-foreground: hsl(var(--join-foreground));
+
+  /* Light solid tint for canvas node cards/icon chips — a real opaque color
+     (not the vivid --{token} at reduced opacity) per user request to remove
+     translucency from canvas nodes. See node-colors.ts's `bg`/`chip`. */
+  --color-trigger-subtle: hsl(var(--trigger-subtle));
+  --color-condition-subtle: hsl(var(--condition-subtle));
+  --color-action-subtle: hsl(var(--action-subtle));
+  --color-delay-subtle: hsl(var(--delay-subtle));
+  --color-wait-subtle: hsl(var(--wait-subtle));
+  --color-variables-subtle: hsl(var(--variables-subtle));
+  --color-start-subtle: hsl(var(--start-subtle));
+  --color-join-subtle: hsl(var(--join-subtle));
+
+  /* HA's real corner-radius scale (home-assistant/frontend's core.globals.ts,
+     fixed global constants, not per-theme) — verified against source
+     03.07.2026, not per-component guesses. */
+  --radius-sm: var(--ha-radius-sm);
+  --radius-md: var(--ha-radius-md);
+  --radius-lg: var(--ha-radius-lg);
+  --radius-xl: var(--ha-radius-xl);
+  --radius-dialog: var(--ha-radius-dialog);
+  --radius-pill: var(--ha-radius-pill);
+}
+
+/*
+  The default border color has changed to `currentcolor` in Tailwind CSS v4,
+  so we've added these compatibility styles to make sure everything still
+  looks the same as it did with Tailwind CSS v3.
+
+  If we ever want to remove these styles, we need to add an explicit border
+  color utility to any element that depends on these defaults.
+*/
+@layer base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--color-gray-200, currentcolor);
+  }
+}
+
+@layer base {
+  /* :host matches the circuitry-panel custom element itself when this stylesheet
+     runs inside its Shadow DOM (panel mode); :root matches the real <html>
+     in standalone dev, where there's no shadow root at all. :root alone
+     never matches anything inside a shadow tree — that silently broke every
+     variable below that isn't also mirrored via lib/ha-theme.ts's inline
+     style writes (which target a real in-tree element, not :root). */
+  :root,
+  :host {
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222.2 84% 4.9%;
+    --primary: 222.2 47.4% 11.2%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 210 40% 96.1%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+    --accent: 210 40% 96.1%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 222.2 84% 4.9%;
+
+    /* HA's corner-radius scale — fixed global constants (not per-theme,
+       not synced via lib/ha-theme.ts), matching home-assistant/frontend's
+       core.globals.ts exactly. Small controls (inputs, dropdown items) use
+       sm; cards/panels use lg (= --ha-card-border-radius default); dialogs
+       use the verified ha-dialog radius; buttons default to a full pill,
+       matching ha-button's own default (--ha-button-border-radius). */
+    --ha-radius-sm: 4px;
+    --ha-radius-md: 8px;
+    --ha-radius-lg: 12px;
+    --ha-radius-xl: 16px;
+    --ha-radius-dialog: 24px;
+    --ha-radius-pill: 9999px;
+
+    /* Status colors — mirrored from HA's warning/success/info-color at runtime, see lib/ha-theme.ts */
+    --warning: 39 100% 50%;
+    --warning-foreground: 20 14% 10%;
+    --success: 123 41% 44%;
+    --success-foreground: 0 0% 100%;
+    --info: 200 97% 45%;
+    --info-foreground: 0 0% 100%;
+
+    /* Node type colors — trigger/condition/action mirror HA's warning/info/success-color
+       at runtime (lib/ha-theme.ts); delay/wait/variables are Circuitry-only hues, not HA-derived. */
+    --trigger: 39 100% 50%;
+    --trigger-foreground: 20 14% 10%;
+    --condition: 200 97% 45%;
+    --condition-foreground: 0 0% 100%;
+    --action: 123 41% 44%;
+    --action-foreground: 0 0% 100%;
+    --delay: 271 81% 56%;
+    --delay-foreground: 0 0% 100%;
+    --wait: 24 95% 53%;
+    --wait-foreground: 0 0% 100%;
+    --variables: 189 94% 43%;
+    --variables-foreground: 0 0% 100%;
+    --start: 158 64% 40%;
+    --start-foreground: 0 0% 100%;
+    --join: 258 70% 58%;
+    --join-foreground: 0 0% 100%;
+
+    /* Light solid tint — same hue as the token above, desaturated + pushed
+       near-white so it reads as a pastel card color rather than a washed-out
+       transparency over whatever's behind it. */
+    --trigger-subtle: 39 95% 92%;
+    --condition-subtle: 200 90% 94%;
+    --action-subtle: 123 45% 93%;
+    --delay-subtle: 271 70% 95%;
+    --wait-subtle: 24 90% 93%;
+    --variables-subtle: 189 80% 93%;
+    --start-subtle: 158 50% 93%;
+    --join-subtle: 258 65% 95%;
+  }
+
+  .dark {
+    --background: 222.2 84% 4.9%;
+    --foreground: 210 40% 98%;
+    --card: 222.2 84% 4.9%;
+    --card-foreground: 210 40% 98%;
+    --popover: 222.2 84% 4.9%;
+    --popover-foreground: 210 40% 98%;
+    --primary: 210 40% 98%;
+    --primary-foreground: 222.2 47.4% 11.2%;
+    --secondary: 217.2 32.6% 17.5%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 217.2 32.6% 17.5%;
+    --muted-foreground: 215 20.2% 65.1%;
+    --accent: 217.2 32.6% 17.5%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 217.2 32.6% 17.5%;
+    --input: 217.2 32.6% 17.5%;
+    --ring: 212.7 26.8% 83.9%;
+
+    /* Status colors - dark mode */
+    --warning: 36 100% 65%;
+    --warning-foreground: 20 14% 10%;
+    --success: 123 38% 57%;
+    --success-foreground: 0 0% 100%;
+    --info: 199 91% 64%;
+    --info-foreground: 20 14% 10%;
+
+    /* Node type colors - dark mode */
+    --trigger: 36 100% 65%;
+    --trigger-foreground: 20 14% 10%;
+    --condition: 199 91% 64%;
+    --condition-foreground: 20 14% 10%;
+    --action: 123 38% 57%;
+    --action-foreground: 0 0% 100%;
+    --delay: 271 91% 65%;
+    --delay-foreground: 0 0% 100%;
+    --wait: 27 96% 61%;
+    --wait-foreground: 20 14% 10%;
+    --variables: 186 91% 55%;
+    --variables-foreground: 20 14% 10%;
+    --start: 158 55% 52%;
+    --start-foreground: 0 0% 100%;
+    --join: 258 75% 68%;
+    --join-foreground: 0 0% 100%;
+
+    /* Dark-mode solid tint — same hue, desaturated + darkened so it reads as
+       a distinct tinted card against the near-black background rather than
+       a transparency wash. */
+    --trigger-subtle: 36 45% 22%;
+    --condition-subtle: 199 40% 22%;
+    --action-subtle: 123 30% 20%;
+    --delay-subtle: 271 40% 24%;
+    --wait-subtle: 27 45% 22%;
+    --variables-subtle: 186 40% 20%;
+    --start-subtle: 158 30% 20%;
+    --join-subtle: 258 40% 24%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  /* :host matches the circuitry-panel custom element in panel mode — Circuitry never
+     has a real <body> inside its Shadow DOM there, so `body` alone left
+     `color` unset and it silently inherited HA's real ambient text color
+     from outside the shadow boundary instead of Circuitry's own --foreground.
+     That went unnoticed as long as Circuitry only ever mirrored the real HA
+     theme (the inherited color always happened to match), but breaks the
+     moment Circuitry's light/dark override diverges from the user's actual HA
+     theme (e.g. forcing light while signed in with a dark HA theme leaves
+     text light-colored on a light background). :root covers standalone dev,
+     which has a real <html>/<body>. */
+  :root,
+  :host,
+  body {
+    @apply bg-background text-foreground;
+  }
+
+  /* Always-visible thin scrollbar for every scrollable region (Miller-dialog
+   * columns especially — see ThenActionDialog.tsx/AndConditionDialog.tsx/
+   * WhenTriggerDialog.tsx's `overflow-y-auto` columns). Without this, macOS's
+   * default "only show scrollbars while scrolling" setting hides any
+   * indication a column has more content below the fold — reported as the
+   * Then miller's "Stop"/"Test a condition" Blocks entries appearing to be
+   * entirely missing, when they were just scrolled out of view with zero
+   * visual hint that scrolling was possible. Firefox uses the two
+   * `scrollbar-*` properties; every Chromium/WebKit browser (including the
+   * HA desktop app's embedded webview) uses the `::-webkit-scrollbar` rules.
+   */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--muted-foreground) / 50%) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  *::-webkit-scrollbar-thumb {
+    background-color: hsl(var(--muted-foreground) / 50%);
+    border-radius: 9999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: hsl(var(--muted-foreground) / 75%);
+  }
+}
+
+/* React Flow customizations */
+.react-flow__node {
+  @apply font-sans;
+}
+
+/* Canvas background — a soft radial vignette under the two-tier dot/line
+   grid (see FlowCanvas.tsx), rather than one flat fill color, so the canvas
+   reads as a lit surface with depth instead of a plain colored rectangle.
+   Per user request to modernize the canvas background. Uses the theme's own
+   --background/--muted tokens (see @theme inline above) so it follows
+   light/dark and any HA-theme-synced override automatically — see
+   hooks/useHaThemeSync.ts — rather than hardcoded colors. */
+.canvas-modern-bg {
+  background-color: hsl(var(--background));
+  background-image: radial-gradient(ellipse at center, hsl(var(--muted) / 55%) 0%, hsl(var(--background) / 0%) 70%);
+}
+
+/* The zoom/pan Controls widget (bottom-left) has its own internal
+   light/dark default colors via ReactFlow's --xy-controls-button-* custom
+   properties, switched by a `.dark` class on the `.react-flow` root
+   (FlowCanvas.tsx toggles it directly) — entirely separate from Circuitry's
+   own --card/--foreground tokens. Under some real HA themes (glass/blur
+   styles like "Vision OS" in particular) that left the button background
+   and icon color landing too close together to read, since ReactFlow's own
+   defaults have no idea what the actual page looks like. Pinning these to
+   the same tokens used everywhere else keeps it consistent and legible
+   regardless of what a given HA theme's own palette happens to be. */
+.react-flow__controls {
+  --xy-controls-button-background-color: hsl(var(--card));
+  --xy-controls-button-background-color-hover: hsl(var(--accent));
+  --xy-controls-button-color: hsl(var(--foreground));
+  --xy-controls-button-color-hover: hsl(var(--foreground));
+  --xy-controls-button-border-color: hsl(var(--border));
+}
+
+.react-flow__handle {
+  @apply size-4!;
+}
+
+.react-flow__edge-path {
+  stroke-width: 2;
+}
+
+.react-flow__edge.animated path {
+  stroke-dasharray: 5;
+  animation: dash 0.5s linear infinite;
+}
+
+@keyframes dash {
+  to {
+    stroke-dashoffset: -10;
+  }
+}
+
+/* Node active/simulation states */
+.node-active {
+  @apply ring-4 ring-success/75;
+  animation: pulse 1s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.8;
+  }
+}
+
+/* Save button animation for unsaved changes */
+@keyframes save-pulse {
+  0%, 100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 hsl(var(--warning) / 70%);
+  }
+  50% {
+    transform: scale(1.05);
+    box-shadow: 0 0 0 10px hsl(var(--warning) / 0%);
+  }
+}
+
+.save-button-unsaved {
+  animation: save-pulse 2s infinite;
+}
+
+.save-button-unsaved-dark {
+  animation: save-pulse 2s infinite;
+}

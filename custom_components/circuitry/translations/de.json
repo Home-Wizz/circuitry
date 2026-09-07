@@ -1,0 +1,47 @@
+{
+  "config": {
+    "title": "Circuitry",
+    "step": {
+      "user": {
+        "title": "Circuitry einrichten",
+        "description": "Circuitry ist ein visueller Automatisierungseditor für Home Assistant. Erstelle und verwalte deine Automatisierungen mit einem grafischen Flow-Editor.\n\nKlicke auf Senden, um Circuitry zu deinem Home Assistant hinzuzufügen."
+      }
+    },
+    "abort": {
+      "already_configured": "Circuitry ist bereits eingerichtet"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Circuitry-Optionen",
+        "description": "Überschreibt die Sprache, die Circuitrys eigene Oberfläche verwendet, unabhängig von Home Assistants aktiver Sprache.",
+        "data": {
+          "language": "Sprache"
+        }
+      }
+    }
+  },
+  "issues": {
+    "lossy_import": {
+      "title": "Circuitry konnte eine importierte Automatisierung nicht vollständig verstehen",
+      "description": "Der Import von **{entity_id}** in Circuitry ist nicht verlustfrei round-getrippt — einige Teile der Automatisierung wurden nicht erkannt und fehlen im Editor möglicherweise oder wurden vereinfacht:\n\n{details}\n\nPrüfe die Automatisierung in Circuitry und vergleiche sie mit ihrem YAML, bevor du speicherst, um die nicht erkannten Teile nicht zu verlieren."
+    }
+  },
+  "services": {
+    "report_import_issue": {
+      "name": "Verlustbehafteten Import melden",
+      "description": "Erstellt ein Repair-Issue für eine Automatisierung, die Circuitry beim Import nicht verlustfrei round-trippen konnte. Wird von Circuitrys eigenem Frontend aufgerufen — nicht zur direkten Nutzung gedacht.",
+      "fields": {
+        "entity_id": {
+          "name": "Entity-ID",
+          "description": "Die importierte Automatisierungs-Entity."
+        },
+        "warnings": {
+          "name": "Warnungen",
+          "description": "Die Parser-Warnungen, die erklären, was nicht erkannt wurde."
+        }
+      }
+    }
+  }
+}

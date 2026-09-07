@@ -1,0 +1,39 @@
+{
+  "name": "@circuitry/transpiler",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "circuitry": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "cli": "npx tsx src/cli.ts"
+  },
+  "dependencies": {
+    "@circuitry/shared": "workspace:*",
+    "commander": "^15.0.0",
+    "elkjs": "^0.11.1",
+    "graphlib": "^2.1.8",
+    "js-yaml": "^4.2.0",
+    "uuid": "^14.0.1"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^26.1.0",
+    "@types/uuid": "^11.0.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.9"
+  }
+}

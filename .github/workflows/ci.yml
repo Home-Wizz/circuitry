@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test & Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: "yarn"
+
+      - name: Install dependencies
+        run: yarn install --immutable
+
+      - name: Type checking
+        run: yarn typecheck
+
+      - name: Run tests
+        run: yarn test
+
+      - name: Build packages
+        run: yarn build
+
+  publish-check:
+    name: Publish Check
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: "yarn"
+
+      - name: Install dependencies
+        run: yarn install --immutable
+
+      - name: Build
+        run: yarn build
+
+      - name: Check integration files exist
+        run: |
+          if [ ! -f "custom_components/circuitry/www/index.html" ]; then
+            echo "❌ Build fehlgeschlagen - index.html fehlt"
+            exit 1
+          fi
+          if [ ! -d "custom_components/circuitry/www/assets" ]; then
+            echo "❌ Build fehlgeschlagen - assets Verzeichnis fehlt"
+            exit 1
+          fi
+          echo "✅ Build erfolgreich"
