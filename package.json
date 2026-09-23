@@ -1,5 +1,6 @@
 {
   "name": "circuitry",
+  "license": "Apache-2.0",
   "private": true,
   "packageManager": "yarn@4.17.0",
   "workspaces": [
