@@ -7,7 +7,7 @@ import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
-from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers import config_validation as cv, issue_registry as ir
 from homeassistant.helpers.typing import ConfigType
 
 from .const import DOMAIN
@@ -25,6 +25,15 @@ REPORT_IMPORT_ISSUE_SCHEMA = vol.Schema(
         vol.Required("warnings"): [str],
     }
 )
+
+# Circuitry has no YAML configuration -- it's set up entirely via a config
+# entry (the UI). async_setup() below only wires up websocket commands and
+# canonical graph storage, it doesn't accept or parse YAML options. This
+# tells hassfest (and HA's YAML loader) that explicitly, per
+# homeassistant.helpers.config_validation.config_entry_only_config_schema's
+# own docstring: "Use this when an integration's __init__.py defines setup
+# or async_setup but setup from yaml is not supported."
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
