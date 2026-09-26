@@ -24,6 +24,8 @@
 
 ---
 
+> **Beta:** Circuitry is under active development. Back up your automations before editing them, and please report anything that behaves differently from what the canvas shows.
+>
 > **Fork notice:** Circuitry is a further fork of [FLODE](https://github.com/SH1FT-W/flode) by [@SH1FT-W](https://github.com/SH1FT-W), which is itself based on [C.A.F.E.](https://github.com/FezVrasta/cafe-hass) by [@FezVrasta](https://github.com/FezVrasta) — with numerous bug fixes, new features, and this rebrand on top. All changes are documented in the [CHANGELOG](CHANGELOG.md), including the point where the rebrand happened.
 >
 > **Note:** Circuitry is designed not to overwrite any existing data. Nevertheless, we recommend backing up your automations before editing them. If you're upgrading from FLODE, see the [Upgrading from FLODE](#upgrading-from-flode) section below.
