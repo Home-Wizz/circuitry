@@ -209,29 +209,38 @@ function shortestDistance(ctx: Ctx, start: string, target: string): number {
 }
 
 /**
- * Mirrors state-machine.ts's private findLoopBackConvergence RULE exactly
- * (read directly from source): every target's outgoing edges must be
- * either absent, or ALL back-edges pointing at the same single node. A
- * fan-out whose branches dead-end into a loop's own back-edge, rather than
- * an ordinary downstream node, still has a well-defined shared
- * continuation -- the loop condition/entry they all loop back to.
+ * Mirrors state-machine.ts's private findLoopBackConvergence RULE: every
+ * branch's ways out (dead ends, and back-edges leaving the branch's own
+ * forward-reachable subgraph) must be back-edges to one and the same node.
+ * A fan-out whose branches loop back rather than reaching an ordinary
+ * downstream node still has a well-defined shared continuation -- the
+ * loop head they all return to.
  */
 function findLoopBackConvergence(ctx: Ctx, targetIds: string[]): string | null {
+  // Bug #25 (2026-09-26): each branch's exits are its dead ends and the
+  // back-edges leaving its whole forward-reachable subgraph (not just the
+  // target node's own edges -- a multi-step branch at the end of a loop
+  // body used to fall through to END). Every exit must be a back-edge to
+  // the same one node.
   let loopTarget: string | null = null;
-  let sawBackEdge = false;
   for (const id of targetIds) {
-    const outgoing = outgoingEdges(ctx, id);
-    if (outgoing.length === 0) continue;
-    const backEdgesOut = outgoing.filter((e) => ctx.backEdgeIds.has(e.id));
-    if (backEdgesOut.length !== outgoing.length) return null;
-    const backTargets = new Set(backEdgesOut.map((e) => e.target));
-    if (backTargets.size !== 1) return null;
-    const [backTarget] = [...backTargets];
-    if (loopTarget !== null && loopTarget !== backTarget) return null;
-    loopTarget = backTarget;
-    sawBackEdge = true;
+    const reachable = new Set<string>();
+    const queue = [id];
+    while (queue.length > 0) {
+      const nodeId = queue.shift()!;
+      if (reachable.has(nodeId)) continue;
+      reachable.add(nodeId);
+      for (const e of forwardOutgoing(ctx, nodeId)) queue.push(e.target);
+    }
+    for (const nodeId of reachable) {
+      for (const e of outgoingEdges(ctx, nodeId)) {
+        if (!ctx.backEdgeIds.has(e.id) || reachable.has(e.target)) continue;
+        if (loopTarget !== null && loopTarget !== e.target) return null;
+        loopTarget = e.target;
+      }
+    }
   }
-  return sawBackEdge ? loopTarget : null;
+  return loopTarget;
 }
 
 /**
@@ -319,20 +328,95 @@ function resolveTransition(ctx: Ctx, rawTargetIds: string[], midFlow: boolean): 
 }
 
 function buildLeafState(ctx: Ctx, node: FlowNode): LeafState {
-  const ownStep = normalizeNodeAction(node);
+  // Phase 5 (2026-09-26): a disabled node's own step is skipped by HA, so
+  // it contributes nothing (extractFromYaml.ts drops `enabled: false`
+  // steps the same way).
+  const ownStep =
+    (node.data as Record<string, unknown> | undefined)?.enabled === false
+      ? null
+      : normalizeNodeAction(node);
   const targets = outgoingEdges(ctx, node.id).map((e) => e.target);
   const transition = resolveTransition(ctx, targets, true);
   return { kind: 'leaf', ownStep, transition };
+}
+
+/**
+ * Bug #23 (2026-09-26): a count loop's test condition (`{{
+ * _repeat_counter_X < N }}`) loops back via its true edge to the loop's
+ * INIT node (`X = 0`) -- YamlParser's convention for "run the body again",
+ * the way extractFromGraph.ts and NativeStrategy read it. Taken literally
+ * it re-runs `X = 0` every iteration and never finishes, so for that edge
+ * the real next states are the init node's own successors.
+ */
+function countLoopRepeatTargets(ctx: Ctx, node: ConditionNode, targetId: string): string[] | null {
+  const data = node.data as Record<string, unknown>;
+  if (data.condition !== 'template' || typeof data.value_template !== 'string') return null;
+  const counter = data.value_template.match(/(_repeat_counter_[A-Za-z0-9_]+)\s*<\s*\d+/)?.[1];
+  if (!counter) return null;
+  const target = ctx.flow.nodes.find((n) => n.id === targetId);
+  if (target?.type !== 'set_variables') return null;
+  const vars = (target.data as Record<string, unknown>).variables as
+    | Record<string, unknown>
+    | undefined;
+  if (!vars || Object.keys(vars).length !== 1 || vars[counter] !== 0) return null;
+  return outgoingEdges(ctx, targetId).map((e) => e.target);
+}
+
+/**
+ * Bug #27 (2026-09-26): a condition with no false edge that is the 2nd+
+ * member of a multi-condition list (`if: [A, B]` and friends are wired A
+ * -true-> B with only A's false edge) or a canvas AND-chain shares the
+ * list head's false targets; NativeStrategy and extractFromGraph.ts have
+ * always read it that way. Member test: its only incoming edge is the
+ * single true edge of a condition, it carries no `_blockKey` (a nested
+ * construct head's missing false edge means "nothing happens" -- bug #21),
+ * and the parent's false targets don't lead back to it (then it's where the
+ * parent's branches meet again -- bug #26). Otherwise [] (END).
+ */
+function andMemberFalseTargets(ctx: Ctx, conditionId: string, seen: Set<string>): string[] {
+  if (seen.has(conditionId)) return [];
+  seen.add(conditionId);
+  const node = ctx.flow.nodes.find((n) => n.id === conditionId);
+  if (node?.type !== 'condition') return [];
+  const own = outgoingEdges(ctx, conditionId).filter((e) => e.sourceHandle === 'false');
+  if (own.length > 0) return own.map((e) => e.target);
+  if (typeof (node.data as Record<string, unknown>)._blockKey === 'string') return [];
+  const incoming = ctx.flow.edges.filter(
+    (e) => e.target === conditionId && !ctx.backEdgeIds.has(e.id)
+  );
+  if (incoming.length !== 1 || incoming[0].sourceHandle !== 'true') return [];
+  const parent = ctx.flow.nodes.find((n) => n.id === incoming[0].source);
+  if (parent?.type !== 'condition') return [];
+  if (outgoingEdges(ctx, parent.id).filter((e) => e.sourceHandle === 'true').length !== 1)
+    return [];
+  const parentElse = andMemberFalseTargets(ctx, parent.id, seen);
+  const reaches = (from: string): boolean => {
+    const visited = new Set<string>();
+    const queue = [from];
+    while (queue.length > 0) {
+      const id = queue.shift()!;
+      if (id === conditionId) return true;
+      // Never through the parent (an else looping back to an enclosing
+      // loop's head reaches the member only around the loop).
+      if (visited.has(id) || id === parent.id) continue;
+      visited.add(id);
+      for (const e of forwardOutgoing(ctx, id)) queue.push(e.target);
+    }
+    return false;
+  };
+  return parentElse.some(reaches) ? [] : parentElse;
 }
 
 function buildConditionState(ctx: Ctx, node: ConditionNode): ConditionState {
   const cond = parseConditionExpr(node.data as Record<string, unknown>);
   const trueTargets = outgoingEdges(ctx, node.id)
     .filter((e) => e.sourceHandle === 'true')
-    .map((e) => e.target);
-  const falseTargets = outgoingEdges(ctx, node.id)
+    .flatMap((e) => countLoopRepeatTargets(ctx, node, e.target) ?? [e.target]);
+  const ownFalse = outgoingEdges(ctx, node.id)
     .filter((e) => e.sourceHandle === 'false')
     .map((e) => e.target);
+  const falseTargets =
+    ownFalse.length > 0 ? ownFalse : andMemberFalseTargets(ctx, node.id, new Set());
   return {
     kind: 'condition',
     cond,

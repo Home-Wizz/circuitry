@@ -1,12 +1,14 @@
 import type { FlowGraph } from '@circuitry/shared';
 import { load as yamlLoad } from 'js-yaml';
+import { normalizeGraph } from '../analyzer/normalize';
 import type { BProgram } from './behaviorProgram';
 import { programsEquivalent } from './behaviorProgram';
 import { boolExprEquivalent } from './boolean';
-import { compareTriggerSets } from './verifyNativeOutput';
+import { extractGraphSettings } from './extractFromGraph';
+import { extractYamlSettings } from './extractFromYaml';
 import {
-  extractStateMachineFromGraph,
   type EntrySpec,
+  extractStateMachineFromGraph,
   type LeafState,
   type ParallelEntrySpec,
   type StateSpec,
@@ -19,6 +21,7 @@ import {
   type YamlStateSpec,
   type YamlTransition,
 } from './extractStateMachineFromYaml';
+import { compareMetadata, compareTriggerSets } from './verifyNativeOutput';
 
 export interface VerifyResult {
   valid: boolean;
@@ -65,7 +68,13 @@ export interface VerifyResult {
  * canHandle() is unconditionally true) -- see FlowTranspiler.ts's own
  * wiring decision for what happens when this reports invalid.
  */
-export function verifyStateMachineOutput(originalFlow: FlowGraph, candidateYaml: string): VerifyResult {
+export function verifyStateMachineOutput(
+  canvasFlow: FlowGraph,
+  candidateYaml: string
+): VerifyResult {
+  // Decision D1 / bug #28: verify against the graph as the strategies read
+  // it (a no-op for a graph FlowTranspiler already normalized).
+  const originalFlow = normalizeGraph(canvasFlow);
   let config: unknown;
   try {
     config = yamlLoad(candidateYaml);
@@ -106,6 +115,17 @@ export function verifyStateMachineOutput(originalFlow: FlowGraph, candidateYaml:
   // that file's own doc comment warns about).
   const triggerDiff = compareTriggerSets(graph.triggers, yaml.triggers);
   if (triggerDiff) return { valid: false, reason: triggerDiff };
+
+  // Bug #20 (2026-09-26): mode, max, max_exceeded, initial_state, trace,
+  // top-level variables and trigger_variables were never compared here, so
+  // StateMachineStrategy silently dropping five of them passed the gate.
+  // Same comparison verifyNativeOutput has always made. Checked before the
+  // isEmpty early return below for the same reason as the triggers.
+  const settingsDiff = compareMetadata(
+    extractGraphSettings(originalFlow),
+    extractYamlSettings(config as Record<string, unknown>)
+  );
+  if (settingsDiff) return { valid: false, reason: settingsDiff };
 
   if (graph.isEmpty) return { valid: true };
   if (yaml.malformed) return { valid: false, reason: yaml.malformed };

@@ -1,5 +1,6 @@
 import type { FlowGraph } from '@circuitry/shared';
 import { dump as yamlDump } from 'js-yaml';
+import { normalizeGraph } from './analyzer/normalize';
 import { analyzeTopology, type TopologyAnalysis } from './analyzer/topology';
 import { type ValidationResult, validateFlowGraph } from './analyzer/validator';
 import { type ParseResult, YamlParser } from './parser/YamlParser';
@@ -43,6 +44,16 @@ export interface TranspileResult {
    * Parsed YAML object (automation or script)
    */
   output?: HAYamlOutput;
+  /**
+   * The exact automation (or script) object `yaml` is the serialization
+   * of: `output`'s automation/script plus the flow's top-level
+   * `variables` and `_circuitry_metadata`. This, not `output`, is what a
+   * caller should save to Home Assistant -- it is what the verification
+   * gate checked. (Bug #39, 2026-09-26: the app saved `output.automation`
+   * with metadata of its own, which dropped the top-level `variables:`
+   * of every state-machine automation, and the decompile hints.)
+   */
+  config?: Record<string, unknown>;
   /**
    * Topology analysis results
    */
@@ -93,7 +104,12 @@ export class FlowTranspiler {
       };
     }
 
-    const flow = validation.graph;
+    // Step 1b: normalize (analyzer/normalize.ts). An until loop whose body
+    // opens with another loop gets its own entry node, the way YamlParser
+    // does for the same shape (bug #28, loop-entry-anchors.ts), and every
+    // path that just ends gets one meaning (decision D1, path-endings.ts).
+    // Generation AND verification both use the normalized graph.
+    const flow = normalizeGraph(validation.graph);
 
     // Step 2: Analyze topology
     const analysis = this.analyzeTopology(flow);
@@ -151,7 +167,13 @@ export class FlowTranspiler {
     }
 
     // Steps 4-6: Generate YAML output, inject _circuitry_metadata, serialize.
-    let { output, yaml } = this.generateAndSerialize(flow, strategy, analysis, options, warnings);
+    let { output, yaml, config } = this.generateAndSerialize(
+      flow,
+      strategy,
+      analysis,
+      options,
+      warnings
+    );
 
     // Step 7: Behavioral-equivalence verification gate for NativeStrategy
     // output (Phase B task #10 -- see verification/verifyNativeOutput.ts's
@@ -207,7 +229,13 @@ export class FlowTranspiler {
             `(${verification.reason ?? 'unspecified mismatch'}); fell back to the state-machine strategy.`
         );
         strategy = this.strategies.find((s) => s.name === 'state-machine') ?? new StateMachineStrategy();
-        ({ output, yaml } = this.generateAndSerialize(flow, strategy, analysis, options, warnings));
+        ({ output, yaml, config } = this.generateAndSerialize(
+          flow,
+          strategy,
+          analysis,
+          options,
+          warnings
+        ));
       }
     }
 
@@ -251,6 +279,7 @@ export class FlowTranspiler {
       success: true,
       yaml,
       output,
+      config,
       analysis,
       warnings,
     };
@@ -271,7 +300,7 @@ export class FlowTranspiler {
     analysis: TopologyAnalysis,
     options: YamlOptions,
     warnings: string[]
-  ): { output: HAYamlOutput; yaml: string } {
+  ): { output: HAYamlOutput; yaml: string; config?: Record<string, unknown> } {
     const output = strategy.generate(flow, analysis);
     warnings.push(...output.warnings);
 
@@ -282,9 +311,15 @@ export class FlowTranspiler {
     // save from here on writes the current key.
     const yamlContent = output.automation ?? output.script;
     let yaml: string;
+    let config: Record<string, unknown> | undefined;
 
     if (yamlContent && typeof yamlContent === 'object') {
-      const metadata = this.generateCircuitryMetadata(flow, strategy, output.nodeOrder);
+      const metadata = this.generateCircuitryMetadata(
+        flow,
+        strategy,
+        output.nodeOrder,
+        output.fanOuts
+      );
       const contentWithMetadata = {
         ...yamlContent,
         variables: {
@@ -297,6 +332,7 @@ export class FlowTranspiler {
         },
       };
 
+      config = contentWithMetadata;
       yaml = yamlDump(contentWithMetadata, {
         indent: options.indent ?? 2,
         lineWidth: options.lineWidth ?? -1,
@@ -313,7 +349,7 @@ export class FlowTranspiler {
       });
     }
 
-    return { output, yaml };
+    return { output, yaml, config };
   }
 
   /**
@@ -399,10 +435,41 @@ export class FlowTranspiler {
    * nodes by literal ID embedded in choose-block templates, not by
    * position, so it was never exposed to this bug).
    */
+  /**
+   * Phase 5 (2026-09-26): the construct markers of every condition that has
+   * them, and the kind and data of every pass-through node, for
+   * `_circuitry_metadata.markers` (state-machine output only -- native
+   * YAML's structure already says what each node is).
+   */
+  private constructMarkers(flow: FlowGraph): Record<string, Record<string, unknown>> {
+    const markers: Record<string, Record<string, unknown>> = {};
+    for (const node of flow.nodes) {
+      const data = node.data as Record<string, unknown>;
+      const m: Record<string, unknown> = {};
+      if (node.type === 'condition') {
+        for (const key of ['_blockKey', '_chooseCase', '_chooseCaseTotal']) {
+          if (data[key] !== undefined) m[key] = data[key];
+        }
+      } else if (
+        node.type === 'join' ||
+        node.type === 'sequence_start' ||
+        node.type === 'sequence_end'
+      ) {
+        m.type = node.type;
+        for (const key of ['alias', 'enabled', 'mode']) {
+          if (data[key] !== undefined) m[key] = data[key];
+        }
+      }
+      if (Object.keys(m).length > 0) markers[node.id] = m;
+    }
+    return markers;
+  }
+
   private generateCircuitryMetadata(
     flow: FlowGraph,
     strategy: TranspilerStrategy,
-    nodeOrder?: string[]
+    nodeOrder?: string[],
+    fanOuts?: Record<string, { targets: string[]; hash: string }>
   ): Record<string, unknown> {
     const nodePositions: Record<string, { x: number; y: number }> = {};
     const nodesById = new Map(flow.nodes.map((node) => [node.id, node]));
@@ -429,6 +496,8 @@ export class FlowTranspiler {
       graph_id: flow.id,
       graph_version: flow.version,
       strategy: strategy.name,
+      ...(fanOuts && Object.keys(fanOuts).length > 0 ? { fan_outs: fanOuts } : {}),
+      ...(strategy.name === 'state-machine' ? { markers: this.constructMarkers(flow) } : {}),
     };
   }
 }

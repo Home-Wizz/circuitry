@@ -79,6 +79,13 @@ export function parseActionSequence(steps: unknown[]): BProgram {
   if (!head || typeof head !== 'object') return parseActionSequence(tail);
   const step = head as Record<string, unknown>;
 
+  // Phase 5 (2026-09-26): HA skips a step marked `enabled: false` -- any
+  // kind, a whole if/choose/parallel/repeat block included -- so it
+  // contributes nothing. Before this a disabled BLOCK was read as if it
+  // ran, on both sides of every comparison, so output that dropped the
+  // flag from a block passed the gate.
+  if (step.enabled === false) return parseActionSequence(tail);
+
   // "Grouping actions" -- purely a naming/UI aid, inline its body directly
   // (see extractFromGraph.ts's identical treatment of sequence_start/end).
   if (Array.isArray(step.sequence) && !('choose' in step) && !('if' in step) && !('repeat' in step) && !('parallel' in step)) {
@@ -193,16 +200,36 @@ export function extractFromYamlConfig(config: Record<string, unknown>): YamlExtr
     program = [{ k: 'if', cond, then: program, else: [] }];
   }
 
+  return {
+    triggers,
+    program,
+    isScriptMode,
+    ...extractYamlSettings(config),
+  };
+}
+
+/** The candidate YAML's automation-level settings, in the same shape as
+ * extractFromGraph.ts's FlowSettings, so either verifier can compare them
+ * with verifyNativeOutput's compareMetadata. */
+export function extractYamlSettings(
+  config: Record<string, unknown>
+): Pick<
+  YamlExtraction,
+  | 'scriptFields'
+  | 'mode'
+  | 'max'
+  | 'maxExceeded'
+  | 'initialState'
+  | 'trace'
+  | 'userVariables'
+  | 'triggerVariables'
+> {
   const variables = { ...(config.variables as Record<string, unknown> | undefined) };
   delete variables._circuitry_metadata;
   delete variables._flode_metadata;
   delete variables._cafe_metadata;
-
   return {
-    triggers,
-    program,
     scriptFields: config.fields as Record<string, unknown> | undefined,
-    isScriptMode,
     mode: (config.mode as string | undefined) ?? 'single',
     max: config.max,
     maxExceeded: config.max_exceeded,

@@ -333,6 +333,11 @@ function collectMutations(root: unknown): Mutation[] {
       }
 
       for (const [key, value] of Object.entries(obj)) {
+        // `_circuitry_metadata` is Circuitry's own bookkeeping (canvas
+        // positions, and for state-machine output the fan-out and marker
+        // hints the decompiler uses). HA never runs it, so a change there
+        // is not a behavior change the gate should catch.
+        if (key === '_circuitry_metadata') continue;
         walk(value, key);
       }
     }

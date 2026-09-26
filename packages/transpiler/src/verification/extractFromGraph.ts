@@ -42,11 +42,33 @@ interface Ctx {
   incoming: Map<string, FlowEdge[]>;
   backEdgeIds: Set<string>;
   loopsByEntry: Map<string, LoopInfo>;
+  /** Set only by findTreeContinuedPathEnds: where to record them. */
+  pathEnds?: PathEnd[];
+  /** How many parallel (fan-out) branches the walk is currently inside. */
+  parallelDepth: number;
+}
+
+/**
+ * A place where a path of the graph just ends -- an action with no
+ * outgoing edge, or a condition with no false (or no true) edge -- at a
+ * point where this file's tree reading would carry on with something
+ * after it (the step where the enclosing if's branches meet again, or the
+ * enclosing loop's next round). See findTreeContinuedPathEnds.
+ */
+export interface PathEnd {
+  nodeId: string;
+  /** For a condition: the handle with no edge. */
+  handle?: 'true' | 'false';
 }
 
 interface LoopInfo {
   kind: 'while' | 'until' | 'count';
   testNodeId: string;
+  /**
+   * For 'while'/'until': the loop's whole condition list, head first (see
+   * loopConditionChain). The loop tests all of them, AND'd.
+   */
+  testNodeIds?: string[];
   bodyEntryIds: string[];
   exitTargetIds: string[];
   /** For 'count' only -- see extractCountValue's doc comment. */
@@ -88,7 +110,15 @@ function buildCtx(flow: FlowGraph): Ctx {
     (incoming.get(e.target) ?? incoming.set(e.target, []).get(e.target)!).push(e);
   }
   const backEdgeIds = findBackEdges(stripped);
-  const ctx: Ctx = { flow: stripped, nodesById, outgoing, incoming, backEdgeIds, loopsByEntry: new Map() };
+  const ctx: Ctx = {
+    flow: stripped,
+    nodesById,
+    outgoing,
+    incoming,
+    backEdgeIds,
+    loopsByEntry: new Map(),
+    parallelDepth: 0,
+  };
   ctx.loopsByEntry = detectLoops(ctx);
   return ctx;
 }
@@ -113,32 +143,103 @@ function forwardOutgoing(ctx: Ctx, nodeId: string): FlowEdge[] {
  */
 function detectLoops(ctx: Ctx): Map<string, LoopInfo> {
   const loops = new Map<string, LoopInfo>();
+  // Bug #28 (2026-09-26): two different loops can claim the same entry
+  // node -- an until whose body opens with another loop, drawn without the
+  // Join anchor YamlParser/FlowTranspiler put there. A plain Map.set let
+  // the later one silently replace the earlier (and native.ts's table did
+  // the same, so the gate agreed with a wrong compile). Refuse instead:
+  // the same loop may be recorded more than once (a while head with
+  // several body exits), a different one may not.
+  const setLoop = (entryId: string, info: LoopInfo): void => {
+    const existing = loops.get(entryId);
+    // A hand-wired until list can give a member its own false back-edge
+    // (the same loop-back as the head's): that is the same loop, recorded
+    // from the member. Keep whichever record has the longer list (the
+    // head's).
+    if (
+      existing &&
+      existing.kind === info.kind &&
+      existing.testNodeId !== info.testNodeId &&
+      ((existing.testNodeIds ?? []).includes(info.testNodeId) ||
+        (info.testNodeIds ?? []).includes(existing.testNodeId))
+    ) {
+      if ((info.testNodeIds?.length ?? 1) > (existing.testNodeIds?.length ?? 1)) {
+        loops.set(entryId, info);
+      }
+      return;
+    }
+    if (existing && (existing.kind !== info.kind || existing.testNodeId !== info.testNodeId)) {
+      throw new Error(
+        `two loops share entry node "${entryId}" (${existing.kind} tested at "${existing.testNodeId}", ` +
+          `${info.kind} tested at "${info.testNodeId}"); cannot tell which one encloses the other`
+      );
+    }
+    loops.set(entryId, info);
+  };
   for (const edge of ctx.flow.edges) {
     if (!ctx.backEdgeIds.has(edge.id)) continue;
     const source = ctx.nodesById.get(edge.source);
     const target = ctx.nodesById.get(edge.target);
     if (!source || !target) continue;
 
-    if (target.type === 'condition' && source.type !== 'condition') {
+    // Bug #22 (2026-09-26): a condition's back-edge is its own until loop
+    // only when the condition is a `repeat_until` head (false handle); its
+    // own count loop only when it carries no `_blockKey` at all (count
+    // tests never do). Any other `_blockKey` head -- an if/else, a choose
+    // case, an inner while or until finishing -- or any condition looping
+    // back onto a `repeat_while` head is the LAST statement of an enclosing
+    // while's body exiting back to that while's head. Handle-only
+    // classification (the rule native.ts shared) turned `while A: [while B:
+    // [...]]` into "until B".
+    const sourceBlockKey = (source.data as Record<string, unknown> | undefined)?._blockKey;
+    const targetBlockKey = (target.data as Record<string, unknown> | undefined)?._blockKey;
+    const isOwnUntilEdge =
+      source.type === 'condition' &&
+      edge.sourceHandle === 'false' &&
+      sourceBlockKey === 'repeat_until';
+    const isBodyExitIntoEnclosingLoop =
+      !isOwnUntilEdge &&
+      source.type === 'condition' &&
+      (typeof sourceBlockKey === 'string' || targetBlockKey === 'repeat_while');
+    if (isBodyExitIntoEnclosingLoop && target.type !== 'condition') continue;
+
+    if (
+      target.type === 'condition' &&
+      (source.type !== 'condition' || isBodyExitIntoEnclosingLoop)
+    ) {
       // while: entry = the test node itself.
-      const trueEdges = forwardOutgoing(ctx, target.id).filter((e) => e.sourceHandle === 'true');
+      const testNodeIds = loopConditionChain(ctx, target.id, 'while');
+      const lastTestId = testNodeIds[testNodeIds.length - 1];
+      const trueEdges = forwardOutgoing(ctx, lastTestId).filter((e) => e.sourceHandle === 'true');
       const falseEdges = forwardOutgoing(ctx, target.id).filter((e) => e.sourceHandle === 'false');
-      loops.set(target.id, {
+      setLoop(target.id, {
         kind: 'while',
         testNodeId: target.id,
+        testNodeIds,
         bodyEntryIds: trueEdges.map((e) => e.target),
         exitTargetIds: falseEdges.map((e) => e.target),
       });
-    } else if (source.type === 'condition' && edge.sourceHandle === 'false') {
+    } else if (
+      source.type === 'condition' &&
+      edge.sourceHandle === 'false' &&
+      !isBodyExitIntoEnclosingLoop
+    ) {
       // until: entry = the first body node (the back-edge's own target).
-      const trueEdges = forwardOutgoing(ctx, source.id).filter((e) => e.sourceHandle === 'true');
-      loops.set(edge.target, {
+      const testNodeIds = loopConditionChain(ctx, source.id, 'until');
+      const lastTestId = testNodeIds[testNodeIds.length - 1];
+      const trueEdges = forwardOutgoing(ctx, lastTestId).filter((e) => e.sourceHandle === 'true');
+      setLoop(edge.target, {
         kind: 'until',
         testNodeId: source.id,
+        testNodeIds,
         bodyEntryIds: [edge.target],
         exitTargetIds: trueEdges.map((e) => e.target),
       });
-    } else if (source.type === 'condition' && edge.sourceHandle === 'true') {
+    } else if (
+      source.type === 'condition' &&
+      edge.sourceHandle === 'true' &&
+      !isBodyExitIntoEnclosingLoop
+    ) {
       // count: YamlParser.ts's repeat.count decompile branch (read directly
       // from source this session) always wires
       // set_vars(counter=0) -> body... -> set_vars(counter+1) -> condition(counter<N),
@@ -186,7 +287,7 @@ function detectLoops(ctx: Ctx): Map<string, LoopInfo> {
         ? forwardOutgoing(ctx, loopTargetId).map((e) => e.target)
         : [loopTargetId];
 
-      loops.set(initNodeId ?? loopTargetId, {
+      setLoop(initNodeId ?? loopTargetId, {
         kind: 'count',
         testNodeId: source.id,
         bodyEntryIds,
@@ -197,6 +298,82 @@ function detectLoops(ctx: Ctx): Map<string, LoopInfo> {
     }
   }
   return loops;
+}
+
+/**
+ * Item 4 (2026-09-26): a loop's condition LIST. `while: [A, B]` and
+ * `until: [A, B]` are parsed as A -true-> B, with B (and any further
+ * member) carrying no `_blockKey` and sharing the head's false edge (the
+ * multi-condition list convention).
+ * The loop tests them all, AND'd; the body (while) or the exit (until)
+ * hangs off the LAST member's true edge. This extractor used to take the
+ * head alone and read the rest of the list as an if inside the body
+ * (while) or after the loop (until), so every multi-condition while/until
+ * failed native verification and fell back to the state machine -- and
+ * one inside a parallel branch was refused outright, because the
+ * state-machine gate reads parallel branches through this file too.
+ *
+ * Same fold rule as native.ts's detectRepeatPatterns (implemented
+ * independently): the next node is folded in when it is a condition
+ * reached by the current member's one forward true edge, is not already
+ * in the list, carries no `_blockKey` (that would be the head of another
+ * construct -- bug #13), and has no false edge of its own -- or, for a
+ * while, one that goes where the head's does; for an until, one that
+ * loops back where the head's does.
+ */
+function loopConditionChain(ctx: Ctx, headId: string, kind: 'while' | 'until'): string[] {
+  const chain = [headId];
+  const headExits = forwardOutgoing(ctx, headId)
+    .filter((e) => e.sourceHandle === 'false')
+    .map((e) => e.target);
+  const headLoopBack = (ctx.outgoing.get(headId) ?? [])
+    .filter((e) => e.sourceHandle === 'false' && ctx.backEdgeIds.has(e.id))
+    .map((e) => e.target);
+  let currentId = headId;
+  while (true) {
+    const trueEdges = forwardOutgoing(ctx, currentId).filter((e) => e.sourceHandle === 'true');
+    if (trueEdges.length !== 1) break;
+    const next = ctx.nodesById.get(trueEdges[0].target);
+    if (next?.type !== 'condition' || chain.includes(next.id)) break;
+    if (typeof (next.data as Record<string, unknown> | undefined)?._blockKey === 'string') break;
+    // Back-edges count here. A while member's false edge that loops back
+    // (to the head, or anywhere) means "keep looping" -- the opposite of a
+    // list member, whose false leaves the loop -- so `while W: [if C ...]`
+    // with C's false edge back to W is NOT `while: [W, C]`. An until
+    // member's false edge may loop back only to where the head's does
+    // (that IS the member's inherited else).
+    const nextFalse = (ctx.outgoing.get(next.id) ?? []).filter((e) => e.sourceHandle === 'false');
+    const nextForwardFalse = nextFalse.filter((e) => !ctx.backEdgeIds.has(e.id));
+    const nextBackFalse = nextFalse.filter((e) => ctx.backEdgeIds.has(e.id));
+    let foldable: boolean;
+    if (kind === 'while') {
+      foldable =
+        nextFalse.length === 0 ||
+        (headExits.length === 1 &&
+          nextFalse.length === 1 &&
+          nextForwardFalse.length === 1 &&
+          nextForwardFalse[0].target === headExits[0]);
+    } else {
+      foldable =
+        nextForwardFalse.length === 0 &&
+        nextBackFalse.every((e) => headLoopBack.includes(e.target));
+    }
+    if (!foldable) break;
+    chain.push(next.id);
+    currentId = next.id;
+  }
+  return chain;
+}
+
+/** A while/until loop's whole test: its condition list, AND'd exactly the
+ * way a YAML `while:`/`until:` list is (extractFromYaml.ts reads that list
+ * with the same parseConditionExpr). */
+function loopTest(ctx: Ctx, loop: LoopInfo): BoolExpr {
+  const ids = loop.testNodeIds ?? [loop.testNodeId];
+  if (ids.length === 1) {
+    return parseConditionFromNode(ctx.nodesById.get(ids[0]) as ConditionNode);
+  }
+  return parseConditionExpr(ids.map((id) => ctx.nodesById.get(id)?.data ?? {}));
 }
 
 /**
@@ -264,11 +441,16 @@ function setsCounterVariable(node: FlowNode | undefined, varName: string): boole
  * identical to the old findConvergence), or a 2+ element array for a
  * genuine sibling set, ordered nearest-first.
  */
-function findConvergenceSet(ctx: Ctx, starts: string[]): string[] {
-  if (starts.length < 2) return [];
-  const reachableSets = starts.map((start) => {
+function findConvergenceSet(ctx: Ctx, startsOrGroups: (string | string[])[]): string[] {
+  // A group of starts is one branch (bug #50, 2026-09-26 -- an if's else
+  // that is itself a parallel); see native.ts's findConvergenceSet.
+  const groups = startsOrGroups
+    .map((s) => (Array.isArray(s) ? s : [s]))
+    .filter((g) => g.length > 0);
+  if (groups.length < 2) return [];
+  const reachableSets = groups.map((group) => {
     const seen = new Set<string>();
-    const queue = [start];
+    const queue = [...group];
     while (queue.length > 0) {
       const id = queue.shift()!;
       if (seen.has(id)) continue;
@@ -307,10 +489,27 @@ function findConvergenceSet(ctx: Ctx, starts: string[]): string[] {
 
   const withDistance = minimal.map((id) => ({
     id,
-    maxDist: Math.max(...starts.map((s) => shortestDistance(ctx, s, id))),
+    maxDist: Math.max(
+      ...groups.map((group) => Math.min(...group.map((s) => shortestDistance(ctx, s, id))))
+    ),
   }));
   withDistance.sort((a, b) => a.maxDist - b.maxDist);
   return withDistance.map((d) => d.id);
+}
+
+/** An enabled `stop` step with nothing after it and one way in: a stop of
+ * one branch's own (a stop other paths also reach is a meeting point). */
+function isStopOnly(ctx: Ctx, id: string): boolean {
+  const node = ctx.nodesById.get(id);
+  const data = node?.data as Record<string, unknown> | undefined;
+  return (
+    node?.type === 'action' &&
+    data !== undefined &&
+    'stop' in data &&
+    data.enabled !== false &&
+    (ctx.outgoing.get(id) ?? []).length === 0 &&
+    (ctx.incoming.get(id) ?? []).filter((e) => !ctx.backEdgeIds.has(e.id)).length === 1
+  );
 }
 
 function shortestDistance(ctx: Ctx, start: string, target: string): number {
@@ -403,6 +602,54 @@ function stopHas(stop: string | Set<string> | null, id: string): boolean {
   return stop instanceof Set ? stop.has(id) : stop === id;
 }
 
+/** Records a path end when findTreeContinuedPathEnds is collecting them:
+ * only where something would run after it in the tree reading (`stop` is
+ * set: an enclosing if's meeting point or loop test), and not inside a
+ * parallel branch (there a path that ends just ends its branch, in every
+ * strategy). */
+function recordPathEnd(
+  ctx: Ctx,
+  stop: string | Set<string> | null,
+  nodeId: string,
+  handle?: 'true' | 'false'
+): void {
+  if (!ctx.pathEnds || stop === null || ctx.parallelDepth > 0) return;
+  if (ctx.pathEnds.some((p) => p.nodeId === nodeId && p.handle === handle)) return;
+  // A node that also comes AFTER the meeting point (reachable from it) is a
+  // shared tail the tree reading merely copies into this branch -- the
+  // automation's last step, say. Not a place where a path ends early.
+  // (Only for an if's meeting point; a while loop's test reaches its whole
+  // body.)
+  if (stop instanceof Set) {
+    const seen = new Set<string>();
+    const queue = [...stop];
+    while (queue.length > 0) {
+      const id = queue.shift()!;
+      if (id === nodeId) return;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      for (const e of forwardOutgoing(ctx, id)) queue.push(e.target);
+    }
+  }
+  ctx.pathEnds.push(handle ? { nodeId, handle } : { nodeId });
+}
+
+/** Walks each branch of a fan-out, counting it as inside a parallel. */
+function walkBranches(
+  ctx: Ctx,
+  ids: string[],
+  stop: string | Set<string> | null,
+  visited: Set<string>,
+  suppressLoopId?: string
+): BProgram[] {
+  ctx.parallelDepth++;
+  try {
+    return ids.map((id) => walk(ctx, id, stop, new Set(visited), suppressLoopId));
+  } finally {
+    ctx.parallelDepth--;
+  }
+}
+
 function buildContinuation(
   ctx: Ctx,
   targetIds: string[],
@@ -436,7 +683,7 @@ function buildContinuation(
   // AND-chain ending in an empty then/else, not just a single bare node.
   if (convergenceSet.length > 0) {
     const boundSet = new Set(convergenceSet);
-    const branchPrograms = ids.map((id) => walk(ctx, id, boundSet, new Set(visited), suppressLoopId));
+    const branchPrograms = walkBranches(ctx, ids, boundSet, visited, suppressLoopId);
     const branchConditions: BoolExpr[] = [];
     const allEmptyConditions = ids.every((id, i) => {
       const node = ctx.nodesById.get(id);
@@ -495,7 +742,7 @@ function buildContinuation(
 
   // Genuine fan-out from a single node with no shared convergence -- a real
   // concurrent parallel block with no continuation after it.
-  const branchPrograms = ids.map((id) => walk(ctx, id, stop, new Set(visited), suppressLoopId));
+  const branchPrograms = walkBranches(ctx, ids, stop, visited, suppressLoopId);
   const filtered = branchPrograms.filter((p) => p.length > 0);
   return filtered.length > 0 ? [{ k: 'parallel', branches: filtered }] : [];
 }
@@ -528,13 +775,13 @@ function walk(
   const loop = nodeId === suppressLoopId ? undefined : ctx.loopsByEntry.get(nodeId);
   if (loop) {
     if (loop.kind === 'while') {
-      const cond = parseConditionFromNode(ctx.nodesById.get(loop.testNodeId) as ConditionNode);
+      const cond = loopTest(ctx, loop);
       const body = buildContinuation(ctx, loop.bodyEntryIds, loop.testNodeId, new Set(), nodeId);
       const after = buildContinuation(ctx, loop.exitTargetIds, stop, visited);
       return [{ k: 'repeat', mode: 'while', test: cond, body }, ...after];
     }
     if (loop.kind === 'until') {
-      const cond = parseConditionFromNode(ctx.nodesById.get(loop.testNodeId) as ConditionNode);
+      const cond = loopTest(ctx, loop);
       const body = buildContinuation(ctx, loop.bodyEntryIds, loop.testNodeId, new Set(), nodeId);
       const after = buildContinuation(ctx, loop.exitTargetIds, stop, visited);
       return [{ k: 'repeat', mode: 'until', test: cond, body }, ...after];
@@ -556,8 +803,17 @@ function walk(
     return buildConditionChain(ctx, nodeId, stop, visited);
   }
 
-  const action = normalizeNodeAction(node);
+  // Phase 5 (2026-09-26): a disabled step is skipped by HA -- no step at
+  // all, the same as extractFromYaml.ts does for `enabled: false`.
+  const action =
+    (node.data as Record<string, unknown> | undefined)?.enabled === false
+      ? null
+      : normalizeNodeAction(node);
   const outTargets = forwardOutgoing(ctx, nodeId).map((e) => e.target);
+  const data = node.data as Record<string, unknown>;
+  const isStopStep = 'stop' in data && data.enabled !== false;
+  if ((ctx.outgoing.get(nodeId) ?? []).length === 0 && !isStopStep)
+    recordPathEnd(ctx, stop, nodeId);
   const rest = buildContinuation(ctx, outTargets, stop, visited);
   return action ? [action, ...rest] : rest;
 }
@@ -580,6 +836,12 @@ function walk(
  * shared else," producing a genuine false mismatch against NativeStrategy's
  * real (and correct) `if: [cond1, cond2, ...]` rendering -- caught by
  * 14-washingmachine.yaml and others in the real-fixture diagnostic suite.
+ *
+ * Exception (bug #21, 2026-09-26): the rule above is the encoding of a
+ * multi-condition LIST, whose members never carry a `_blockKey`. A node
+ * that does carry one is the head of a separate nested if/choose, and its
+ * missing false edge really does mean "nothing happens" -- see the check
+ * below.
  */
 function buildConditionChain(
   ctx: Ctx,
@@ -617,9 +879,30 @@ function buildConditionChain(
 
     if (canContinueChain) {
       const nextFalseEdges = forwardOutgoing(ctx, trueTarget).filter((e) => e.sourceHandle === 'false');
-      const canChain =
-        nextFalseEdges.length === 0 ||
-        (nextFalseEdges.length === 1 && elseTargets.includes(nextFalseEdges[0].target));
+      // Bug #21 (2026-09-26): the head of a separate nested if/choose (it
+      // carries a `_blockKey`; a multi-condition list member never does)
+      // with no false edge means "nothing happens" on false, not "share the
+      // chain's else". It joins the chain only when its false targets are
+      // exactly the chain's else targets.
+      const isConstructHead =
+        typeof (nextNode.data as Record<string, unknown> | undefined)?._blockKey === 'string';
+      const nextFalseTargets = new Set(nextFalseEdges.map((e) => e.target));
+      // Bug #26 (2026-09-26): a condition the chain's else path also leads
+      // to is where then and else meet again (the next statement), never
+      // an AND'd member.
+      const reachedFromElse = elseTargets.some(
+        (t) => t === trueTarget || shortestDistance(ctx, t, trueTarget) !== Number.POSITIVE_INFINITY
+      );
+      const canChain = reachedFromElse
+        ? false
+        : isConstructHead
+          ? nextFalseTargets.size === new Set(elseTargets).size &&
+            [...nextFalseTargets].every((id) => elseTargets.includes(id))
+          : nextFalseEdges.length === 0 ||
+            // Exactly the chain's else targets (several when a parallel
+            // follows -- bug #51; native.ts's canFoldIntoAndChain).
+            (nextFalseTargets.size === new Set(elseTargets).size &&
+              [...nextFalseTargets].every((id) => elseTargets.includes(id)));
       if (canChain) {
         visited.add(trueTarget);
         currentId = trueTarget;
@@ -632,9 +915,66 @@ function buildConditionChain(
   }
 
   const cond: BoolExpr = conditions.length === 1 ? conditions[0] : { op: 'and', args: conditions };
-  const then = buildContinuation(ctx, thenTargets, stop, new Set(visited));
-  const els = buildContinuation(ctx, elseTargets, stop, new Set(visited));
-  return [{ k: 'if', cond, then, else: els }];
+  const hasEdge = (id: string, handle: 'true' | 'false'): boolean =>
+    (ctx.outgoing.get(id) ?? []).some((e) => e.sourceHandle === handle);
+  if (!hasEdge(startId, 'false')) recordPathEnd(ctx, stop, startId, 'false');
+  if (thenTargets.length === 0 && !hasEdge(currentId, 'true')) {
+    recordPathEnd(ctx, stop, currentId, 'true');
+  }
+
+  // Do the then- and else-paths reconverge on a shared node BEFORE the
+  // outer `stop` boundary (e.g. two branches of a nested if/else that both
+  // feed into one shared trailing action, loop, or further condition)?
+  // thenTargets and elseTargets are walked via two entirely SEPARATE
+  // buildContinuation calls below, so neither call has any way to see the
+  // other's reachable set -- each one only knows about the outer `stop`,
+  // not about this inner join. Found via the parallel-entry fuzzer,
+  // 2026-09-25: a nested if/else inside one branch of a trigger's own
+  // multi-target parallel fan-out, where both outcomes fed into the same
+  // trailing `repeat: while`, got that repeat duplicated into both the
+  // `then` and `else` arrays instead of hoisted out once after the if --
+  // behaviorally harmless in isolation (either way the repeat still runs
+  // exactly once), but a different TREE SHAPE than what native.ts's own
+  // generator already correctly produces (repeat emitted once, as a
+  // sibling step after the if), so `programsEquivalent` reported a false
+  // mismatch ("no way to match up the N parallel branch(es)") even though
+  // the generated YAML was correct. This is the same class of fix
+  // buildContinuation's own fan-out handling already applies to sibling
+  // branches (findConvergenceSet + hoist-once) -- reapplied here because a
+  // single condition's then/else is a second, distinct fan-out shape this
+  // file didn't previously check for convergence between.
+  //
+  // Item 4 (2026-09-26): only when there IS an else path. With none, the
+  // "convergence" found was the then-branch's own fan-out meeting again
+  // (`if c then [parallel: [A, B], parallel: [C, D]]`), and the second
+  // parallel was hoisted out of the if, as if it ran when c was false.
+  const innerConvergence =
+    thenTargets.length > 0 && elseTargets.length > 0
+      ? findConvergenceSet(
+          ctx,
+          // Decision D1: a branch that is just a `stop` step never reaches
+          // the meeting point but ends the automation; it doesn't keep the
+          // other branches from meeting (native.ts's withoutStopOnly).
+          [thenTargets, elseTargets].map((g) => g.filter((id) => !isStopOnly(ctx, id)))
+        ).filter((id) => !stopHas(stop, id))
+      : [];
+  const innerStop: string | Set<string> | null =
+    innerConvergence.length > 0
+      ? new Set([...(stop === null ? [] : stop instanceof Set ? stop : [stop]), ...innerConvergence])
+      : stop;
+
+  const then = buildContinuation(ctx, thenTargets, innerStop, new Set(visited));
+  const els = buildContinuation(ctx, elseTargets, innerStop, new Set(visited));
+  const ifStep: BStep = { k: 'if', cond, then, else: els };
+
+  if (innerConvergence.length === 0) {
+    return [ifStep];
+  }
+  const continuation =
+    innerConvergence.length === 1
+      ? walk(ctx, innerConvergence[0], stop, new Set(visited))
+      : buildContinuation(ctx, innerConvergence, stop, new Set(visited));
+  return [ifStep, ...continuation];
 }
 
 export function buildTrigger(node: FlowNode): Record<string, unknown> {
@@ -692,7 +1032,41 @@ export function extractGraphProgramBetween(
 }
 
 export function extractFromGraph(flow: FlowGraph): GraphExtraction {
-  const ctx = buildCtx(flow);
+  return extractFromCtx(buildCtx(flow));
+}
+
+/**
+ * Decision D1 (2026-09-26): where a path that just ends is read differently
+ * by this file's tree reading (it carries on after the enclosing
+ * construct) and by the literal flowchart reading the state machine uses
+ * (the automation stops there). Circuitry's rule is the literal one;
+ * analyzer/path-endings.ts makes each of these an explicit stop before any
+ * strategy runs, so both readings agree. [] when the graph can't be read
+ * at all (the gate reports that separately).
+ */
+export function findTreeContinuedPathEnds(flow: FlowGraph): PathEnd[] {
+  try {
+    const ctx = buildCtx(flow);
+    ctx.pathEnds = [];
+    extractFromCtx(ctx);
+    return ctx.pathEnds;
+  } catch {
+    return [];
+  }
+}
+
+/** findConvergenceSet for a whole graph: where the paths from `starts`
+ * first meet again (forward edges only). [] when the graph can't be read. */
+export function graphConvergenceSet(flow: FlowGraph, starts: (string | string[])[]): string[] {
+  try {
+    return findConvergenceSet(buildCtx(flow), starts);
+  } catch {
+    return [];
+  }
+}
+
+function extractFromCtx(ctx: Ctx): GraphExtraction {
+  const flow = ctx.flow;
 
   const triggerNodes = ctx.flow.nodes.filter((n) => n.type === 'trigger');
   const triggers = triggerNodes.map(buildTrigger);
@@ -722,17 +1096,88 @@ export function extractFromGraph(flow: FlowGraph): GraphExtraction {
   // triggers that all lead to the same first action), buildContinuation's
   // own `ids.length === 1` shortcut bypasses this flag entirely, so passing
   // it unconditionally whenever there are multiple entries is harmless.
-  const program = buildContinuation(ctx, firstTargets, null, new Set(), undefined, effectiveEntries.length > 1);
-
-  const startNode = ctx.flow.nodes.find((n) => n.type === 'start');
-  const scriptFields =
-    startNode?.type === 'start' ? (startNode.data as Record<string, unknown>).fields as Record<string, unknown> | undefined : undefined;
+  // Bug #29 (2026-09-26, found by the Phase 4 red run): the sequential
+  // reading is for entries that lead to DIFFERENT places. When every
+  // trigger has exactly the same targets (the ordinary case of two
+  // triggers wired to one fan-out -- what YamlParser builds for a
+  // top-level `parallel:` in a multi-trigger automation), whichever
+  // trigger fires, all of those targets start together: a parallel, as
+  // with a single trigger. Reading it as sequential made every correct
+  // native compile of that shape fail the gate (a needless fallback) and
+  // let a compile that serialized the parallel pass.
+  const targetSetKey = (id: string): string =>
+    [...new Set(forwardOutgoing(ctx, id).map((e) => e.target))].sort().join('\u0000');
+  const entriesShareOneFanOut =
+    effectiveEntries.length > 1 &&
+    effectiveEntries.every((id) => targetSetKey(id) === targetSetKey(effectiveEntries[0]));
+  // Bug #30 (2026-09-26, found by the same red run): when the triggers DO
+  // lead to different places, one shared action list can only mean the
+  // same thing if every route starts with its own `condition: trigger`
+  // guard -- then running the routes one after another, each checking
+  // which trigger fired, is what the graph says. With plain conditions (or
+  // anything else) at the start of the routes, the graph says "trigger 1
+  // runs route 1 only"; a sequential (or OR-folded) reading runs route 2
+  // on trigger 1 as well, and let a native compile doing exactly that
+  // pass. No single native program expresses per-trigger routes without
+  // guards, so refuse; the state machine routes on trigger.idx instead.
+  const divergentEntries = effectiveEntries.length > 1 && !entriesShareOneFanOut;
+  if (divergentEntries) {
+    const allGuardedByTrigger = firstTargets.every((id) => {
+      const node = ctx.nodesById.get(id);
+      return (
+        node?.type === 'condition' &&
+        (node.data as Record<string, unknown> | undefined)?.condition === 'trigger'
+      );
+    });
+    if (!allGuardedByTrigger) {
+      throw new Error(
+        'the triggers lead to different places without `condition: trigger` guards; ' +
+          'one shared action list cannot express per-trigger routes'
+      );
+    }
+  }
+  const program = buildContinuation(
+    ctx,
+    firstTargets,
+    null,
+    new Set(),
+    undefined,
+    divergentEntries
+  );
 
   return {
     triggers,
     program,
-    scriptFields,
     isScriptMode,
+    ...extractGraphSettings(flow),
+  };
+}
+
+/** The automation-level settings -- everything except triggers and the
+ * action program -- that the output must carry through unchanged. */
+export type FlowSettings = Pick<
+  GraphExtraction,
+  | 'scriptFields'
+  | 'mode'
+  | 'max'
+  | 'maxExceeded'
+  | 'initialState'
+  | 'trace'
+  | 'userVariables'
+  | 'triggerVariables'
+>;
+
+/** Reads FlowSettings straight from the graph. Used by extractFromGraph
+ * (native verification) and directly by verifyStateMachineOutput, which
+ * doesn't otherwise need the full behavior-program extraction. */
+export function extractGraphSettings(flow: FlowGraph): FlowSettings {
+  const startNode = flow.nodes.find((n) => n.type === 'start');
+  const scriptFields =
+    startNode?.type === 'start'
+      ? ((startNode.data as Record<string, unknown>).fields as Record<string, unknown> | undefined)
+      : undefined;
+  return {
+    scriptFields,
     mode: flow.metadata?.mode ?? 'single',
     max: flow.metadata?.max,
     maxExceeded: flow.metadata?.max_exceeded,

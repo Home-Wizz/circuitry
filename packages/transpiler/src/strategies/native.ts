@@ -150,6 +150,8 @@ export class NativeStrategy extends BaseStrategy {
   private repeatPatterns: Map<string, RepeatPattern> = new Map();
   /** Set of all node IDs that are internal to a repeat pattern */
   private repeatInternalNodeIds: Set<string> = new Set();
+  /** Every loop's own test condition(s) -- see findOrConditionSources. */
+  private loopTestNodeIds: Set<string> = new Set();
   /** Sequence (Grouping actions) patterns detected in the current flow, keyed by sequence_start node ID */
   private sequencePatterns: Map<string, SequencePattern> = new Map();
   /** Set of all node IDs internal to a sequence pattern (start + body + end) */
@@ -217,7 +219,9 @@ export class NativeStrategy extends BaseStrategy {
     // Pre-detect repeat patterns from structural back-edges
     this.repeatPatterns = this.detectRepeatPatterns(flow);
     this.repeatInternalNodeIds = new Set();
+    this.loopTestNodeIds = new Set();
     for (const pattern of this.repeatPatterns.values()) {
+      for (const id of pattern.conditionNodeIds) this.loopTestNodeIds.add(id);
       for (const id of pattern.bodyNodeIds) this.repeatInternalNodeIds.add(id);
       for (const id of pattern.conditionNodeIds) this.repeatInternalNodeIds.add(id);
       if (pattern.initNodeId) this.repeatInternalNodeIds.add(pattern.initNodeId);
@@ -524,6 +528,102 @@ export class NativeStrategy extends BaseStrategy {
   }
 
   /**
+   * Which kind of loop a back-edge closes, or null when it closes none this
+   * file can render.
+   *
+   * Bug #22 (2026-09-26): a back-edge FROM a condition isn't always that
+   * condition's own until/count loop. When a while loop's body ends in an
+   * else-less if, a choose, or another loop, that construct's exit IS the
+   * loop-back edge, e.g. `while A: [while B: [...]]` wires B's false edge
+   * straight back to A. Classified by handle alone, it read as "until B"
+   * (or, from a true handle, "count"), producing an unrelated loop -- and
+   * extractFromGraph.ts, which mirrors this, agreed, so the gate let it
+   * through. YamlParser (and the canvas's block factories) stamp
+   * `_blockKey` on every construct head, so the source's own loop is
+   * identifiable: only a `repeat_until` head's false edge is its own until
+   * loop. Any other `_blockKey` head, or any condition looping back onto a
+   * `repeat_while` head, is a body exit of the enclosing while
+   * ('while-body-exit': that condition has forward edges of its own inside
+   * the body, so the body walk must not stop at it). Conditions with no
+   * `_blockKey` (plain canvas conditions, count tests) keep the original
+   * handle-based rules.
+   */
+  private classifyRepeatBackEdge(
+    sourceNode: FlowNode,
+    targetNode: FlowNode,
+    sourceHandle: string | null | undefined
+  ): 'while' | 'while-body-exit' | 'until' | 'count' | null {
+    const sourceBlockKey = (sourceNode.data as Record<string, unknown> | undefined)?._blockKey;
+    const targetBlockKey = (targetNode.data as Record<string, unknown> | undefined)?._blockKey;
+    if (sourceNode.type !== 'condition') {
+      return targetNode.type === 'condition' ? 'while' : null;
+    }
+    const isOwnUntilEdge = sourceHandle === 'false' && sourceBlockKey === 'repeat_until';
+    if (
+      !isOwnUntilEdge &&
+      (typeof sourceBlockKey === 'string' || targetBlockKey === 'repeat_while')
+    ) {
+      return targetNode.type === 'condition' ? 'while-body-exit' : null;
+    }
+    if (sourceHandle === 'false') return 'until';
+    if (sourceHandle === 'true') return 'count';
+    return null;
+  }
+
+  /** An until loop's condition list, head first -- see the until branch of
+   * detectRepeatPatterns for the fold rule. */
+  private untilConditionChain(flow: FlowGraph, firstCondId: string, firstBodyId: string): string[] {
+    const conditionNodeIds: string[] = [];
+    let condId: string | null = firstCondId;
+    while (condId) {
+      const node = this.getNode(flow, condId);
+      if (node?.type !== 'condition') break;
+      conditionNodeIds.push(condId);
+      const trueEdges = flow.edges.filter(
+        (e) => e.source === condId && e.sourceHandle === 'true' && !this.backEdgeIds.has(e.id)
+      );
+      // Bug #55 (2026-09-26): several true edges are a `parallel:` after
+      // the loop (until) or a parallel body (while), and a condition among
+      // their targets is the head of its own branch, never a list member.
+      // Taking the first true edge folded such a condition into the loop's
+      // test (`until: [T, C]`), so the loop exited only when C held too and
+      // C's branch lost its if. The graph extractor's loopConditionChain
+      // already required exactly one, so the state-machine gate refused.
+      if (trueEdges.length !== 1) break;
+      const trueEdge = trueEdges[0];
+      const nextNode = this.getNode(flow, trueEdge.target);
+      if (nextNode?.type !== 'condition' || conditionNodeIds.indexOf(trueEdge.target) !== -1) {
+        break;
+      }
+      const nextFalseEdges = flow.edges.filter(
+        (e) => e.source === nextNode.id && e.sourceHandle === 'false' && !this.backEdgeIds.has(e.id)
+      );
+      if (nextFalseEdges.length !== 0) break;
+      // Item 4: a member may loop back on false only to where this
+      // until's own test does (its inherited else); anywhere else it's
+      // another construct's exit.
+      if (this.loopsBackOnFalse(flow, nextNode.id, firstBodyId)) break;
+      const nextBlockKey = (nextNode.data as Record<string, unknown> | undefined)?._blockKey;
+      if (nextBlockKey) break;
+      condId = trueEdge.target;
+    }
+    return conditionNodeIds;
+  }
+
+  /** Whether `nodeId` has a false edge that is a back-edge (to anywhere
+   * but `allowedTarget`, when given) -- see detectRepeatPatterns' loop
+   * condition-list folds (item 4). */
+  private loopsBackOnFalse(flow: FlowGraph, nodeId: string, allowedTarget?: string): boolean {
+    return flow.edges.some(
+      (e) =>
+        e.source === nodeId &&
+        e.sourceHandle === 'false' &&
+        this.backEdgeIds.has(e.id) &&
+        e.target !== allowedTarget
+    );
+  }
+
+  /**
    * Detect repeat patterns by structurally analyzing back-edges in the graph.
    * Classification rules:
    * - Back-edge target is a condition, source is NOT a condition → while
@@ -540,11 +640,17 @@ export class NativeStrategy extends BaseStrategy {
       const targetNode = this.getNode(flow, edge.target);
       if (!sourceNode || !targetNode) continue;
 
-      if (targetNode.type === 'condition' && sourceNode.type !== 'condition') {
+      const edgeKind = this.classifyRepeatBackEdge(sourceNode, targetNode, edge.sourceHandle);
+      if (edgeKind === null) continue;
+
+      if (edgeKind === 'while' || edgeKind === 'while-body-exit') {
         // ── while pattern ──
-        // Back-edge: last body node → first condition node
+        // Back-edge: last body node → first condition node. For a body exit
+        // from a nested construct's condition (bug #22), that condition has
+        // forward edges of its own that belong to the body, so the body
+        // walk must not stop there.
         const firstCondId = edge.target;
-        const backEdgeSourceId = edge.source;
+        const backEdgeSourceId = edgeKind === 'while-body-exit' ? '' : edge.source;
 
         // Exit: first condition's false path. Resolved up front (not just
         // after the chain below) so the chain-collection loop can tell a
@@ -575,11 +681,14 @@ export class NativeStrategy extends BaseStrategy {
           const node = this.getNode(flow, currentId);
           if (node?.type !== 'condition') break;
           conditionNodeIds.push(currentId);
-          const trueEdge = flow.edges.find(
+          const trueEdges = flow.edges.filter(
             (e) =>
               e.source === currentId && e.sourceHandle === 'true' && !this.backEdgeIds.has(e.id)
           );
-          if (!trueEdge) break;
+          // Bug #55 (2026-09-26): several true edges are a `parallel:`
+          // body, never a list member (see untilConditionChain).
+          if (trueEdges.length !== 1) break;
+          const trueEdge = trueEdges[0];
           const nextNode = this.getNode(flow, trueEdge.target);
           if (nextNode?.type !== 'condition' || conditionNodeIds.indexOf(trueEdge.target) !== -1) {
             break;
@@ -588,7 +697,14 @@ export class NativeStrategy extends BaseStrategy {
             (e) =>
               e.source === nextNode.id && e.sourceHandle === 'false' && !this.backEdgeIds.has(e.id)
           );
+          // Item 4 (2026-09-26): a false edge that loops back means "keep
+          // looping" -- `while W: [if C ...]` with C's false edge back to W
+          // -- never a list member (whose false leaves the loop). Ignoring
+          // back-edges here folded C into `while: [W, C]`; the graph
+          // extractor used to disagree, so the gate caught it, until it
+          // learned the same fold.
           const canFold =
+            !this.loopsBackOnFalse(flow, nextNode.id) &&
             (nextFalseEdges.length === 0 ||
               (chainExitTarget !== null &&
                 nextFalseEdges.length === 1 &&
@@ -632,7 +748,7 @@ export class NativeStrategy extends BaseStrategy {
           backEdgeSourceId,
           exitNodeId: falseEdge?.target ?? null,
         });
-      } else if (sourceNode.type === 'condition' && edge.sourceHandle === 'false') {
+      } else if (edgeKind === 'until') {
         // ── until pattern ──
         // Back-edge: condition →(false)→ first body node
         const firstBodyId = edge.target;
@@ -662,29 +778,7 @@ export class NativeStrategy extends BaseStrategy {
         // as if it ran unconditionally on every iteration, while the until
         // itself wrongly required the if's own condition to ALSO be true
         // before the loop could ever exit).
-        const conditionNodeIds: string[] = [];
-        let condId: string | null = firstCondId;
-        while (condId) {
-          const node = this.getNode(flow, condId);
-          if (node?.type !== 'condition') break;
-          conditionNodeIds.push(condId);
-          const trueEdge = flow.edges.find(
-            (e) => e.source === condId && e.sourceHandle === 'true' && !this.backEdgeIds.has(e.id)
-          );
-          if (!trueEdge) break;
-          const nextNode = this.getNode(flow, trueEdge.target);
-          if (nextNode?.type !== 'condition' || conditionNodeIds.indexOf(trueEdge.target) !== -1) {
-            break;
-          }
-          const nextFalseEdges = flow.edges.filter(
-            (e) =>
-              e.source === nextNode.id && e.sourceHandle === 'false' && !this.backEdgeIds.has(e.id)
-          );
-          if (nextFalseEdges.length !== 0) break;
-          const nextBlockKey = (nextNode.data as Record<string, unknown> | undefined)?._blockKey;
-          if (nextBlockKey) break;
-          condId = trueEdge.target;
-        }
+        const conditionNodeIds = this.untilConditionChain(flow, firstCondId, firstBodyId);
 
         // Body entry: firstBodyId is the back-edge's literal target, which
         // YamlParser.ts currently derives as `bodyResult.nodes[0]` -- the
@@ -737,7 +831,7 @@ export class NativeStrategy extends BaseStrategy {
           backEdgeSourceId: firstCondId,
           exitNodeId: trueEdge?.target ?? null,
         });
-      } else if (sourceNode.type === 'condition' && edge.sourceHandle === 'true') {
+      } else if (edgeKind === 'count') {
         // ── count pattern ──
         // Back-edge: condition →(true)→ the loop's init `set_variables` node
         // (fixed 2026-09-06 -- see YamlParser.ts's repeat.count wiring
@@ -918,12 +1012,58 @@ export class NativeStrategy extends BaseStrategy {
   }
 
   /**
+   * The sequence_end that closes the group opened at `startId`: the nearest
+   * one reachable from its body, skipping over any group nested inside.
+   *
+   * Item 4 (2026-09-26): this used to take the nearest sequence_end of any
+   * group, so in `sequence: [sequence: [A]]` the outer group was closed by
+   * the INNER group's end; the outer end then passed control on as a plain
+   * node and the branch ran on past its own group -- inside a parallel
+   * branch that repeated the step after the parallel. The gate refused
+   * every such automation (the YAML-shapes fuzzer's most common refusal).
+   * A nested start is now matched to its own end first and the search
+   * continues after it.
+   */
+  private findSequenceEnd(
+    flow: FlowGraph,
+    startId: string,
+    memo: Map<string, string | null>
+  ): string | null {
+    if (memo.has(startId)) return memo.get(startId)!;
+    memo.set(startId, null); // guards against a malformed cycle of starts
+    const forward = (id: string): string[] =>
+      flow.edges.filter((e) => e.source === id && !this.backEdgeIds.has(e.id)).map((e) => e.target);
+    const queue = forward(startId);
+    const seen = new Set<string>();
+    let endNodeId: string | null = null;
+    while (queue.length > 0) {
+      const id = queue.shift()!;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const candidate = this.getNode(flow, id);
+      if (candidate?.type === 'sequence_end') {
+        endNodeId = id;
+        break;
+      }
+      if (candidate?.type === 'sequence_start') {
+        const innerEnd = this.findSequenceEnd(flow, id, memo);
+        if (innerEnd) {
+          seen.add(innerEnd);
+          for (const t of forward(innerEnd)) if (!seen.has(t)) queue.push(t);
+          continue;
+        }
+      }
+      for (const t of forward(id)) if (!seen.has(t)) queue.push(t);
+    }
+    memo.set(startId, endNodeId);
+    return endNodeId;
+  }
+
+  /**
    * Detect sequence_start/sequence_end marker pairs by structurally walking
    * forward from each sequence_start's body until the nearest sequence_end
-   * is reached. Best-effort pairing, same limitation as repeat/choose
-   * detection has for deeply nested structures: a sequence_start always
-   * matches the *nearest* sequence_end reachable from it, so nested
-   * Sequence-inside-Sequence groups aren't disambiguated beyond that.
+   * is reached. A group nested inside is skipped over (findSequenceEnd), so
+   * Sequence-inside-Sequence groups pair correctly.
    * An unpaired sequence_start (no reachable sequence_end) is left out of
    * the map entirely and falls back to being a transparent no-op node (see
    * buildNodeAction's 'sequence_start'/'sequence_end' cases).
@@ -949,23 +1089,7 @@ export class NativeStrategy extends BaseStrategy {
       const bodyEntryNodeIds = startEdges.map((e) => e.target);
       if (bodyEntryNodeIds.length === 0) continue;
 
-      let endNodeId: string | null = null;
-      const queue = [...bodyEntryNodeIds];
-      const seen = new Set<string>();
-      while (queue.length > 0 && !endNodeId) {
-        const id = queue.shift()!;
-        if (seen.has(id)) continue;
-        seen.add(id);
-        const candidate = this.getNode(flow, id);
-        if (candidate?.type === 'sequence_end') {
-          endNodeId = id;
-          break;
-        }
-        const outgoing = flow.edges.filter((e) => e.source === id && !this.backEdgeIds.has(e.id));
-        for (const e of outgoing) {
-          if (!seen.has(e.target)) queue.push(e.target);
-        }
-      }
+      const endNodeId = this.findSequenceEnd(flow, node.id, new Map());
       if (!endNodeId) continue; // Unpaired start — leave as a transparent node
 
       const bodyNodeIds = this.collectNodesUntil(flow, bodyEntryNodeIds, new Set([endNodeId]));
@@ -984,6 +1108,56 @@ export class NativeStrategy extends BaseStrategy {
     }
 
     return patterns;
+  }
+
+  /**
+   * Every node flow continues to after a loop or a sequence group. A
+   * pattern's `exitNodeId` is only the first of them.
+   *
+   * Item 4 (2026-09-26): continuing from that one node dropped the rest
+   * when the construct was followed by a parallel -- `sequence: [repeat:
+   * {...}, parallel: [A, B]]` kept A or B, not both. The gate refused every
+   * such automation (with the nested-group pairing of bug #43, the most
+   * common remaining shape in the YAML-shapes fuzzer).
+   */
+  private patternExitIds(flow: FlowGraph, pattern: RepeatPattern | SequencePattern): string[] {
+    const forward = (source: string, handle?: 'true' | 'false'): string[] =>
+      flow.edges
+        .filter(
+          (e) =>
+            e.source === source &&
+            !this.backEdgeIds.has(e.id) &&
+            (handle === undefined || e.sourceHandle === handle)
+        )
+        .map((e) => e.target);
+    if (!('type' in pattern)) return forward(pattern.endNodeId);
+    if (pattern.type === 'while') return forward(pattern.conditionNodeIds[0], 'false');
+    if (pattern.type === 'until') {
+      return forward(pattern.conditionNodeIds[pattern.conditionNodeIds.length - 1], 'true');
+    }
+    return forward(pattern.backEdgeSourceId, 'false');
+  }
+
+  /** Continues after a loop or group: one exit as a plain continuation, 2+
+   * as the parallel they are. Bounded by `stopNodeId` when given. */
+  private buildAfterPattern(
+    flow: FlowGraph,
+    exitIds: string[],
+    visited: Set<string>,
+    stopNodeId?: string | Set<string>
+  ): unknown[] {
+    if (stopNodeId !== undefined) {
+      return exitIds.length > 1
+        ? this.buildFanOutUntilNode(flow, exitIds, stopNodeId, new Set(visited))
+        : exitIds.length === 1 &&
+            !(stopNodeId instanceof Set ? stopNodeId : new Set([stopNodeId])).has(exitIds[0])
+          ? this.buildSequenceUntilNode(flow, exitIds[0], stopNodeId, new Set(visited))
+          : [];
+    }
+    if (exitIds.length > 1) return this.buildFanOut(flow, exitIds, new Set(visited));
+    return exitIds.length === 1
+      ? this.buildSequenceFromNode(flow, exitIds[0], new Set(visited))
+      : [];
   }
 
   /**
@@ -1024,12 +1198,35 @@ export class NativeStrategy extends BaseStrategy {
     stopNodeId: string | Set<string>,
     visited: Set<string>
   ): unknown[] {
-    if (targetIds.length === 0) return [];
-    if (targetIds.length === 1) {
-      return this.buildSequenceUntilNode(flow, targetIds[0], stopNodeId, new Set(visited));
-    }
-
     const stopSet = stopNodeId instanceof Set ? stopNodeId : new Set([stopNodeId]);
+
+    // Drop any target that IS ALREADY a member of the caller's own stop
+    // boundary before doing anything else. A caller's stopNodeId isn't
+    // always "the one true convergence far downstream" -- since
+    // buildSequenceUntilNode's own condition-handling then/else
+    // reconvergence detection (see its doc comment) can bound a branch's
+    // walk at a SIBLING SET of nodes (bug #12's multi-member convergence
+    // shape), a direct multi-edge fan-out reached WHILE walking one of
+    // those bounded branches can find itself asked to build starting at
+    // targets that are themselves members of that exact bound -- i.e.
+    // "build starting at A, B, C, but don't go past A, B, or C" is not a
+    // real 3-way fan-out to render at all here, it's zero-length: A/B/C
+    // belong entirely to whatever the CALLER's own hoisted continuation
+    // builds once, after this branch returns. Without this filter, each
+    // such target got built anyway (this function's own convergence
+    // detection below has no way to know they were already spoken for),
+    // producing the exact same content once here AND once more via the
+    // caller's hoist -- a real, previously-undetected instance of this
+    // general duplication class, found via the parallel-convergence
+    // fuzzer, 2026-09-25, as a follow-up to the then/else reconvergence
+    // fix above (that fix is what first started constructing a
+    // multi-member stop boundary here).
+    const remainingTargets = targetIds.filter((id) => !stopSet.has(id));
+
+    if (remainingTargets.length === 0) return [];
+    if (remainingTargets.length === 1) {
+      return this.buildSequenceUntilNode(flow, remainingTargets[0], stopNodeId, new Set(visited));
+    }
 
     // Bound each branch at the NEAREST shared convergence node(s), not
     // directly at the group's own end (stopNodeId) -- otherwise a node the
@@ -1050,10 +1247,10 @@ export class NativeStrategy extends BaseStrategy {
     // arbitrarily treating one of them as "the" continuation -- each
     // sibling becomes its own further fan-out/convergence step, correctly
     // handling arbitrary nesting depth.
-    const convergenceSet = this.findConvergenceSet(flow, targetIds);
+    const convergenceSet = this.findConvergenceSet(flow, remainingTargets);
     const convergencePoints = convergenceSet.length > 0 ? convergenceSet : [...stopSet];
     const boundSet = new Set(convergencePoints);
-    const parallelActions = targetIds.map((id) =>
+    const parallelActions = remainingTargets.map((id) =>
       this.buildSequenceUntilNode(flow, id, boundSet, new Set(visited))
     );
     const filteredBranches = parallelActions.filter((a) => a.length > 0);
@@ -1390,7 +1587,16 @@ export class NativeStrategy extends BaseStrategy {
           e.target === targetNodeId && e.sourceHandle === handleType && !this.backEdgeIds.has(e.id)
       )
       .map((e) => this.getNode(flow, e.source))
-      .filter((n): n is ConditionNode => n?.type === 'condition' && !visited.has(n.id));
+      // Item 4 (2026-09-26): a loop's own test is never one arm of an OR.
+      // Its edges are the loop's (a count test's false edge is "done
+      // looping"), so a count loop ending an if's branch, whose exit
+      // meets that if's else at the next step, was folded into a bogus
+      // `if: [or: [counter < N, ...]] then: [] else: [next step]` when the
+      // if sat inside another loop's body. The gate refused it.
+      .filter(
+        (n): n is ConditionNode =>
+          n?.type === 'condition' && !visited.has(n.id) && !this.loopTestNodeIds.has(n.id)
+      );
 
     if (sources.length <= 1) return [];
 
@@ -1545,15 +1751,10 @@ export class NativeStrategy extends BaseStrategy {
       const repeatBlock = this.buildRepeatBlock(flow, repeatPattern, visited);
       if (repeatBlock) {
         sequence.push(repeatBlock);
-        // Continue from the exit node
-        if (repeatPattern.exitNodeId) {
-          const afterRepeat = this.buildSequenceFromNode(
-            flow,
-            repeatPattern.exitNodeId,
-            new Set(visited)
-          );
-          sequence.push(...afterRepeat);
-        }
+        // Continue from the exit node(s)
+        sequence.push(
+          ...this.buildAfterPattern(flow, this.patternExitIds(flow, repeatPattern), visited)
+        );
         return sequence;
       }
     }
@@ -1564,14 +1765,9 @@ export class NativeStrategy extends BaseStrategy {
       visited.add(nodeId);
       sequence.push(this.buildSequenceBlock(flow, sequencePattern, visited));
       visited.add(sequencePattern.endNodeId);
-      if (sequencePattern.exitNodeId) {
-        const afterSequence = this.buildSequenceFromNode(
-          flow,
-          sequencePattern.exitNodeId,
-          new Set(visited)
-        );
-        sequence.push(...afterSequence);
-      }
+      sequence.push(
+        ...this.buildAfterPattern(flow, this.patternExitIds(flow, sequencePattern), visited)
+      );
       return sequence;
     }
 
@@ -1606,14 +1802,7 @@ export class NativeStrategy extends BaseStrategy {
       // it renders the second condition as its own separate if/then/else
       // once buildSequenceFromNode reaches it via the convergence
       // continuation, rather than as a choose case.
-      const truePathEdges = this.getOutgoingEdges(flow, node.id).filter(
-        (e) => e.sourceHandle === 'true' && !this.backEdgeIds.has(e.id)
-      );
-      const falseTargetReachableViaTruePath =
-        firstFalseTarget !== null &&
-        truePathEdges.some(
-          (e) => this.getShortestDistance(flow, e.target, firstFalseTarget!.id) !== Number.POSITIVE_INFINITY
-        );
+      const falseTargetReachableViaTruePath = this.isFalseTargetReachableViaTruePath(flow, node.id);
 
       const isChooseChain =
         firstFalseTarget?.type === 'condition' &&
@@ -1629,11 +1818,14 @@ export class NativeStrategy extends BaseStrategy {
         type BranchInfo = { conditions: unknown[]; thenNodeIds: string[] };
         const branchInfos: BranchInfo[] = [];
         let currentChoiceNode: FlowNode | null = node;
-        let defaultStartId: string | null = null;
+        // Every false target of the last case examined (a `parallel:` when
+        // there are several), or of a fall-through last case.
+        let defaultStartIds: string[] = [];
+        let fallThroughCaseId: string | null = null;
 
         while (currentChoiceNode?.type === 'condition') {
           visited.add(currentChoiceNode.id);
-          const choiceFirstNodeId = currentChoiceNode.id;
+          const choiceFirstNodeId: string = currentChoiceNode.id;
 
           // Collect AND-chain within this choice (conditions on TRUE path with no own false path)
           const branchConditions: unknown[] = [];
@@ -1664,7 +1856,20 @@ export class NativeStrategy extends BaseStrategy {
               const innerFalse = this.getOutgoingEdges(flow, trueTarget.id).filter(
                 (e) => e.sourceHandle === 'false' && !this.backEdgeIds.has(e.id)
               );
-              if (innerFalse.length === 0) {
+              // Bug #21: a `_blockKey` head is its own nested if/choose, so a
+              // missing false edge means "nothing happens", not "fall
+              // through to the next case" -- see canFoldIntoAndChain.
+              const choiceFalseTargets = this.getOutgoingEdges(flow, choiceFirstNodeId)
+                .filter((e) => e.sourceHandle === 'false' && !this.backEdgeIds.has(e.id))
+                .map((e) => e.target);
+              if (
+                this.canFoldIntoAndChain(
+                  flow,
+                  trueTarget,
+                  innerFalse.map((e) => e.target),
+                  choiceFalseTargets
+                )
+              ) {
                 // No false path — AND-condition within this choice
                 visited.add(trueTarget.id);
                 innerNode = trueTarget;
@@ -1688,13 +1893,64 @@ export class NativeStrategy extends BaseStrategy {
             currentChoiceNode = null;
             break;
           }
+          // A fall-through last case (isFallThroughCase): its false edge is
+          // the Choose's continuation, never another case.
+          if (choiceFirstNodeId === fallThroughCaseId) {
+            defaultStartIds = choiceFalse.map((e) => e.target);
+            currentChoiceNode = null;
+            break;
+          }
 
-          const nextFalseNode = this.getNode(flow, choiceFalse[0].target);
+          // Several false edges are a `parallel:` else, never a next case:
+          // taking only the first one as "the next case" (or as the whole
+          // default) dropped the others.
+          const nextFalseNode: FlowNode | undefined =
+            choiceFalse.length === 1 ? this.getNode(flow, choiceFalse[0].target) : undefined;
 
-          if (nextFalseNode?.type === 'condition' && !visited.has(nextFalseNode.id)) {
+          // Bug #19 (2026-09-25, found via random-graph-fuzz.test.ts's
+          // documented "3+ branch, one with further branching" gap): the
+          // entry guard above (isFalseTargetReachableViaTruePath) only ever
+          // vetted the chain's FIRST condition. Every later candidate case
+          // was accepted just for being an unvisited condition on the false
+          // path -- including an else-less `if` that is followed by more
+          // content, e.g. `if C1 then A else [if C2 then B; if C3 then D
+          // else E]`. YamlParser gives that inner else-less C2 an implicit
+          // fallthrough false edge to C3, and B also flows on to C3, so C2
+          // is not an alternative to anything: both of its outcomes
+          // continue into C3. Absorbing it as a case flattened the source
+          // into a 4-way `choose` (C1 / C2 / C3 / default E) that skips
+          // C3 whenever C2 is true -- caught by verifyNativeOutput, which
+          // forced a StateMachineStrategy fallback for ordinary
+          // automations and made transpile() fail outright when the same
+          // shape sat inside a parallel branch (state-machine.ts renders
+          // those branches with this same tree-walker and has nowhere
+          // further to fall back to). Applying the same predicate to each
+          // candidate before extending the chain stops it there instead:
+          // the candidate becomes the start of the `default:` sequence and
+          // is rendered as its own plain if/then, followed by whatever
+          // comes after it.
+          // Bug #54 (2026-09-26): the same pattern exclusions as the chain's
+          // first condition (isChooseChain above). A loop's test (or a
+          // sequence group's entry) on the false side is the default's
+          // first step, never a case: `default: [repeat: while C ...]`
+          // came out as one more case, `C: [loop body once]`.
+          const isCandidate =
+            nextFalseNode?.type === 'condition' &&
+            !visited.has(nextFalseNode.id) &&
+            !this.repeatPatterns.has(nextFalseNode.id) &&
+            !this.repeatInternalNodeIds.has(nextFalseNode.id) &&
+            !this.sequencePatterns.has(nextFalseNode.id);
+          const isCase =
+            isCandidate &&
+            !this.isFalseTargetReachableViaTruePath(flow, nextFalseNode!.id) &&
+            !this.continuesPastEarlierCases(flow, nextFalseNode!.id, branchInfos);
+          const isFallThrough =
+            isCandidate && !isCase && this.isFallThroughCase(flow, nextFalseNode!.id, branchInfos);
+          if (isFallThrough) fallThroughCaseId = nextFalseNode!.id;
+          if (isCase || isFallThrough) {
             currentChoiceNode = nextFalseNode;
           } else {
-            defaultStartId = choiceFalse[0].target;
+            defaultStartIds = choiceFalse.map((e) => e.target);
             currentChoiceNode = null;
           }
         }
@@ -1709,12 +1965,14 @@ export class NativeStrategy extends BaseStrategy {
         // convergence node, and findConvergencePoint's old single-node contract
         // silently corrupted this shape exactly the same way it did for a plain
         // fan-out (see findConvergenceSet's own doc comment).
-        const allBranchStarts = [
-          ...branchInfos.flatMap((b) => b.thenNodeIds),
-          ...(defaultStartId ? [defaultStartId] : []),
+        const branchGroups = [
+          ...branchInfos.map((b) => b.thenNodeIds),
+          ...(defaultStartIds.length > 0 ? [defaultStartIds] : []),
         ];
-        const convergenceSet =
-          allBranchStarts.length >= 2 ? this.findConvergenceSet(flow, allBranchStarts) : [];
+        const convergenceSet = this.findConvergenceSet(
+          flow,
+          branchGroups.map((g) => this.withoutStopOnly(flow, g))
+        );
         const convergenceBoundSet = convergenceSet.length > 0 ? new Set(convergenceSet) : null;
 
         // Build choose options
@@ -1732,10 +1990,27 @@ export class NativeStrategy extends BaseStrategy {
 
         const chooseAction: Record<string, unknown> = { choose: chooseOptions };
 
-        if (defaultStartId) {
-          const defSeq = convergenceBoundSet
-            ? this.buildSequenceUntilNode(flow, defaultStartId, convergenceBoundSet, new Set(visited))
-            : this.buildSequenceFromNode(flow, defaultStartId, new Set(visited));
+        if (defaultStartIds.length > 0) {
+          // One start: the same walk as before. Several: a `parallel:`, like
+          // a case's own fan-out above.
+          const defSeq =
+            defaultStartIds.length === 1
+              ? convergenceBoundSet
+                ? this.buildSequenceUntilNode(
+                    flow,
+                    defaultStartIds[0],
+                    convergenceBoundSet,
+                    new Set(visited)
+                  )
+                : this.buildSequenceFromNode(flow, defaultStartIds[0], new Set(visited))
+              : convergenceBoundSet
+                ? this.buildFanOutUntilNode(
+                    flow,
+                    defaultStartIds,
+                    convergenceBoundSet,
+                    new Set(visited)
+                  )
+                : this.buildFanOut(flow, defaultStartIds, new Set(visited));
           if (defSeq.length > 0) {
             chooseAction.default = defSeq;
           }
@@ -1784,15 +2059,22 @@ export class NativeStrategy extends BaseStrategy {
             nextNode?.type === 'condition' &&
             !visited.has(nextNode.id) &&
             !this.repeatPatterns.has(nextNode.id) &&
-            !this.repeatInternalNodeIds.has(nextNode.id)
+            // Item 4: a loop's test is never a list member, but a list
+            // inside a loop body still is (loop bodies are built with this
+            // same walker, so excluding every loop-internal node rendered
+            // `if: [A, B] ... else` in a body as nested ifs).
+            !this.loopTestNodeIds.has(nextNode.id)
           ) {
             const nextFalsePaths = this.getOutgoingEdges(flow, nextNode.id).filter(
               (edge) => edge.sourceHandle === 'false' && !this.backEdgeIds.has(edge.id)
             );
 
-            const canChain =
-              nextFalsePaths.length === 0 ||
-              (nextFalsePaths.length === 1 && elseNodeIds.includes(nextFalsePaths[0].target));
+            const canChain = this.canFoldIntoAndChain(
+              flow,
+              nextNode,
+              nextFalsePaths.map((edge) => edge.target),
+              elseNodeIds
+            );
 
             if (canChain) {
               currentNode = nextNode;
@@ -1814,7 +2096,6 @@ export class NativeStrategy extends BaseStrategy {
           else: [],
         };
 
-        const allBranchStarts = [...thenNodeIds, ...elseNodeIds];
         // findConvergenceSet (not findConvergencePoint) -- bug #12, found via
         // the randomized fuzzer, 2026-09-06: confirmed via empirical audit to
         // occur here too (an if/then and if/else branch that both continue
@@ -1822,7 +2103,10 @@ export class NativeStrategy extends BaseStrategy {
         // convergence node -- see findConvergenceSet's own doc comment).
         const convergenceSet =
           thenNodeIds.length > 0 && elseNodeIds.length > 0
-            ? this.findConvergenceSet(flow, allBranchStarts)
+            ? this.findConvergenceSet(flow, [
+                this.withoutStopOnly(flow, thenNodeIds),
+                this.withoutStopOnly(flow, elseNodeIds),
+              ])
             : [];
         const convergenceBoundSet = convergenceSet.length > 0 ? new Set(convergenceSet) : null;
 
@@ -2004,6 +2288,210 @@ export class NativeStrategy extends BaseStrategy {
   }
 
   /**
+   * Whether `next` -- a condition sitting on the true path of the condition
+   * chain being built -- can be folded into that chain as one more AND'd
+   * condition, given its own false targets and the chain's shared else
+   * targets.
+   *
+   * YamlParser encodes a multi-condition list (`if: [A, B]`, or a choose
+   * case's `conditions: [A, B]`) as A -true-> B with only A's false edge
+   * wired, so a list member with no false edge of its own shares the
+   * chain's else. That convention is kept for every condition WITHOUT a
+   * `_blockKey` (list members, and plain conditions drawn on the canvas).
+   *
+   * Bug #21 (2026-09-26): a condition WITH a `_blockKey` is the head of a
+   * separate nested if/choose (the parser and the canvas's block factories
+   * stamp one on every construct head, never on a list member -- the same
+   * signal bug #13's and bug #22's fixes rely on). Its missing false edge
+   * means "nothing happens", so folding it made `if A then [if B then X]
+   * else Y` run Y when A was true and B false. A head folds only when its
+   * false targets are exactly the chain's else targets (both empty
+   * included), where the fold really is equivalent.
+   *
+   * A member also folds when its single false edge points at the chain's
+   * own else. (The choose-case loop used to accept only members with no
+   * false edge at all; YamlParser wires every member of an else-less `if:`
+   * to the next step, so such a list folded into a case one member per
+   * save and a round trip never settled -- decision D1 follow-up.)
+   * extractFromGraph.ts's buildConditionChain applies the same rule
+   * independently.
+   */
+  private canFoldIntoAndChain(
+    flow: FlowGraph,
+    next: FlowNode,
+    nextFalseTargets: string[],
+    chainElseTargets: string[]
+  ): boolean {
+    // Bug #26 (2026-09-26, found by the canvas-graph fuzzer): a condition
+    // that the chain's ELSE path also leads to isn't an AND'd member -- it's
+    // where the then- and else-paths meet again, i.e. the next statement
+    // (e.g. a canvas "if NOT c then [...]" followed by another if: c's true
+    // edge and the end of its body both go to that if). Folding it made the
+    // following statement's condition part of this one's.
+    if (
+      chainElseTargets.some(
+        (t) =>
+          t === next.id || this.getShortestDistance(flow, t, next.id) !== Number.POSITIVE_INFINITY
+      )
+    ) {
+      return false;
+    }
+    const isConstructHead =
+      typeof (next.data as Record<string, unknown> | undefined)?._blockKey === 'string';
+    if (isConstructHead) {
+      const a = new Set(nextFalseTargets);
+      const b = new Set(chainElseTargets);
+      return a.size === b.size && [...a].every((id) => b.has(id));
+    }
+    if (nextFalseTargets.length === 0) return true;
+    // Its false edges go exactly where the chain's else does -- one target,
+    // or several when what follows is a parallel (YamlParser wires every
+    // member's false edge to all of them; bug #51, 2026-09-26: requiring
+    // exactly one made such a list fold on every other save).
+    const a = new Set(nextFalseTargets);
+    const b = new Set(chainElseTargets);
+    return a.size === b.size && [...a].every((id) => b.has(id));
+  }
+
+  /**
+   * True when a condition node's single false-path target is also reachable
+   * by walking forward from its true path -- i.e. its two outcomes are not
+   * mutually exclusive alternatives, because the true path rejoins the
+   * false target afterwards (an else-less `if` followed by more content, or
+   * two independent conditions back to back). Such a node must never be
+   * rendered as a case of a mutually-exclusive choose/elif chain. Used both
+   * to decide whether a chain starts at all (bug fix verified 2026-09-06
+   * against 03-multiple-conditions.yaml) and whether each later candidate
+   * may extend it (bug #19). Back edges are excluded throughout, and a node
+   * without exactly one false-path edge reports false, matching the
+   * original inline check this replaces.
+   */
+  /**
+   * Decision D1 (2026-09-26): drops branches that are just a `stop` step
+   * with nothing after it and no other way in (how analyzer/path-endings.ts
+   * makes a path that ends explicit) before looking for where an if's or a Choose's branches
+   * meet again. Such a branch never reaches anything, but it ends the
+   * automation, so the steps after the meeting point can still be written
+   * once after the if/Choose rather than copied into every other branch.
+   * extractFromGraph.ts's buildConditionChain does the same.
+   */
+  private withoutStopOnly(flow: FlowGraph, startIds: string[]): string[] {
+    return startIds.filter((id) => {
+      const node = this.getNode(flow, id);
+      const data = node?.data as Record<string, unknown> | undefined;
+      const isStop =
+        node?.type === 'action' && data !== undefined && 'stop' in data && data.enabled !== false;
+      // Only a stop of this branch's own (one way in): a stop that other
+      // paths also reach -- the automation's last step, say -- is a
+      // meeting point like any other.
+      const incoming = flow.edges.filter((e) => e.target === id && !this.backEdgeIds.has(e.id));
+      return !(isStop && this.getOutgoingEdges(flow, id).length === 0 && incoming.length === 1);
+    });
+  }
+
+  /**
+   * Decision D1 (2026-09-26): the last case of a Choose with no default.
+   * Its false edge goes to where every case meets again (the step after
+   * the Choose -- how YamlParser builds `choose:` without `default:`, and
+   * how analyzer/path-endings.ts completes a canvas Choose block), so its
+   * false target is reachable from its own true path too, which is what
+   * bug #19's guard rejects. It is still a case, not the start of a
+   * `default:`, when every earlier case's body reaches that same target
+   * without going through this condition: then it's the Choose's
+   * continuation. (In bug #19's shape an earlier case's body never reaches
+   * it.) Without this, `choose: [A, B]` then S came back as `choose: [A]`,
+   * `default: [if B ...]` -- equivalent, but not what was written.
+   */
+  private isFallThroughCase(
+    flow: FlowGraph,
+    conditionId: string,
+    earlierCases: { thenNodeIds: string[] }[]
+  ): boolean {
+    const falseEdges = this.getOutgoingEdges(flow, conditionId).filter(
+      (e) => e.sourceHandle === 'false' && !this.backEdgeIds.has(e.id)
+    );
+    if (falseEdges.length === 0 || earlierCases.length === 0) return false;
+    // Several false edges (the step after the Choose is a `parallel:`):
+    // every earlier case must reach every one of them.
+    const targets = falseEdges.map((e) => e.target);
+    return earlierCases.every((c) => {
+      if (c.thenNodeIds.length === 0) return false;
+      const reached = this.reachedAvoiding(flow, c.thenNodeIds, conditionId);
+      return targets.every((t) => reached.has(t));
+    });
+  }
+
+  /**
+   * Bug #53 (2026-09-26): a candidate case that is an if/else whose two
+   * sides meet again before anything the earlier cases reach -- `if A
+   * then X else [if B then Y else Z; W]`, where W runs after either side
+   * of B but never after X. B isn't an alternative to A there: taken as a
+   * case, W was copied into B's case and into the default, and a loop in
+   * W could only be built once (repeatPatterns is one-shot), so the second
+   * copy came out as loose steps and native failed its own verification.
+   * The same idea as bug #19's guard (isFalseTargetReachableViaTruePath)
+   * for an if WITH an else. Such a candidate starts the `default:`
+   * instead, written as its own if/else followed by W.
+   */
+  private continuesPastEarlierCases(
+    flow: FlowGraph,
+    conditionId: string,
+    earlierCases: { thenNodeIds: string[] }[]
+  ): boolean {
+    const targets = (handle: 'true' | 'false') =>
+      this.getOutgoingEdges(flow, conditionId)
+        .filter((e) => e.sourceHandle === handle && !this.backEdgeIds.has(e.id))
+        .map((e) => e.target);
+    const trueTargets = this.withoutStopOnly(flow, targets('true'));
+    const falseTargets = this.withoutStopOnly(flow, targets('false'));
+    if (trueTargets.length === 0 || falseTargets.length === 0) return false;
+    const meet = this.findConvergenceSet(flow, [trueTargets, falseTargets]);
+    if (meet.length === 0) return false;
+    return !earlierCases.every((c) => {
+      if (c.thenNodeIds.length === 0) return false;
+      const reached = this.reachedAvoiding(flow, c.thenNodeIds, conditionId);
+      return meet.every((id) => reached.has(id));
+    });
+  }
+
+  /** Every node reachable from `starts` by forward edges without passing through `avoidId`. */
+  private reachedAvoiding(flow: FlowGraph, starts: string[], avoidId: string): Set<string> {
+    const seen = new Set<string>([avoidId]);
+    const queue = starts.filter((id) => id !== avoidId);
+    while (queue.length > 0) {
+      const id = queue.shift()!;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      for (const e of this.getOutgoingEdges(flow, id)) {
+        if (!this.backEdgeIds.has(e.id)) queue.push(e.target);
+      }
+    }
+    seen.delete(avoidId);
+    return seen;
+  }
+
+  private isFalseTargetReachableViaTruePath(flow: FlowGraph, conditionId: string): boolean {
+    const falseEdges = this.getOutgoingEdges(flow, conditionId).filter(
+      (e) => e.sourceHandle === 'false' && !this.backEdgeIds.has(e.id)
+    );
+    // Several false edges (an else-less `if` followed by a `parallel:`, or a
+    // `parallel:` else): if the true path reaches any of them, the false
+    // outcome is (at least partly) what comes after this condition, not an
+    // alternative to it. Treating such a condition as a case used to keep
+    // only one of its false targets.
+    const trueEdges = this.getOutgoingEdges(flow, conditionId).filter(
+      (e) => e.sourceHandle === 'true' && !this.backEdgeIds.has(e.id)
+    );
+    return falseEdges.some((f) => {
+      const falseTarget = this.getNode(flow, f.target);
+      if (!falseTarget) return false;
+      return trueEdges.some(
+        (e) => this.getShortestDistance(flow, e.target, falseTarget.id) !== Number.POSITIVE_INFINITY
+      );
+    });
+  }
+
+  /**
    * Get shortest distance from start to target node using BFS
    */
   private getShortestDistance(flow: FlowGraph, startId: string, targetId: string): number {
@@ -2059,19 +2547,42 @@ export class NativeStrategy extends BaseStrategy {
    * findConvergencePoint used, so callers get a deterministic "nearest
    * first" order even when they only care about a single element.
    */
-  private findConvergenceSet(flow: FlowGraph, branchStarts: string[]): string[] {
-    if (branchStarts.length < 2) return [];
+  private findConvergenceSet(
+    flow: FlowGraph,
+    branchStartsOrGroups: (string | string[])[],
+    boundary?: Set<string>
+  ): string[] {
+    // Bug #50 (2026-09-26): a branch can start with several nodes (an if's
+    // else that is itself a parallel). Each such group is ONE branch: what
+    // it reaches is the union of what its starts reach. Taking every start
+    // as its own branch missed the meeting point where an if's then-branch
+    // ends by fanning into the very parallel its else starts with -- the
+    // parallel got copied into both branches, and a loop inside it could
+    // only be built once (repeatPatterns is one-shot), so the second copy
+    // came out as a plain if.
+    const groups = branchStartsOrGroups
+      .map((s) => (Array.isArray(s) ? s : [s]))
+      .filter((g) => g.length > 0);
+    if (groups.length < 2) return [];
 
     // Same forward-only, back-edge-excluding reachability search as
     // findConvergencePoint -- see its own comment for why back edges must
-    // be excluded here.
-    const reachableSets = branchStarts.map((startId) => {
+    // be excluded here. `boundary`, when given, is an outer caller's own
+    // stop-node set (see buildSequenceUntilNode's condition-node handling)
+    // -- a node in it is still recorded as reachable (so it can still be
+    // detected as A convergence point, same as any other), but the BFS
+    // does not expand PAST it. Without this, a caller bounded by its own
+    // stopNodeId could get back an "inner" convergence point that is
+    // actually beyond that boundary (on the far side of it), which is not
+    // a real inner convergence from that caller's point of view at all.
+    const reachableSets = groups.map((group) => {
       const reachable = new Set<string>();
-      const queue = [startId];
+      const queue = [...group];
       while (queue.length > 0) {
         const nodeId = queue.shift()!;
         if (reachable.has(nodeId)) continue;
         reachable.add(nodeId);
+        if (boundary?.has(nodeId)) continue;
         const outgoing = this.getOutgoingEdges(flow, nodeId).filter(
           (e) => !this.backEdgeIds.has(e.id)
         );
@@ -2096,7 +2607,8 @@ export class NativeStrategy extends BaseStrategy {
     // one, and belongs after that sibling's own convergence rather than
     // alongside it. Conceptually the same "drop dominated targets" idea
     // as state-machine.ts's filterIndependentFanOutTargets, reimplemented
-    // locally here to avoid a cross-file dependency.
+    // locally here to avoid a cross-file dependency. Bounded by the same
+    // `boundary` as above, for the same reason.
     const reaches = (fromId: string, toId: string): boolean => {
       if (fromId === toId) return false;
       const visited = new Set<string>();
@@ -2105,6 +2617,7 @@ export class NativeStrategy extends BaseStrategy {
         const nodeId = queue.shift()!;
         if (visited.has(nodeId)) continue;
         visited.add(nodeId);
+        if (boundary?.has(nodeId)) continue;
         const outgoing = this.getOutgoingEdges(flow, nodeId).filter(
           (e) => !this.backEdgeIds.has(e.id)
         );
@@ -2123,8 +2636,8 @@ export class NativeStrategy extends BaseStrategy {
     if (minimal.length <= 1) return minimal;
 
     const withDistance = minimal.map((nodeId) => {
-      const distances = branchStarts.map((startId) =>
-        this.getShortestDistance(flow, startId, nodeId)
+      const distances = groups.map((group) =>
+        Math.min(...group.map((startId) => this.getShortestDistance(flow, startId, nodeId)))
       );
       return { nodeId, maxDist: Math.max(...distances) };
     });
@@ -2164,16 +2677,14 @@ export class NativeStrategy extends BaseStrategy {
       visited.add(nodeId);
       const seq: unknown[] = [this.buildSequenceBlock(flow, sequencePattern, visited)];
       visited.add(sequencePattern.endNodeId);
-      if (sequencePattern.exitNodeId && !stopSet.has(sequencePattern.exitNodeId)) {
-        seq.push(
-          ...this.buildSequenceUntilNode(
-            flow,
-            sequencePattern.exitNodeId,
-            stopNodeId,
-            new Set(visited)
-          )
-        );
-      }
+      seq.push(
+        ...this.buildAfterPattern(
+          flow,
+          this.patternExitIds(flow, sequencePattern),
+          visited,
+          stopNodeId
+        )
+      );
       return seq;
     }
 
@@ -2194,16 +2705,14 @@ export class NativeStrategy extends BaseStrategy {
       const repeatBlock = this.buildRepeatBlock(flow, repeatPattern, visited);
       if (repeatBlock) {
         const seq: unknown[] = [repeatBlock];
-        if (repeatPattern.exitNodeId && !stopSet.has(repeatPattern.exitNodeId)) {
-          seq.push(
-            ...this.buildSequenceUntilNode(
-              flow,
-              repeatPattern.exitNodeId,
-              stopNodeId,
-              new Set(visited)
-            )
-          );
-        }
+        seq.push(
+          ...this.buildAfterPattern(
+            flow,
+            this.patternExitIds(flow, repeatPattern),
+            visited,
+            stopNodeId
+          )
+        );
         return seq;
       }
     }
@@ -2231,24 +2740,89 @@ export class NativeStrategy extends BaseStrategy {
       const chooseAction = action as Record<string, unknown>;
       const truePath = outgoing.filter((edge) => edge.sourceHandle === 'true');
       const falsePath = outgoing.filter((edge) => edge.sourceHandle === 'false');
+      let thenNodeIds = truePath.map((edge) => edge.target);
+      const elseNodeIds = falsePath.map((edge) => edge.target);
 
-      // buildFanOutUntilNode, not a plain .flatMap -- found via empirical audit, 2026-09-06, as bug #12: a genuine multi-target then/else fan-out (an ordinary `parallel:` block as an if/then's or a choose case's own content) was being flattened via .flatMap into a plain sequential list instead of wrapped in `{ parallel: [...] }` -- silently turning concurrent branches into sequential ones, a real behavior change for any branch containing a delay/wait (same class of bug as #4/#9/#11, just on the DEFAULT/native if-then-else and choose-case builders instead of a loop/sequence-group body or StateMachineStrategy).
-      if (truePath.length > 0) {
-        chooseAction.then = this.buildFanOutUntilNode(
-          flow,
-          truePath.map((edge) => edge.target),
-          stopNodeId,
-          new Set(visited)
+      // Item 4 (2026-09-26): fold a multi-condition list (`if: [A, B]`:
+      // A -true-> B, B sharing A's else) into this one if, exactly as
+      // buildSequenceFromNode's Condition Chain Logic does. This bounded
+      // walker -- used for sequence groups and other bounded bodies --
+      // rendered each member as its own nested if with an empty else, so
+      // `if: [A, B] then X else Y` ran nothing (not Y) when A was true and
+      // B false. The gate refused every such automation.
+      while (thenNodeIds.length === 1) {
+        const nextNode = this.getNode(flow, thenNodeIds[0]);
+        if (
+          nextNode?.type !== 'condition' ||
+          visited.has(nextNode.id) ||
+          stopSet.has(nextNode.id) ||
+          this.repeatPatterns.has(nextNode.id) ||
+          // A loop's own test, never a list member. (Not every loop-internal
+          // node: this walker builds loop bodies too, and a list inside a
+          // body is still a list.)
+          this.loopTestNodeIds.has(nextNode.id)
+        ) {
+          break;
+        }
+        const nextOutgoing = this.getOutgoingEdges(flow, nextNode.id).filter(
+          (e) => !this.backEdgeIds.has(e.id)
         );
+        const nextFalseTargets = nextOutgoing
+          .filter((e) => e.sourceHandle === 'false')
+          .map((e) => e.target);
+        if (!this.canFoldIntoAndChain(flow, nextNode, nextFalseTargets, elseNodeIds)) break;
+        (chooseAction.if as unknown[]).push(this.buildCondition(nextNode as ConditionNode));
+        visited.add(nextNode.id);
+        thenNodeIds = nextOutgoing.filter((e) => e.sourceHandle === 'true').map((e) => e.target);
       }
 
-      if (falsePath.length > 0) {
-        chooseAction.else = this.buildFanOutUntilNode(
-          flow,
-          falsePath.map((edge) => edge.target),
-          stopNodeId,
-          new Set(visited)
-        );
+      // Do the then- and else-paths reconverge on a shared node BEFORE
+      // this call's own stopNodeId boundary? buildSequenceFromNode's own
+      // unbounded "Condition Chain Logic" already detects exactly this
+      // (see its doc comment) via findConvergenceSet, but this bounded
+      // sibling -- the walker every Parallel branch and choose-case body
+      // is actually built through -- used to fan true/else out completely
+      // independently below, each bounded ONLY by the caller's outer
+      // stopNodeId. A node downstream of BOTH branches but still before
+      // that outer stop therefore got walked TWICE, once from each side.
+      // Most of the time that's merely redundant (harmless duplication of
+      // plain actions), but when the shared node is a repeat pattern's
+      // entry, buildRepeatBlock's one-shot `this.repeatPatterns.delete(...)`
+      // means only the FIRST branch to reach it gets the real `repeat:`
+      // block -- the second branch's walk finds the pattern already
+      // consumed and falls through to the plain per-node condition
+      // handling instead, silently collapsing "loop until done" into "run
+      // the loop's own test once and stop" with no error, warning, or
+      // validation failure. Found via the parallel-convergence fuzzer,
+      // 2026-09-25 (a nested if/else, both of whose outcomes lead into a
+      // shared trailing `repeat: while`, inside one branch of a `parallel:`
+      // block). findConvergenceSet is called with `stopSet` as its
+      // `boundary` so it can't report a spurious "inner" convergence that
+      // is actually beyond this call's own stop boundary.
+      const innerConvergenceSet =
+        thenNodeIds.length > 0 && elseNodeIds.length > 0
+          ? this.findConvergenceSet(
+              flow,
+              [this.withoutStopOnly(flow, thenNodeIds), this.withoutStopOnly(flow, elseNodeIds)],
+              stopSet
+            ).filter((id) => !stopSet.has(id))
+          : [];
+      const innerBoundSet: string | Set<string> =
+        innerConvergenceSet.length > 0 ? new Set([...stopSet, ...innerConvergenceSet]) : stopNodeId;
+
+      // buildFanOutUntilNode, not a plain .flatMap -- found via empirical audit, 2026-09-06, as bug #12: a genuine multi-target then/else fan-out (an ordinary `parallel:` block as an if/then's or a choose case's own content) was being flattened via .flatMap into a plain sequential list instead of wrapped in `{ parallel: [...] }` -- silently turning concurrent branches into sequential ones, a real behavior change for any branch containing a delay/wait (same class of bug as #4/#9/#11, just on the DEFAULT/native if-then-else and choose-case builders instead of a loop/sequence-group body or StateMachineStrategy).
+      if (thenNodeIds.length > 0) {
+        chooseAction.then = this.buildFanOutUntilNode(flow, thenNodeIds, innerBoundSet, new Set(visited));
+      }
+
+      if (elseNodeIds.length > 0) {
+        chooseAction.else = this.buildFanOutUntilNode(flow, elseNodeIds, innerBoundSet, new Set(visited));
+      }
+
+      if (innerConvergenceSet.length === 1) {
+        sequence.push(...this.buildSequenceUntilNode(flow, innerConvergenceSet[0], stopNodeId, new Set(visited)));
+      } else if (innerConvergenceSet.length > 1) {
+        sequence.push(...this.buildFanOutUntilNode(flow, innerConvergenceSet, stopNodeId, new Set(visited)));
       }
     } else if (outgoing.length === 1) {
       // Single outgoing edge - continue if not at stop node

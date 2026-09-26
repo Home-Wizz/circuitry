@@ -149,7 +149,7 @@ export function programsEquivalent(a: BProgram, b: BProgram, path = 'root'): Com
  * positives over false negatives" rule (see verifyNativeOutput.ts).
  */
 export function normalizeProgram(program: BProgram): BProgram {
-  let result = program.map(normalizeStep);
+  let result = dropNoOpSteps(program.map(normalizeStep));
 
   // Factor out a common trailing continuation that both branches of an
   // `if` step share, splitting it back out into sibling steps that follow
@@ -191,10 +191,35 @@ export function normalizeProgram(program: BProgram): BProgram {
       }
       next.push(step);
     }
-    result = next;
+    result = dropNoOpSteps(next);
   }
 
   return result;
+}
+
+/**
+ * Phase 5 (2026-09-26): steps that do nothing, whichever way they go. An
+ * `if` with nothing in either branch only evaluates a condition (HA
+ * conditions have no side effects); a `parallel` whose every branch is
+ * empty runs nothing. Such steps appear once disabled steps are dropped
+ * (extractFromYaml.ts/extractFromGraph.ts): HA's disabled if-block and a
+ * graph's if whose contents are each disabled are the same no-op. Empty
+ * parallel branches are dropped too. Loops are left alone: an empty `while`
+ * still spins until its condition changes.
+ */
+function dropNoOpSteps(program: BProgram): BProgram {
+  const out: BProgram = [];
+  for (const step of program) {
+    if (step.k === 'if' && step.then.length === 0 && step.else.length === 0) continue;
+    if (step.k === 'parallel') {
+      const branches = step.branches.filter((b) => b.length > 0);
+      if (branches.length === 0) continue;
+      out.push(branches.length === step.branches.length ? step : { k: 'parallel', branches });
+      continue;
+    }
+    out.push(step);
+  }
+  return out;
 }
 
 /**

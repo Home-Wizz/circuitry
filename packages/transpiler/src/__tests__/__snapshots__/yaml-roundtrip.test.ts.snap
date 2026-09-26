@@ -782,6 +782,7 @@ variables:
     graph_id: 624cf5ff-0ab9-4881-b6c4-c2359635230f
     graph_version: 1
     strategy: state-machine
+    markers: {}
 "
 `;
 
@@ -851,22 +852,25 @@ actions:
             id:
               - light-toggled-on
               - fan-switch-toggled-on
-          - condition: time
-            after: "05:45:00"
-            before: "21:00:00"
-          - condition: state
-            entity_id: light.ensuite
-            state:
-              - "on"
-          - condition: state
-            entity_id: switch.ensuite_fan
-            state:
-              - "off"
         sequence:
-          - metadata: {}
-            action: switch.turn_on
-            target:
-              entity_id: switch.ensuite_fan
+          - if:
+              - condition: time
+                after: "05:45:00"
+                before: "21:00:00"
+              - condition: state
+                entity_id: light.ensuite
+                state:
+                  - "on"
+              - condition: state
+                entity_id: switch.ensuite_fan
+                state:
+                  - "off"
+            then:
+              - metadata: {}
+                action: switch.turn_on
+                target:
+                  entity_id: switch.ensuite_fan
+            else: []
       - conditions:
           - condition: trigger
             id:
@@ -922,15 +926,6 @@ variables:
       condition_test_9_119:
         x: 410
         "y": 617
-      condition_test_10_120:
-        x: 750
-        "y": 600
-      condition_test_11_121:
-        x: 1090
-        "y": 583
-      condition_test_12_122:
-        x: 1430
-        "y": 566
       condition_test_14_124:
         x: 410
         "y": 777
@@ -949,6 +944,15 @@ variables:
       action_test_8_118:
         x: 1090
         "y": 443
+      condition_test_10_120:
+        x: 750
+        "y": 600
+      condition_test_11_121:
+        x: 1090
+        "y": 583
+      condition_test_12_122:
+        x: 1430
+        "y": 566
       action_test_13_123:
         x: 1770
         "y": 559

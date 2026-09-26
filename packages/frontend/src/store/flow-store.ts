@@ -24,6 +24,7 @@ import { persist } from 'zustand/middleware';
 import { shallow } from 'zustand/shallow';
 import type { AutomationTrace } from '@/lib/ha-api';
 import { getHomeAssistantAPI } from '@/lib/ha-api';
+import { buildAutomationConfig } from '@/lib/automation-config';
 import { computeSourceHash, saveGraph } from '@/lib/graph-storage';
 import { logger } from '@/lib/logger';
 import { generateUUID } from '@/lib/utils';
@@ -985,30 +986,11 @@ export const useFlowStore = create<FlowState>()(
             }
 
             // Create automation in Home Assistant
-            const automationConfig = {
-              alias: state.flowName,
-              description: state.flowDescription || '',
-              ...result.output.automation,
-              variables: {
-                ...(result.output.automation.variables || {}),
-                _circuitry_metadata: {
-                  version: 1,
-                  strategy: 'native' as const,
-                  nodes: graph.nodes.reduce(
-                    (acc, node) => {
-                      acc[node.id] = {
-                        x: node.position.x,
-                        y: node.position.y,
-                      };
-                      return acc;
-                    },
-                    {} as Record<string, { x: number; y: number }>
-                  ),
-                  graph_id: graph.id,
-                  graph_version: 1,
-                },
-              },
-            };
+            const automationConfig = buildAutomationConfig(
+              state.flowName,
+              state.flowDescription || '',
+              result
+            );
 
             const automationId = await api.createAutomation(automationConfig);
 
@@ -1111,30 +1093,11 @@ export const useFlowStore = create<FlowState>()(
             }
 
             // Update automation in Home Assistant
-            const automationConfig = {
-              alias: state.flowName,
-              description: state.flowDescription || '',
-              ...result.output.automation,
-              variables: {
-                ...(result.output.automation.variables || {}),
-                _circuitry_metadata: {
-                  version: 1,
-                  strategy: 'native' as const,
-                  nodes: graph.nodes.reduce(
-                    (acc, node) => {
-                      acc[node.id] = {
-                        x: node.position.x,
-                        y: node.position.y,
-                      };
-                      return acc;
-                    },
-                    {} as Record<string, { x: number; y: number }>
-                  ),
-                  graph_id: graph.id,
-                  graph_version: 1,
-                },
-              },
-            };
+            const automationConfig = buildAutomationConfig(
+              state.flowName,
+              state.flowDescription || '',
+              result
+            );
 
             await api.updateAutomation(state.automationId, automationConfig);
 

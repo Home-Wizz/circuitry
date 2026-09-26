@@ -1,7 +1,8 @@
 import type { FlowGraph } from '@circuitry/shared';
 import { load as yamlLoad } from 'js-yaml';
+import { normalizeGraph } from '../analyzer/normalize';
 import { programsEquivalent } from './behaviorProgram';
-import { extractFromGraph } from './extractFromGraph';
+import { extractFromGraph, type FlowSettings } from './extractFromGraph';
 import { extractFromYamlConfig } from './extractFromYaml';
 
 export interface VerifyResult {
@@ -58,7 +59,10 @@ export interface VerifyResult {
  * never correctness. Missing a real mismatch costs correctness. When in
  * doubt, this function says a conversion is NOT valid.
  */
-export function verifyNativeOutput(originalFlow: FlowGraph, candidateYaml: string): VerifyResult {
+export function verifyNativeOutput(canvasFlow: FlowGraph, candidateYaml: string): VerifyResult {
+  // Decision D1 / bug #28: verify against the graph as the strategies read
+  // it (a no-op for a graph FlowTranspiler already normalized).
+  const originalFlow = normalizeGraph(canvasFlow);
   let config: unknown;
   try {
     config = yamlLoad(candidateYaml);
@@ -141,10 +145,11 @@ export function compareTriggerSets(a: Record<string, unknown>[], b: Record<strin
   return null;
 }
 
-function compareMetadata(
-  original: ReturnType<typeof extractFromGraph>,
-  candidate: ReturnType<typeof extractFromYamlConfig>
-): string | null {
+/** Compares the automation-level settings (mode, max, max_exceeded,
+ * initial_state, trace, top-level variables, trigger_variables, script
+ * fields). Shared with verifyStateMachineOutput, which had no such check
+ * until bug #20. */
+export function compareMetadata(original: FlowSettings, candidate: FlowSettings): string | null {
   if ((original.mode ?? 'single') !== (candidate.mode ?? 'single')) {
     return `mode changed: ${original.mode} -> ${candidate.mode}`;
   }

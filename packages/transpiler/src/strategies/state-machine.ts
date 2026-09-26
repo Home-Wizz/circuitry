@@ -9,8 +9,9 @@ import type {
   TriggerNode,
   WaitNode,
 } from '@circuitry/shared';
-import { isDeviceAction, isJoinNode, isStartNode } from '@circuitry/shared';
+import { isDeviceAction, isStartNode } from '@circuitry/shared';
 import { findBackEdges, type TopologyAnalysis } from '../analyzer/topology';
+import { fanOutHash } from '../utils/fanOutHash';
 import { BaseStrategy, type HAYamlOutput } from './base';
 import { NativeStrategy, stripDottedOnlyConditionFields } from './native';
 
@@ -51,8 +52,24 @@ export class StateMachineStrategy extends BaseStrategy {
     return true;
   }
 
+  /** Phase 5: see recordFanOut. Reset per generate() call. */
+  private fanOutRecords: Record<string, { targets: string[]; hash: string }> = {};
+
+  /**
+   * Phase 5 (2026-09-26): remembers, for a state that renders a fan-out
+   * inline, which graph targets it fans out to (and a fingerprint of the
+   * rendered steps). FlowTranspiler writes these to
+   * `_circuitry_metadata.fan_outs`, so reopening this YAML without its
+   * canonical graph rebuilds the original edges instead of turning each
+   * inline copy of the branches into new nodes.
+   */
+  private recordFanOut(key: string, targets: string[], extraSteps: unknown[]): void {
+    if (extraSteps.length > 0) this.fanOutRecords[key] = { targets, hash: fanOutHash(extraSteps) };
+  }
+
   generate(flow: FlowGraph, analysis: TopologyAnalysis): HAYamlOutput {
     const warnings: string[] = [];
+    this.fanOutRecords = {};
 
     // Strip hint edges (visual-only trigger-routing aids) before any processing
     flow = {
@@ -70,13 +87,13 @@ export class StateMachineStrategy extends BaseStrategy {
       if (triggers.length > 0) {
         // Output as automation with empty action
         return {
-          automation: {
+          automation: this.withAutomationSettings(flow, {
             alias: flow.name,
             description: flow.description || '',
             triggers: triggers,
             actions: [],
             mode: flow.metadata?.mode ?? 'single',
-          },
+          }),
           warnings,
           strategy: this.name,
         };
@@ -106,21 +123,22 @@ export class StateMachineStrategy extends BaseStrategy {
       .filter((n) => n.type !== 'trigger' && n.type !== 'start')
       .map((node) => this.generateNodeBlock(flow, node));
 
-    // Known limitation: generateActionBlock/generateConditionBlock/etc. only
-    // ever wire a single outgoing edge (edges[0]) per node, so genuine
-    // mid-flow fan-out into an explicit Join node isn't fully supported yet
-    // under this strategy (only NativeStrategy's tree-walk handles arbitrary
-    // multi-branch convergence today). Surface it rather than silently
-    // dropping branches.
-    for (const node of flow.nodes) {
-      if (!isJoinNode(node)) continue;
-      const incoming = this.getIncomingEdges(flow, node.id);
-      if (incoming.length >= 2) {
-        warnings.push(
-          `Join node "${node.data.alias ?? node.id}" has multiple incoming branches, but this flow is complex enough to require the state-machine strategy, which does not yet support mid-flow parallel fan-out into a join. Only the first branch may be wired correctly — consider simplifying this flow's topology.`
-        );
-      }
-    }
+    // Historical note (bug #18 investigation, 2026-09-25): this block used to
+    // warn that an explicit Join node with 2+ incoming branches "may only
+    // have its first branch wired correctly" under this strategy. That was
+    // true when the warning was first added (this project's very first
+    // commit, predating every fan-out fix below), but buildFanOutContinuation
+    // / filterIndependentFanOutTargets / buildFanOutFromTargets now resolve
+    // genuine multi-edge convergence correctly: parallel branches, if/else
+    // branches, and raw multi-edge dominance (both a no-op dominated target
+    // and one with real, non-duplicated content) all converge on a Join node
+    // without dropping or duplicating any action - see
+    // state-machine-behavioral-check.test.ts's Join-node cases. The warning
+    // was therefore pure noise (a confusing false positive for anyone who
+    // hit it) and has been removed rather than kept "just in case". If a
+    // genuine convergence gap into a Join node is found in the future, add a
+    // regression test that reproduces it first, then reintroduce a warning
+    // scoped to that specific shape.
 
     // Generate parallel entry blocks for triggers with multiple targets
     const parallelEntryBlocks = this.generateParallelEntryBlocks(flow, triggerRouting);
@@ -187,15 +205,16 @@ export class StateMachineStrategy extends BaseStrategy {
     // If there are triggers, output as automation format
     if (triggers.length > 0) {
       return {
-        automation: {
+        automation: this.withAutomationSettings(flow, {
           alias: flow.name,
           description: flow.description || '',
           triggers: triggers,
           actions: actionSequence,
           mode: flow.metadata?.mode ?? 'single',
-        },
+        }),
         warnings,
         strategy: this.name,
+        fanOuts: this.fanOutRecords,
       };
     }
 
@@ -214,7 +233,39 @@ export class StateMachineStrategy extends BaseStrategy {
       script,
       warnings,
       strategy: this.name,
+      fanOuts: this.fanOutRecords,
     };
+  }
+
+  /**
+   * Adds the automation-level settings NativeStrategy.generate() carries
+   * through (same keys, same conditions, same order). Bug #20, 2026-09-26:
+   * this strategy used to emit only `mode`, so `max`, `max_exceeded`,
+   * `initial_state: false`, `trace` and `trigger_variables` were silently
+   * lost whenever an automation needed the state machine. Top-level
+   * `variables` is not added here: FlowTranspiler.generateAndSerialize
+   * merges flow.userVariables into every strategy's output.
+   */
+  private withAutomationSettings(
+    flow: FlowGraph,
+    automation: Record<string, unknown>
+  ): Record<string, unknown> {
+    if (flow.metadata?.max) {
+      automation.max = flow.metadata.max;
+    }
+    if (flow.metadata?.max_exceeded) {
+      automation.max_exceeded = flow.metadata.max_exceeded;
+    }
+    if (flow.metadata?.initial_state === false) {
+      automation.initial_state = false;
+    }
+    if (flow.metadata?.trace) {
+      automation.trace = flow.metadata.trace;
+    }
+    if (flow.userTriggerVariables && Object.keys(flow.userTriggerVariables).length > 0) {
+      automation.trigger_variables = flow.userTriggerVariables;
+    }
+    return automation;
   }
 
   /**
@@ -408,15 +459,20 @@ export class StateMachineStrategy extends BaseStrategy {
         }
 
         // No shared continuation -- these branches genuinely end
-        // independently, so the pre-existing behavior applies unchanged.
+        // independently.
+        //
+        // Item 4 (2026-09-26): an action branch used to be rendered as just
+        // its own service call ("a lone action node stays a single step"),
+        // dropping whatever followed it in the branch -- the rest of a
+        // sequence, or the loop the action opens (an until whose body
+        // starts with it). The gate refused every such automation. An
+        // action branch is inlined like every other kind below;
+        // buildActionsFromEntryPoint still renders a lone action as that
+        // one step. (buildFanOutFromTargets, the mid-flow equivalent, never
+        // had the special case.)
 
-        // A lone action node - a single service call - stays a single step.
-        if (targetNode.type === 'action') {
-          return this.buildActionCall(targetNode as ActionNode);
-        }
-
-        // Everything else (condition, delay, wait, set_variables, a whole
-        // Choose/If/Else chain, ...) used to get replaced with a throwaway
+        // Other kinds of branch (condition, delay, wait, set_variables, a
+        // whole Choose/If/Else chain, ...) used to get replaced with a throwaway
         // `system_log.write` placeholder and an immediate jump to END —
         // silently discarding the real branch. That's the corruption behind
         // the "Template placeholder" reports: a trigger with 2+ direct
@@ -462,6 +518,10 @@ export class StateMachineStrategy extends BaseStrategy {
         resolvedNextNode = inner.nextNode;
       }
 
+      this.recordFanOut(parallelEntryId, targets, [
+        { parallel: parallelActions },
+        ...extraSequenceSteps,
+      ]);
       parallelBlocks.push({
         conditions: [
           {
@@ -570,10 +630,10 @@ export class StateMachineStrategy extends BaseStrategy {
       return { extraSteps: [], nextNode: nextNodeId === 'END' ? 'END' : nextNodeId };
     }
 
-    return this.buildFanOutFromTargets(
-      flow,
-      edges.map((e) => e.target)
-    );
+    const targets = edges.map((e) => e.target);
+    const result = this.buildFanOutFromTargets(flow, targets);
+    this.recordFanOut(node.id, targets, result.extraSteps);
+    return result;
   }
 
   /**
@@ -599,37 +659,46 @@ export class StateMachineStrategy extends BaseStrategy {
    * Narrow fallback for when a fan-out's branches don't share an ordinary
    * forward convergence point, but ARE the tail end of a loop body -- so
    * their real shared continuation is looping back to the loop's own
-   * condition node, not ending the flow. Deliberately conservative: only
-   * fires when every target either has no outgoing edges at all (a dead
-   * end -- compatible with any convergence, since it makes no claim of its
-   * own) or has ONLY back edges, all pointing at the same single node. Any
-   * target with a normal forward edge, or back edges to more than one
-   * distinct node, is a more complex shape than this heuristic is meant to
-   * resolve, so it bails (returns null) rather than guess -- same
-   * conservative spirit as the rest of Phase A's incremental widening.
+   * condition node, not ending the flow. Only fires when every branch's
+   * ways out are dead ends or back-edges to one and the same node; anything
+   * else returns null rather than guess.
    */
   private findLoopBackConvergence(flow: FlowGraph, targetIds: string[]): string | null {
+    // Bug #25 (2026-09-26, found by running compiled YAML with
+    // sm-interpreter.ts): this used to look only at each target's OWN
+    // outgoing edges, so a branch with more than one step (`parallel: [A,
+    // [B, C]]` as the last statement of a loop body: B's only edge is a
+    // forward one to C) made it bail, and the fan-out dead-ended into END
+    // after the first iteration instead of looping. Walk each branch's
+    // whole forward-reachable subgraph instead: its exits are dead ends
+    // (compatible with anything) and back-edges leaving that subgraph (a
+    // back-edge into the branch's own nodes is an inner loop, not an exit).
+    // Every branch's exits must be back-edges to the same one node.
+    // extractStateMachineFromGraph.ts applies the same rule independently.
     const backEdgeIds = findBackEdges(flow);
     let loopTarget: string | null = null;
-    let sawBackEdge = false;
 
     for (const id of targetIds) {
-      const outgoing = this.getOutgoingEdges(flow, id);
-      if (outgoing.length === 0) continue;
-
-      const backEdgesOut = outgoing.filter((e) => backEdgeIds.has(e.id));
-      if (backEdgesOut.length !== outgoing.length) return null;
-
-      const backTargets = new Set(backEdgesOut.map((e) => e.target));
-      if (backTargets.size !== 1) return null;
-      const [backTarget] = [...backTargets];
-      if (loopTarget !== null && loopTarget !== backTarget) return null;
-
-      loopTarget = backTarget;
-      sawBackEdge = true;
+      const reachable = new Set<string>();
+      const queue = [id];
+      while (queue.length > 0) {
+        const nodeId = queue.shift()!;
+        if (reachable.has(nodeId)) continue;
+        reachable.add(nodeId);
+        for (const e of this.getOutgoingEdges(flow, nodeId)) {
+          if (!backEdgeIds.has(e.id)) queue.push(e.target);
+        }
+      }
+      for (const nodeId of reachable) {
+        for (const e of this.getOutgoingEdges(flow, nodeId)) {
+          if (!backEdgeIds.has(e.id) || reachable.has(e.target)) continue;
+          if (loopTarget !== null && loopTarget !== e.target) return null;
+          loopTarget = e.target;
+        }
+      }
     }
 
-    return sawBackEdge ? loopTarget : null;
+    return loopTarget;
   }
 
   /**
@@ -934,6 +1003,98 @@ export class StateMachineStrategy extends BaseStrategy {
    * Generate block for condition node
    * Evaluates the condition and sets current_node based on result
    */
+  /**
+   * Bug #27 (2026-09-26, found by the canvas-graph fuzzer): where a
+   * condition with NO false edge should go when it's false.
+   *
+   * A multi-condition list (`if: [A, B]`, a choose case's `conditions: [A,
+   * B]`, `while: [A, B]`, `until: [A, B]`) is wired A -true-> B with only A's
+   * false edge; B has none and shares A's. The canvas's AND-chains of plain
+   * conditions use the same convention, and NativeStrategy and the
+   * verifiers have always read it that way. This strategy rendered B's
+   * missing false edge literally, as END -- so "A true, B false" skipped the
+   * else branch and everything after it.
+   *
+   * B is such a list member when its only incoming edge is the true edge of
+   * a condition A that doesn't fan out on true, B isn't itself the head of
+   * a nested construct (no `_blockKey` -- bug #21), and A's false targets
+   * don't lead back to B (then B is where A's branches meet again -- bug
+   * #26). Then B's false targets are A's (recursively, for longer lists).
+   * Otherwise a missing false edge really does mean nothing happens: [].
+   * extractStateMachineFromGraph.ts applies the same rule independently.
+   */
+  private andMemberFalseTargets(
+    flow: FlowGraph,
+    conditionId: string,
+    seen = new Set<string>()
+  ): string[] {
+    if (seen.has(conditionId)) return [];
+    seen.add(conditionId);
+    const backEdgeIds = findBackEdges(flow);
+    const node = this.getNode(flow, conditionId);
+    if (node?.type !== 'condition') return [];
+    const own = flow.edges.filter((e) => e.source === conditionId && e.sourceHandle === 'false');
+    if (own.length > 0) return own.map((e) => e.target);
+    if (typeof (node.data as Record<string, unknown>)._blockKey === 'string') return [];
+    const incoming = flow.edges.filter((e) => e.target === conditionId && !backEdgeIds.has(e.id));
+    if (incoming.length !== 1 || incoming[0].sourceHandle !== 'true') return [];
+    const parent = this.getNode(flow, incoming[0].source);
+    if (parent?.type !== 'condition') return [];
+    const parentTrue = flow.edges.filter(
+      (e) => e.source === parent.id && e.sourceHandle === 'true'
+    );
+    if (parentTrue.length !== 1) return [];
+    const parentElse = this.andMemberFalseTargets(flow, parent.id, seen);
+    const reaches = (from: string): boolean => {
+      const visited = new Set<string>();
+      const queue = [from];
+      while (queue.length > 0) {
+        const id = queue.shift()!;
+        if (id === conditionId) return true;
+        // Never through the parent: an else that loops back to an
+        // enclosing loop's head reaches B only by going around the loop
+        // through A, which doesn't make B a meeting point.
+        if (visited.has(id) || id === parent.id) continue;
+        visited.add(id);
+        for (const e of flow.edges)
+          if (e.source === id && !backEdgeIds.has(e.id)) queue.push(e.target);
+      }
+      return false;
+    };
+    return parentElse.some(reaches) ? [] : parentElse;
+  }
+
+  /**
+   * Bug #23 (2026-09-26): YamlParser wires a `repeat: count` loop as
+   * init(counter = 0) -> body -> increment -> test(counter < N), with the
+   * test's true edge looping back to the INIT node. That edge means "run
+   * the body again" -- NativeStrategy and extractFromGraph.ts both read it
+   * that way (it gives a body that opens with a `parallel:` a single
+   * loop-back target). Rendered literally here, every iteration re-ran
+   * `counter = 0` and the loop never finished. So when `targetId` is the
+   * init node of the count loop whose test is `node`, the real targets are
+   * the init node's own successors (the body entry, or every branch of an
+   * opening `parallel:`). Returns null for any other edge.
+   * extractStateMachineFromGraph.ts applies the same rule independently.
+   */
+  private countLoopRepeatTargets(
+    flow: FlowGraph,
+    node: ConditionNode,
+    targetId: string
+  ): string[] | null {
+    const data = node.data as Record<string, unknown>;
+    if (data.condition !== 'template' || typeof data.value_template !== 'string') return null;
+    const counter = data.value_template.match(/(_repeat_counter_[A-Za-z0-9_]+)\s*<\s*\d+/)?.[1];
+    if (!counter) return null;
+    const target = this.getNode(flow, targetId);
+    if (target?.type !== 'set_variables') return null;
+    const vars = (target.data as Record<string, unknown>).variables as
+      | Record<string, unknown>
+      | undefined;
+    if (!vars || Object.keys(vars).length !== 1 || vars[counter] !== 0) return null;
+    return this.getOutgoingEdges(flow, targetId).map((e) => e.target);
+  }
+
   private generateConditionBlock(
     flow: FlowGraph,
     node: ConditionNode,
@@ -947,14 +1108,26 @@ export class StateMachineStrategy extends BaseStrategy {
     // reconverge at different (or no) points.
     const trueEdges = edges.filter((e) => e.sourceHandle === 'true');
     const falseEdges = edges.filter((e) => e.sourceHandle === 'false');
-    const trueFanOut = this.buildFanOutFromTargets(
-      flow,
-      trueEdges.map((e) => e.target)
+    const trueTargets = trueEdges.flatMap(
+      (e) => this.countLoopRepeatTargets(flow, node, e.target) ?? [e.target]
     );
-    const falseFanOut = this.buildFanOutFromTargets(
-      flow,
-      falseEdges.map((e) => e.target)
+    const trueFanOut = this.buildFanOutFromTargets(flow, trueTargets);
+    const falseTargets =
+      falseEdges.length > 0
+        ? falseEdges.map((e) => e.target)
+        : this.andMemberFalseTargets(flow, node.id);
+    const falseFanOut = this.buildFanOutFromTargets(flow, falseTargets);
+    // Recorded as the node's own edges: for a count loop's test that's the
+    // edge back to the loop's init node (the graph convention), not the
+    // init node's successors it's rendered as. An AND-list member's
+    // inherited else is recorded as is: reopened, it becomes an explicit
+    // false edge to the same place (which the decompiler then drops again).
+    this.recordFanOut(
+      `${node.id}:true`,
+      trueEdges.map((e) => e.target),
+      trueFanOut.extraSteps
     );
+    this.recordFanOut(`${node.id}:false`, falseTargets, falseFanOut.extraSteps);
     const trueTarget = trueFanOut.nextNode;
     const falseTarget = falseFanOut.nextNode;
     const currentNodeId = node.id;

@@ -393,6 +393,47 @@ export const CircuitryMetadataSchema = z.object({
   graph_id: z.string(),
   graph_version: z.number(),
   strategy: z.enum(['native', 'state-machine']),
+  /**
+   * State-machine output only (Phase 5, 2026-09-26): for each state that
+   * renders a fan-out inline (key: state id, plus `:true`/`:false` for a
+   * condition's branch), the graph targets it fans out to and a
+   * fingerprint of the rendered steps. Lets a stale-graph decompile rebuild
+   * the original edges instead of re-parsing the inline copies. Optional:
+   * older saves and native output don't have it.
+   */
+  fan_outs: z
+    .record(
+      z.string(),
+      z.object({
+        targets: z.array(z.string()),
+        hash: z.string(),
+      })
+    )
+    .optional(),
+  /**
+   * State-machine output only (Phase 5, 2026-09-26): the construct markers
+   * (`_blockKey`, a choose case's `_chooseCase`/`_chooseCaseTotal`) of
+   * every condition that has them, and the kind and data of pass-through
+   * nodes (Join, sequence markers). The YAML itself can't carry them, and
+   * several graph conventions depend on them; a stale-graph decompile
+   * restores them from here (and infers them for older saves).
+   */
+  markers: z
+    .record(
+      z.string(),
+      z.object({
+        _blockKey: z.string().optional(),
+        _chooseCase: z.number().optional(),
+        _chooseCaseTotal: z.number().optional(),
+        // Pass-through nodes (no step of their own in the YAML): their kind
+        // and the little data they carry.
+        type: z.enum(['join', 'sequence_start', 'sequence_end']).optional(),
+        alias: z.string().optional(),
+        enabled: z.boolean().optional(),
+        mode: z.enum(['all', 'any']).optional(),
+      })
+    )
+    .optional(),
 });
 export type CircuitryMetadata = z.infer<typeof CircuitryMetadataSchema>;
 

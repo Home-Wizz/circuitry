@@ -33,6 +33,11 @@ export interface HAYamlOutput {
    * YamlParser.ts will re-encounter the same nodes on reload.
    */
   nodeOrder?: string[];
+  /**
+   * StateMachineStrategy only (Phase 5): the fan-outs it rendered inline --
+   * see its recordFanOut. Written to `_circuitry_metadata.fan_outs`.
+   */
+  fanOuts?: Record<string, { targets: string[]; hash: string }>;
 }
 
 /**

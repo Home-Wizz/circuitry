@@ -5,6 +5,62 @@ rebrand below were written under this project's previous name — FLODE —
 and are kept exactly as originally written for historical accuracy rather
 than edited to say "Circuitry" throughout.
 
+## [2.1.0] — 2026-09-26 — Transpiler Reliability Overhaul
+
+Every automation is checked more thoroughly before it's saved, and many
+shapes that used to compile into something different from what was drawn
+now compile faithfully. Some automations will come out differently the
+next time they're saved; each such change makes the saved automation do
+what the canvas (or the imported YAML) says.
+
+### Fixed
+- **If/else and Choose.** A nested `if` with nothing after it, or an `if`
+  right after an "if NOT" condition, was merged into the conditions before
+  it, so the wrong branch ran. An `if` without `else`, an `if`/`else`
+  followed by more steps, or a loop at the start of a Choose's default
+  could be taken for an extra Choose case, skipping or duplicating steps.
+  Condition lists (`if: [A, B]`) inside loops and groups now stay one `if`.
+- **Loops.** A `while` loop whose body ended in another block compiled into
+  a different loop. State-machine `count` loops never finished. An `until`
+  loop whose body opened with a parallel or another loop re-ran only part
+  of it. A parallel at the end of a loop body could end the automation
+  after one round. A condition at the start of a parallel after a loop
+  could be folded into the loop's test.
+- **Parallels.** After a loop or a `sequence:` group, only one branch of a
+  following `parallel:` was kept; the same happened wherever a branch or a
+  Choose case started with a parallel. A parallel branch written as a
+  plain list that opened with another parallel lost its structure.
+- **Multiple triggers.** Triggers wired to separate routes on the canvas
+  could run each other's route; several triggers sharing one fan-out no
+  longer fall back to the state machine needlessly.
+- **Disabled steps.** A disabled condition inside a block came back
+  enabled, a disabled loop became an endless loop, and a disabled
+  `parallel:` ran anyway. All three now follow Home Assistant's rules (a
+  disabled step is skipped; a disabled condition counts as removed).
+- **Importing and reopening.** A `sequence:` group ending in a loop or an
+  `if` without `else` ended the automation early. An `if` with an empty
+  `then:` stopped the automation when its condition was true. Reopening an
+  automation saved as a state machine lost most kinds of step and its
+  parallel branches, so the next save could fail or change behavior.
+- **State machine.** It dropped `max`, `max_exceeded`,
+  `initial_state: false`, `trace` and `trigger_variables`, and skipped the
+  `else` when the second or later condition of a list was false.
+- **Saving.** The app now saves exactly the automation that was checked;
+  before, saving a state-machine automation dropped its top-level
+  `variables:`, breaking every template that used one.
+
+### Changed
+- **A path that just ends means one thing.** A Choose block with no default
+  now falls through to where its cases meet again; any other path drawn
+  with nothing after it stops the automation, as drawn (inside a parallel
+  branch it ends only that branch). Before, the result depended on which
+  output style the automation compiled to.
+- **More automations compile to readable YAML.** Shapes that used to be
+  refused, or fell back to the state machine, now compile natively.
+- **State-machine automations remember their structure.** They carry
+  extra layout data in `_circuitry_metadata`, so reopening and saving one
+  no longer rebuilds its parallel branches as new nodes each time.
+
 ## [2.0.6] — 2026-09-07 — Fixed Duplicate Edges on Empty If/Else Decompile
 
 ### Fixed
