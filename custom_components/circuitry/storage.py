@@ -17,6 +17,7 @@ packages/frontend/src/lib/graph-storage.ts.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -52,10 +53,16 @@ class GraphStore:
     def __init__(self, hass: HomeAssistant) -> None:
         self._store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, STORAGE_KEY)
         self._data: dict[str, Any] | None = None
+        self._load_lock = asyncio.Lock()
 
     async def _async_load(self) -> dict[str, Any]:
-        if self._data is None:
-            self._data = await self._store.async_load() or {}
+        # One load, however many calls arrive before it finishes: each used
+        # to load its own copy and make it the store's, so of several saves
+        # arriving together as the store's first use (right after HA
+        # starts), all but the last were lost (#126).
+        async with self._load_lock:
+            if self._data is None:
+                self._data = await self._store.async_load() or {}
         return self._data
 
     async def async_get(self, automation_id: str) -> dict[str, Any] | None:

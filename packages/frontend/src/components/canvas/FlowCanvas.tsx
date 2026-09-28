@@ -95,6 +95,7 @@ export function FlowCanvas() {
     selectedNodeId,
     isSimulating,
     executionPath,
+    simulationEdgeIds,
     isShowingTrace,
     traceExecutionPath,
     canDeleteEdge,
@@ -406,15 +407,12 @@ export function FlowCanvas() {
   const styledEdges = useMemo(() => {
     return edges.map((edge) => {
       // Check if this edge is part of the execution path during simulation
-      const sourceIdx = executionPath.indexOf(edge.source);
       const targetIdx = executionPath.indexOf(edge.target);
 
+      // An edge the run goes down, once the node it leads to has lit up
+      // (the trigger it starts from never lights: it isn't a step).
       const isActiveInSimulation =
-        isSimulating &&
-        executionPath.length >= 2 &&
-        sourceIdx !== -1 &&
-        targetIdx !== -1 &&
-        targetIdx === sourceIdx + 1;
+        isSimulating && simulationEdgeIds.includes(edge.id) && targetIdx !== -1;
 
       // Check if this edge is part of the trace execution path
       const traceSourceIdx = traceExecutionPath.indexOf(edge.source);
@@ -503,6 +501,7 @@ export function FlowCanvas() {
     edges,
     isSimulating,
     executionPath,
+    simulationEdgeIds,
     isShowingTrace,
     traceExecutionPath,
     selectedNodeId,

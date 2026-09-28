@@ -136,8 +136,19 @@ export function ActionFields({ node, onChange, entities }: ActionFieldsProps) {
   const isRepeatNode =
     repeatData !== null && (repeatData.count !== undefined || isForEachRepeat);
 
-  // Determine action type: stop > event > service
-  const actionType = stopMessage !== undefined ? 'stop' : eventName ? 'event' : 'service';
+  // Determine action type: stop > event > service. An event step with no
+  // name yet is still an event step (bug #74): picking "Fire Event" sets
+  // no name (an unnamed event would be written as `event: ""`, which HA
+  // accepts), so that choice is kept here; a step made by the "Fire an
+  // event" block is recognized by its `event_data`, which only event steps
+  // carry. It used to fall straight back to "Call Service".
+  const [eventChosen, setEventChosen] = useState(!!eventName);
+  const actionType =
+    stopMessage !== undefined
+      ? 'stop'
+      : eventName || eventChosen || nodeData.event_data !== undefined
+        ? 'event'
+        : 'service';
 
   // Keep toggle in sync if node changes externally
   useEffect(() => {
@@ -145,6 +156,7 @@ export function ActionFields({ node, onChange, entities }: ActionFieldsProps) {
   }, [responseVariable]);
 
   const handleActionTypeChange = (type: string) => {
+    setEventChosen(type === 'event');
     if (type === 'stop') {
       onChange('service', undefined);
       onChange('target', undefined);

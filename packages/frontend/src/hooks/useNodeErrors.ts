@@ -13,12 +13,17 @@ export function useNodeErrors(nodeId: string): {
   errorMessages: string[];
   getFieldError: (fieldPath: string) => string | undefined;
   getRootError: () => string | undefined;
+  /** Warnings: shown, but they don't block saving (bug #65). */
+  hasWarnings: boolean;
+  warningMessages: string[];
 } {
   const { t } = useTranslation();
   const errors = useFlowStore((s) => s.nodeErrors.get(nodeId));
+  const warnings = useFlowStore((s) => s.nodeWarnings.get(nodeId));
 
   const result = useMemo(() => {
     const errorList = errors ?? [];
+    const warningList = warnings ?? [];
 
     // Translate a message — messages from validation.ts are i18n keys like
     // 'errors:validation.trigger.entityRequired.state'. If the key exists in
@@ -41,8 +46,10 @@ export function useNodeErrors(nodeId: string): {
       errorMessages: errorList.map((e) => translateMessage(e.message)),
       getFieldError,
       getRootError,
+      hasWarnings: warningList.length > 0,
+      warningMessages: warningList.map((w) => translateMessage(w.message)),
     };
-  }, [errors, t]);
+  }, [errors, warnings, t]);
 
   return result;
 }

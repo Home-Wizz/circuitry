@@ -4,15 +4,6 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { HaSelector } from '@/ha';
 
-export type DurationValue =
-  | string
-  | {
-      hours?: number | string;
-      minutes?: number | string;
-      seconds?: number | string;
-      milliseconds?: number | string;
-    };
-
 export type DurationObject = {
   hours?: number | string;
   minutes?: number | string;
@@ -21,21 +12,49 @@ export type DurationObject = {
 };
 
 /**
- * Parses a legacy "HH:MM:SS[.ms]" string into the object shape — HA accepts
- * both formats equally, but only the object form has a native picker.
- * Exported for lib/simpleDuration.ts (DelayNode.tsx's inline canvas-card
- * editor), which needs the same string parsing but a simpler single
- * amount+unit shape rather than this component's full 4-field form.
+ * A duration as Home Assistant takes it: an "HH:MM[:SS]" string, a number
+ * of seconds (`5`, `1.5`, or the same as a string), a template, or the
+ * object form.
  */
-export function parseDurationString(value: string): DurationObject {
-  const match = /^([0-9]{1,2}):([0-9]{1,2}):([0-9]{1,2})(?:\.(\d{1,3}))?$/.exec(value);
-  if (!match) return {};
-  const [, h, m, s, ms] = match;
+export type DurationValue = string | number | DurationObject;
+
+/** Seconds, whole or with up to three decimals, as HA reads a plain number string. */
+const SECONDS_RE = /^\d+(?:\.\d{1,3})?$/;
+/** "H:MM" or "H:MM:SS[.fff]", as HA's time_period_str reads it (hours and minutes whole). */
+const CLOCK_RE = /^(\d+):(\d+)(?::(\d+(?:\.\d{1,3})?))?$/;
+
+/** A number of seconds as whole seconds plus milliseconds (1.5 -> 1 s 500 ms). */
+function secondsToObject(total: number): DurationObject {
+  const totalMs = Math.round(total * 1000);
+  const milliseconds = totalMs % 1000;
   return {
-    hours: Number(h),
-    minutes: Number(m),
-    seconds: Number(s),
-    ...(ms ? { milliseconds: Number(ms) } : {}),
+    seconds: (totalMs - milliseconds) / 1000,
+    ...(milliseconds ? { milliseconds } : {}),
+  };
+}
+
+/**
+ * The duration picker's object form of a duration, read the way HA reads
+ * it, or `null` when the picker can't show it (a template, or a string HA
+ * reads in some other way): those are kept as written and edited as text.
+ *
+ * HA reads "00:00:01.5" as 1.5 seconds; this used to show it as 1 second
+ * and 5 milliseconds, and any edit in the picker then saved 1.005 seconds
+ * (bug #68). A number of seconds (`delay: 5`) used to reach the picker as
+ * a bare number, which it can't show (bug #60).
+ */
+export function durationToObject(value: DurationValue | undefined): DurationObject | null {
+  if (value === undefined || value === null) return {};
+  if (typeof value === 'number') return Number.isFinite(value) ? secondsToObject(value) : null;
+  if (typeof value !== 'string') return value;
+  if (SECONDS_RE.test(value)) return secondsToObject(Number(value));
+  const match = CLOCK_RE.exec(value);
+  if (!match) return null;
+  const [, hours, minutes, seconds] = match;
+  return {
+    hours: Number(hours),
+    minutes: Number(minutes),
+    ...secondsToObject(seconds === undefined ? 0 : Number(seconds)),
   };
 }
 
@@ -46,15 +65,15 @@ export interface DurationInputProps {
 
 /**
  * Reusable duration input component without label/description wrapper.
- * Reads legacy string values ("HH:MM:SS") for backward compatibility, but
- * always writes the `{ hours, minutes, seconds, milliseconds }` object HA's
+ * Reads string ("HH:MM:SS") and number-of-seconds values (see
+ * durationToObject), but always writes the
+ * `{ hours, minutes, seconds, milliseconds }` object HA's
  * native duration selector uses — both formats are equally valid in HA
  * automation YAML, and only the object form has a native picker.
  */
 export function DurationInput({ value, onChange }: DurationInputProps) {
   const { t } = useTranslation(['common', 'nodes']);
-  const obj: DurationObject =
-    typeof value === 'string' ? parseDurationString(value) : (value ?? {});
+  const obj: DurationObject = durationToObject(value) ?? {};
 
   const handleObjChange = (field: 'hours' | 'minutes' | 'seconds' | 'milliseconds', v: string) => {
     const num = v === '' ? undefined : Number(v);
@@ -150,35 +169,6 @@ export interface DurationFieldProps {
   value: DurationValue;
   onChange: (val: DurationValue) => void;
   fieldKey?: string; // e.g. 'delay' or 'timeout'
-}
-
-/**
- * True if a duration value represents an actual positive length of time —
- * false for undefined/empty, an all-zero object, or an all-zero string like
- * "00:00:00". Mirrors BaseStrategy.hasMeaningfulDuration on the transpiler
- * side (packages/transpiler/src/strategies/base.ts) — kept as a separate
- * copy rather than a shared import since the frontend doesn't otherwise
- * depend on transpiler internals, but see that copy's doc comment for the
- * full story: an explicit all-zero `timeout` is NOT "no limit" in HA, it's
- * "give up instantly" (confirmed via home-assistant/core#109586), so a
- * duration field's onChange must not let an untouched/all-zero picker value
- * get treated as "the user set a real value" — that's exactly how a Wait
- * node's Timeout field ended up silently writing a zero-second timeout into
- * generated YAML just from the field being rendered, with no continue
- * step ever actually waiting.
- */
-export function hasMeaningfulDuration(value: unknown): boolean {
-  if (value === undefined || value === null) return false;
-  if (typeof value === 'string') {
-    return /[1-9]/.test(value);
-  }
-  if (typeof value === 'object') {
-    return Object.values(value as Record<string, unknown>).some((v) => {
-      const n = typeof v === 'string' ? Number(v) : v;
-      return typeof n === 'number' && !Number.isNaN(n) && n > 0;
-    });
-  }
-  return false;
 }
 
 /**

@@ -3,10 +3,10 @@ import type {
   FlowGraph,
   FlowMetadata,
   FlowNode,
+  HADuration,
   HAScriptField,
   NodeValidationError,
 } from '@circuitry/shared';
-import { validateNodeData } from '@circuitry/shared';
 import {
   addEdge,
   applyEdgeChanges,
@@ -27,6 +27,8 @@ import { getHomeAssistantAPI } from '@/lib/ha-api';
 import { buildAutomationConfig } from '@/lib/automation-config';
 import { computeSourceHash, saveGraph } from '@/lib/graph-storage';
 import { logger } from '@/lib/logger';
+import { editorNodeIssues } from '@/lib/nativeRequired';
+import type { ServiceRequiredFields } from '@/lib/serviceRequired';
 import { generateUUID } from '@/lib/utils';
 import type { HomeAssistant } from '@/types/hass';
 import { circuitryIndexedDBStorage } from '@/utils/indexeddb-storage';
@@ -113,7 +115,7 @@ export interface ActionNodeData {
 
 export interface DelayNodeData {
   alias?: string;
-  delay: string | { hours?: number; minutes?: number; seconds?: number };
+  delay: HADuration;
   [key: string]: unknown;
 }
 
@@ -121,7 +123,7 @@ export interface WaitNodeData {
   alias?: string;
   wait_template?: string;
   wait_for_trigger?: TriggerNodeData[];
-  timeout?: string;
+  timeout?: HADuration;
   continue_on_timeout?: boolean;
   [key: string]: unknown;
 }
@@ -281,6 +283,8 @@ export interface FlowState {
   isSimulating: boolean;
   activeNodeId: string | null;
   executionPath: string[];
+  /** The edges the simulated run goes down (lib/trace-path.ts). */
+  simulationEdgeIds: string[];
 
   // Trace state
   isShowingTrace: boolean;
@@ -355,7 +359,7 @@ export interface FlowState {
   hasRealChanges: () => boolean; // Compare current state to original snapshot
 
   // Simulation
-  startSimulation: () => void;
+  startSimulation: (edgeIds?: string[]) => void;
   stopSimulation: () => void;
   setActiveNode: (nodeId: string | null) => void;
   addToExecutionPath: (nodeId: string) => void;
@@ -386,10 +390,17 @@ export interface FlowState {
   /** Closes the tab for `flowId`, discarding its unsaved changes. If it was the active tab, activates a neighboring tab (preferring the one before it); if it was the only open tab, opens a fresh blank tab in its place. */
   closeTab: (flowId: string) => void;
 
-  // Node validation
+  // Node validation. Errors block saving; warnings (something Home
+  // Assistant accepts but that is almost always a blank field left by
+  // mistake, bug #65) are only shown.
   nodeErrors: Map<string, NodeValidationError[]>;
+  nodeWarnings: Map<string, NodeValidationError[]>;
   validateNode: (nodeId: string) => void;
   validateAllNodes: () => void;
+  /** The connected HA's required service fields (#125): an action step
+   * leaving one empty gets a warning. Set from HA's services as they
+   * change; kept across tabs and resets (it's HA's, not the flow's). */
+  setServiceRequiredFields: (fields: ServiceRequiredFields) => void;
   clearNodeErrors: (nodeId: string) => void;
   hasValidationErrors: () => boolean;
 }
@@ -532,6 +543,7 @@ const initialState = {
   isSimulating: false,
   activeNodeId: null,
   executionPath: [],
+  simulationEdgeIds: [],
   isShowingTrace: false,
   traceData: null,
   traceExecutionPath: [],
@@ -541,6 +553,7 @@ const initialState = {
   traceUnmappedStepCount: 0,
   simulationSpeed: 800,
   nodeErrors: new Map<string, NodeValidationError[]>(),
+  nodeWarnings: new Map<string, NodeValidationError[]>(),
   clipboard: null,
   pasteCount: 0,
 };
@@ -602,6 +615,17 @@ export type TemporalFlowState = Pick<
   | 'userTriggerVariables'
 >;
 
+/** Validation issues split into errors (block saving) and warnings (shown only; bug #65). */
+function splitIssues(issues: NodeValidationError[]): {
+  errors: NodeValidationError[];
+  warnings: NodeValidationError[];
+} {
+  return {
+    errors: issues.filter((i) => i.severity !== 'warning'),
+    warnings: issues.filter((i) => i.severity === 'warning'),
+  };
+}
+
 const temporalSelector = (state: FlowState): TemporalFlowState => ({
   nodes: state.nodes,
   edges: state.edges,
@@ -659,6 +683,9 @@ function snapshotAsTab(state: FlowState): FlowTabState {
     originalSnapshot: state.originalSnapshot,
   };
 }
+
+/** See FlowState.setServiceRequiredFields. */
+let serviceRequiredFields: ServiceRequiredFields = {};
 
 export const useFlowStore = create<FlowState>()(
   persist(
@@ -722,8 +749,9 @@ export const useFlowStore = create<FlowState>()(
             // guard existed to prevent has since been fixed at its root,
             // twice over:
             //   1. generateParallelEntryBlocks now inlines a non-action
-            //      fan-out branch via NativeStrategy.buildActionsFromEntryPoint
-            //      instead of stubbing it (Phase A).
+            //      fan-out branch with NativeStrategy's own tree-walker
+            //      (buildParallelBranchesForTargets today) instead of
+            //      stubbing it (Phase A).
             //   2. buildTriggerRouting now filters a trigger's own
             //      dominated fan-out targets the same way mid-flow fan-out
             //      already did, closing the specific degenerate-convergence
@@ -1133,7 +1161,13 @@ export const useFlowStore = create<FlowState>()(
           }
         },
 
-        startSimulation: () => set({ isSimulating: true, executionPath: [], activeNodeId: null }),
+        startSimulation: (edgeIds = []) =>
+          set({
+            isSimulating: true,
+            executionPath: [],
+            activeNodeId: null,
+            simulationEdgeIds: edgeIds,
+          }),
         stopSimulation: () => set({ isSimulating: false, activeNodeId: null }),
         setActiveNode: (nodeId) => set({ activeNodeId: nodeId }),
         addToExecutionPath: (nodeId) =>
@@ -1395,6 +1429,7 @@ export const useFlowStore = create<FlowState>()(
             lastSaved: null,
             originalSnapshot,
             nodeErrors: new Map(),
+            nodeWarnings: new Map(),
             // Loading a different automation into the *active* tab changes
             // its flowId — keep the tab strip's ordering pointed at the new
             // id in the same slot (see replaceIdInTabOrder's doc comment).
@@ -1417,6 +1452,7 @@ export const useFlowStore = create<FlowState>()(
             flowMetadata: { ...defaultFlowMetadata },
             originalSnapshot: null,
             nodeErrors: new Map(),
+            nodeWarnings: new Map(),
             // Same in-place tab-strip slot swap as fromFlowGraph above —
             // "New automation" in the current tab shouldn't look like a
             // second tab opened, and must never clobber other open tabs'
@@ -1439,6 +1475,7 @@ export const useFlowStore = create<FlowState>()(
             flowMetadata: { ...defaultFlowMetadata },
             originalSnapshot: null,
             nodeErrors: new Map(),
+            nodeWarnings: new Map(),
             backgroundTabs: [...state.backgroundTabs, backgrounded],
             tabOrder: [...state.tabOrder, newFlowId],
           });
@@ -1467,6 +1504,7 @@ export const useFlowStore = create<FlowState>()(
             originalSnapshot: target.originalSnapshot,
             selectedNodeId: null,
             nodeErrors: new Map(),
+            nodeWarnings: new Map(),
             backgroundTabs: [
               ...state.backgroundTabs.filter((t) => t.flowId !== flowId),
               backgrounded,
@@ -1508,6 +1546,7 @@ export const useFlowStore = create<FlowState>()(
               flowMetadata: { ...defaultFlowMetadata },
               originalSnapshot: null,
               nodeErrors: new Map(),
+              nodeWarnings: new Map(),
               backgroundTabs: [],
               tabOrder: [newFlowId],
             });
@@ -1538,6 +1577,7 @@ export const useFlowStore = create<FlowState>()(
             originalSnapshot: target.originalSnapshot,
             selectedNodeId: null,
             nodeErrors: new Map(),
+            nodeWarnings: new Map(),
             tabOrder: newTabOrder,
             backgroundTabs: state.backgroundTabs.filter((t) => t.flowId !== neighborId),
           });
@@ -1552,29 +1592,33 @@ export const useFlowStore = create<FlowState>()(
           const node = state.nodes.find((n) => n.id === nodeId);
           if (!node || !node.type) return;
 
-          const errors = validateNodeData(node.type, node.data as Record<string, unknown>);
+          const { errors, warnings } = splitIssues(
+            editorNodeIssues(node.type, node.data as Record<string, unknown>, serviceRequiredFields)
+          );
 
           set((s) => {
             const newErrors = new Map(s.nodeErrors);
-            if (errors.length > 0) {
-              newErrors.set(nodeId, errors);
-            } else {
-              newErrors.delete(nodeId);
-            }
-            return { nodeErrors: newErrors };
+            const newWarnings = new Map(s.nodeWarnings);
+            if (errors.length > 0) newErrors.set(nodeId, errors);
+            else newErrors.delete(nodeId);
+            if (warnings.length > 0) newWarnings.set(nodeId, warnings);
+            else newWarnings.delete(nodeId);
+            return { nodeErrors: newErrors, nodeWarnings: newWarnings };
           });
         },
 
         validateAllNodes: () => {
           const state = get();
           const newErrors = new Map<string, NodeValidationError[]>();
+          const newWarnings = new Map<string, NodeValidationError[]>();
 
           for (const node of state.nodes) {
             if (!node.type) continue;
-            const errors = validateNodeData(node.type, node.data as Record<string, unknown>);
-            if (errors.length > 0) {
-              newErrors.set(node.id, errors);
-            }
+            const { errors, warnings } = splitIssues(
+              editorNodeIssues(node.type, node.data as Record<string, unknown>, serviceRequiredFields)
+            );
+            if (errors.length > 0) newErrors.set(node.id, errors);
+            if (warnings.length > 0) newWarnings.set(node.id, warnings);
           }
 
           const duplicateIdErrors = findDuplicateIdErrors(state.nodes);
@@ -1582,14 +1626,21 @@ export const useFlowStore = create<FlowState>()(
             newErrors.set(nodeId, [...(newErrors.get(nodeId) ?? []), error]);
           }
 
-          set({ nodeErrors: newErrors });
+          set({ nodeErrors: newErrors, nodeWarnings: newWarnings });
+        },
+
+        setServiceRequiredFields: (fields) => {
+          serviceRequiredFields = fields;
+          get().validateAllNodes();
         },
 
         clearNodeErrors: (nodeId) => {
           set((s) => {
             const newErrors = new Map(s.nodeErrors);
             newErrors.delete(nodeId);
-            return { nodeErrors: newErrors };
+            const newWarnings = new Map(s.nodeWarnings);
+            newWarnings.delete(nodeId);
+            return { nodeErrors: newErrors, nodeWarnings: newWarnings };
           });
         },
 

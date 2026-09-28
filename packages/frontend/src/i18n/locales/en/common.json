@@ -94,7 +94,9 @@
     "clickNodesToAdd": "Click nodes to add",
     "dragToConnect": "Drag to connect",
     "deleteToRemove": "Delete to remove",
-    "backspaceDeleteKey": "Backspace/Delete key"
+    "backspaceDeleteKey": "Backspace/Delete key",
+    "enabledTemplate": "Enabled by a template, which Home Assistant renders when it gets here. Turning the switch off or on replaces it.",
+    "nodeWarnings": "Home Assistant accepts this, but it's probably not what you meant. Saving still works."
   },
   "titles": {
     "appName": "Circuitry",

@@ -1,4 +1,9 @@
-import { type FlowGraph, FlowGraphSchema, validateGraphStructure } from '@circuitry/shared';
+import {
+  type FlowGraph,
+  FlowGraphSchema,
+  isOpaqueStepData,
+  validateGraphStructure,
+} from '@circuitry/shared';
 import { ZodError } from 'zod';
 
 /**
@@ -104,6 +109,8 @@ function validateSemantics(graph: FlowGraph): ValidationError[] {
   const actionNodes = graph.nodes.filter((n) => n.type === 'action');
   for (const node of actionNodes) {
     if (node.type === 'action') {
+      // A step Circuitry doesn't know, kept as written (bug #57): HA checks it.
+      if (isOpaqueStepData(node.data)) continue;
       // Opaque repeat nodes (repeat.count/while/until/for_each) are a valid
       // action shape without service/event — mirrors validation.ts's
       // ActionNodeValidationSchema exemption.

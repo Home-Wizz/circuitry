@@ -270,6 +270,31 @@ function compareStates(g: Map<string, StateSpec>, y: Map<string, YamlStateSpec>)
         `state "${id}".else`
       );
       if (!falseProgDiff.equal) return falseProgDiff.reason ?? `state "${id}".else content mismatch`;
+
+      // Bug #63: an until test must leave the loop when it can't be
+      // evaluated (an error guard to the loop's exit); nothing else may
+      // carry one.
+      if (gState.errorTransition && !yState.errorTransition) {
+        return `state "${id}": an until test without its error guard (an error would re-run the loop)`;
+      }
+      if (!gState.errorTransition && yState.errorTransition) {
+        return `state "${id}": an unexpected error guard`;
+      }
+      if (gState.errorTransition && yState.errorTransition) {
+        diff = compareTransitionTarget(
+          `state "${id}".error`,
+          gState.errorTransition,
+          yState.errorTransition
+        );
+        if (diff) return diff;
+        const errorProgDiff = programsEquivalent(
+          conditionBranchExpectedContent(gState.errorTransition),
+          yState.errorContent ?? [],
+          `state "${id}".error`
+        );
+        if (!errorProgDiff.equal)
+          return errorProgDiff.reason ?? `state "${id}".error content mismatch`;
+      }
       continue;
     }
 

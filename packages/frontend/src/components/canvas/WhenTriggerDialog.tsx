@@ -50,7 +50,7 @@ import { useStableEntityList } from '@/hooks/useStableEntityList';
 import { getDomainColor } from '@/lib/domain-colors';
 import { getDomainIcon } from '@/lib/domain-icons';
 import { getTriggerThresholdShape } from '@/lib/nativeThreshold';
-import { buildTriggerNodeData } from '@/lib/triggerNodeData';
+import { buildTriggerNodeData, triggerRecipeTakesEntities } from '@/lib/triggerNodeData';
 import { getTriggerEnumField } from '@/lib/triggerEnumField';
 import {
   type EntityTriggerCategory,
@@ -747,7 +747,9 @@ export function WhenTriggerDialog({
             <TypeResultsPanel
               category={column.category}
               onSelectRecipe={(_entityIds, recipe) =>
-                pushColumn(index, { kind: 'recipeEntities', category: column.category, recipe }, recipe.id)
+                triggerRecipeTakesEntities(recipe)
+                  ? pushColumn(index, { kind: 'recipeEntities', category: column.category, recipe }, recipe.id)
+                  : handleSelectRecipeConfigurable(index, [], recipe)
               }
             />
           </ResultsColumn>

@@ -1,9 +1,19 @@
+import { isOpaqueStepData } from '@circuitry/shared';
 import { Handle, type NodeProps, Position } from '@xyflow/react';
 import type { TFunction } from 'i18next';
-import { AlertCircle, Ban, GitCompareArrows, ListTree, OctagonX, Play, RotateCcw } from 'lucide-react';
-import { memo } from 'react';
+import {
+  GitCompareArrows,
+  ListTree,
+  Lock,
+  type LucideIcon,
+  OctagonX,
+  Play,
+  RotateCcw,
+} from 'lucide-react';
+import { memo, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { BlockRoleBadge } from '@/components/nodes/BlockRoleBadge';
+import { StepStopsHere } from '@/components/nodes/ConventionMarkers';
 import { TruncatedTooltip } from '@/components/ui/truncated-tooltip';
 import { compoundTypes } from '@/config/nodeTypeCatalog';
 import { useMoreInfo } from '@/hooks/useMoreInfo';
@@ -12,16 +22,21 @@ import { useNodeErrors } from '@/hooks/useNodeErrors';
 import { useTraceNodeState } from '@/hooks/useTraceNodeState';
 import { getActionRoleLabel } from '@/lib/block-role-label';
 import { getDomainIcon } from '@/lib/domain-icons';
+import type { NodeColorClasses } from '@/lib/node-colors';
 import { getTraceStateClass, NODE_COLORS, NODE_STATE_CLASSES, SELECTED_NODE_STYLE } from '@/lib/node-colors';
+import { opaqueStepKind, opaqueStepSummary, opaqueStepYaml } from '@/lib/opaqueStep';
 import { cn, prettify, singleEntityIdFrom } from '@/lib/utils';
 import type { ActionNodeData } from '@/store/flow-store';
 import { useFlowStore } from '@/store/flow-store';
+import { NodeStatusBadge } from './NodeStatusBadge';
 
 const ACTION_COLORS = NODE_COLORS.action;
 // stop-action reuses the "wait" token, repeat-action reuses "delay" — same
 // visual family already established for those semantics elsewhere.
 const STOP_COLORS = NODE_COLORS.wait;
 const REPEAT_COLORS = NODE_COLORS.delay;
+// A step Circuitry keeps as written (bug #57): the neutral "join" token.
+const OPAQUE_COLORS = NODE_COLORS.join;
 
 interface ActionNodeProps extends NodeProps {
   data: ActionNodeData;
@@ -45,13 +60,106 @@ function getTargetDisplay(
   return entityId ?? null;
 }
 
+interface ActionCardFrameProps {
+  colors: NodeColorClasses;
+  selected: boolean;
+  isActive: boolean;
+  isDisabled: boolean;
+  hasErrors: boolean;
+  errorMessages: string[];
+  warningMessages: string[];
+  traceClass: string | undefined;
+  roleLabel: string | null | undefined;
+  icon: LucideIcon;
+  title: string;
+  stepNumber: number | null | undefined;
+  /** False for a step nothing follows (Stop). */
+  hasSourceHandle: boolean;
+  /** For the "Stops here" badge (H4.4). */
+  nodeId: string;
+  children: ReactNode;
+}
+
+/**
+ * The card around a Stop step and a step kept as written: border, state
+ * badges, handles, and a title row with icon and step number. One copy
+ * for both, so the two can't drift apart.
+ */
+function ActionCardFrame({
+  colors,
+  selected,
+  isActive,
+  isDisabled,
+  hasErrors,
+  errorMessages,
+  warningMessages,
+  traceClass,
+  roleLabel,
+  icon: Icon,
+  title,
+  stepNumber,
+  hasSourceHandle,
+  nodeId,
+  children,
+}: ActionCardFrameProps) {
+  return (
+    <div
+      // See node-colors.ts's SELECTED_NODE_STYLE doc comment.
+      style={selected ? SELECTED_NODE_STYLE : undefined}
+      className={cn(
+        'relative min-w-[180px] rounded-lg border-2 px-4 py-3',
+        colors.border,
+        colors.bg,
+        'transition-all duration-200',
+        isActive && NODE_STATE_CLASSES.active,
+        isDisabled && 'border-dashed opacity-50 grayscale',
+        hasErrors && NODE_STATE_CLASSES.error,
+        traceClass
+      )}
+    >
+      {roleLabel && <BlockRoleBadge label={roleLabel} />}
+      <NodeStatusBadge
+        errorMessages={errorMessages}
+        warningMessages={warningMessages}
+        isDisabled={isDisabled}
+      />
+      <Handle type="target" position={Position.Left} className={cn('w-3! h-3!', colors.handle)} />
+      <div className="mb-1 flex items-center gap-2">
+        <div className={cn('rounded p-1', colors.chip)}>
+          <Icon className={cn('h-4 w-4', colors.text)} />
+        </div>
+        <span className={cn('font-semibold text-sm', colors.text)}>{title}</span>
+        {stepNumber && (
+          <div
+            className={cn(
+              'ml-auto flex h-5 w-5 items-center justify-center rounded-full font-bold text-xs',
+              colors.badge
+            )}
+          >
+            {stepNumber}
+          </div>
+        )}
+      </div>
+      {children}
+      {hasSourceHandle && (
+        <Handle
+          type="source"
+          position={Position.Right}
+          className={cn('w-3! h-3!', colors.handle)}
+        />
+      )}
+      {hasSourceHandle && <StepStopsHere nodeId={nodeId} />}
+    </div>
+  );
+}
+
 export const ActionNode = memo(function ActionNode({ id, data, selected }: ActionNodeProps) {
   const { t } = useTranslation(['nodes']);
   const activeNodeId = useFlowStore((s) => s.activeNodeId);
   const getExecutionStepNumber = useFlowStore((s) => s.getExecutionStepNumber);
   const updateNodeData = useFlowStore((s) => s.updateNodeData);
   const requestNodeEdit = useFlowStore((s) => s.requestNodeEdit);
-  const { hasErrors, errorMessages } = useNodeErrors(id);
+  const { hasErrors, errorMessages, warningMessages } = useNodeErrors(id);
   const openMoreInfo = useMoreInfo();
   const { resolveEntityTarget } = useNodeCardDisplay();
   const traceState = useTraceNodeState(id);
@@ -172,67 +280,53 @@ export const ActionNode = memo(function ActionNode({ id, data, selected }: Actio
         ? t('nodes:actions.cardPhrases.turnedOff')
         : friendlyActionName;
 
-  if (isStopAction) {
+  const frameState = {
+    nodeId: id,
+    selected: selected ?? false,
+    isActive,
+    isDisabled,
+    hasErrors,
+    errorMessages,
+    warningMessages,
+    traceClass: getTraceStateClass(traceState),
+    roleLabel,
+    stepNumber,
+  };
+
+  if (isOpaqueStepData(data)) {
+    // A step Circuitry doesn't know, kept exactly as written (bug #57):
+    // shown locked, with its YAML. It can be moved, rewired or deleted.
+    const kind = opaqueStepKind(data);
+    const summary = opaqueStepSummary(data);
     return (
-      <div
-        // See node-colors.ts's SELECTED_NODE_STYLE doc comment.
-        style={selected ? SELECTED_NODE_STYLE : undefined}
-        className={cn(
-          'relative min-w-[180px] rounded-lg border-2 px-4 py-3',
-          STOP_COLORS.border,
-          STOP_COLORS.bg,
-          'transition-all duration-200',
-          isActive && NODE_STATE_CLASSES.active,
-          isDisabled && 'border-dashed opacity-50 grayscale',
-          hasErrors && NODE_STATE_CLASSES.error,
-          getTraceStateClass(traceState)
-        )}
+      <ActionCardFrame
+        {...frameState}
+        colors={OPAQUE_COLORS}
+        icon={Lock}
+        title={data.alias || (kind ? prettify(kind) : t('nodes:actions.opaqueStepTitle'))}
+        hasSourceHandle
       >
-        {roleLabel && <BlockRoleBadge label={roleLabel} />}
-        {hasErrors && (
-          <div
-            className={cn(
-              'absolute -top-2 -right-2 flex h-5 w-5 items-center justify-center rounded-full shadow-sm',
-              NODE_STATE_CLASSES.errorBadge
-            )}
-            title={errorMessages.join('\n')}
-          >
-            <AlertCircle className="h-3 w-3" />
-          </div>
-        )}
-        {isDisabled && !hasErrors && (
-          <div
-            className={cn(
-              'absolute -top-2 -right-2 flex h-5 w-5 items-center justify-center rounded-full shadow-sm',
-              NODE_STATE_CLASSES.disabledBadge
-            )}
-          >
-            <Ban className="h-3 w-3" />
-          </div>
-        )}
-        <Handle
-          type="target"
-          position={Position.Left}
-          className={cn('w-3! h-3!', STOP_COLORS.handle)}
-        />
-        <div className="mb-1 flex items-center gap-2">
-          <div className={cn('rounded p-1', STOP_COLORS.chip)}>
-            <OctagonX className={cn('h-4 w-4', STOP_COLORS.text)} />
-          </div>
-          <span className={cn('font-semibold text-sm', STOP_COLORS.text)}>
-            {data.alias || t('nodes:types.stop')}
-          </span>
-          {stepNumber && (
-            <div
-              className={cn(
-                'ml-auto flex h-5 w-5 items-center justify-center rounded-full font-bold text-xs',
-                STOP_COLORS.badge
-              )}
-            >
-              {stepNumber}
-            </div>
+        <div className={cn('text-xs', OPAQUE_COLORS.text)}>
+          <div className="font-medium opacity-70">{t('nodes:actions.opaqueStepKept')}</div>
+          {summary && (
+            <TruncatedTooltip content={opaqueStepYaml(data)}>
+              <div className="max-w-[220px] truncate font-mono opacity-75">{summary}</div>
+            </TruncatedTooltip>
           )}
         </div>
+      </ActionCardFrame>
+    );
+  }
+
+  if (isStopAction) {
+    return (
+      <ActionCardFrame
+        {...frameState}
+        colors={STOP_COLORS}
+        icon={OctagonX}
+        title={data.alias || t('nodes:types.stop')}
+        hasSourceHandle={false}
+      >
         <div className={cn('text-xs', STOP_COLORS.text)}>
           <div className="font-medium opacity-70">
             {isStopError ? t('nodes:actions.stopError') : t('nodes:actions.stopExecution')}
@@ -243,7 +337,7 @@ export const ActionNode = memo(function ActionNode({ id, data, selected }: Actio
             </TruncatedTooltip>
           )}
         </div>
-      </div>
+      </ActionCardFrame>
     );
   }
 
@@ -262,27 +356,11 @@ export const ActionNode = memo(function ActionNode({ id, data, selected }: Actio
           getTraceStateClass(traceState)
         )}
       >
-        {hasErrors && (
-          <div
-            className={cn(
-              'absolute -top-2 -right-2 flex h-5 w-5 items-center justify-center rounded-full shadow-sm',
-              NODE_STATE_CLASSES.errorBadge
-            )}
-            title={errorMessages.join('\n')}
-          >
-            <AlertCircle className="h-3 w-3" />
-          </div>
-        )}
-        {isDisabled && !hasErrors && (
-          <div
-            className={cn(
-              'absolute -top-2 -right-2 flex h-5 w-5 items-center justify-center rounded-full shadow-sm',
-              NODE_STATE_CLASSES.disabledBadge
-            )}
-          >
-            <Ban className="h-3 w-3" />
-          </div>
-        )}
+        <NodeStatusBadge
+          errorMessages={errorMessages}
+          warningMessages={warningMessages}
+          isDisabled={isDisabled}
+        />
         <Handle
           type="target"
           position={Position.Left}
@@ -355,6 +433,7 @@ export const ActionNode = memo(function ActionNode({ id, data, selected }: Actio
           position={Position.Right}
           className={cn('w-3! h-3!', REPEAT_COLORS.handle)}
         />
+        <StepStopsHere nodeId={id} />
       </div>
     );
   }
@@ -394,27 +473,11 @@ export const ActionNode = memo(function ActionNode({ id, data, selected }: Actio
       )}
     >
       {roleLabel && <BlockRoleBadge label={roleLabel} />}
-      {hasErrors && (
-        <div
-          className={cn(
-            'absolute -top-2 -right-2 flex h-5 w-5 items-center justify-center rounded-full shadow-sm',
-            NODE_STATE_CLASSES.errorBadge
-          )}
-          title={errorMessages.join('\n')}
-        >
-          <AlertCircle className="h-3 w-3" />
-        </div>
-      )}
-      {isDisabled && !hasErrors && (
-        <div
-          className={cn(
-            'absolute -top-2 -right-2 flex h-5 w-5 items-center justify-center rounded-full shadow-sm',
-            NODE_STATE_CLASSES.disabledBadge
-          )}
-        >
-          <Ban className="h-3 w-3" />
-        </div>
-      )}
+      <NodeStatusBadge
+        errorMessages={errorMessages}
+        warningMessages={warningMessages}
+        isDisabled={isDisabled}
+      />
       <Handle
         type="target"
         position={Position.Left}
@@ -504,6 +567,7 @@ export const ActionNode = memo(function ActionNode({ id, data, selected }: Actio
         position={Position.Right}
         className={cn('w-3! h-3!', ACTION_COLORS.handle)}
       />
+      <StepStopsHere nodeId={id} />
     </div>
   );
 });

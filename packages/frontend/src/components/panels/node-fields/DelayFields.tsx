@@ -13,24 +13,22 @@ import { Textarea } from '@/components/ui/textarea';
 import { HaSelect, HaSelector } from '@/ha';
 import { useNodeErrors } from '@/hooks/useNodeErrors';
 import { ContinueOnErrorField } from './ContinueOnErrorField';
-import { DurationField, parseDurationString } from './DurationField';
+import { DurationField, durationToObject } from './DurationField';
 
 interface DelayFieldsProps {
   node: DelayNode;
   onChange: (key: string, value: unknown) => void;
 }
 
-/** A plain "HH:MM:SS[.ms]" string — the legacy fixed-duration format, as opposed to a Jinja2 template string. */
-const DURATION_STRING_RE = /^([0-9]{1,2}):([0-9]{1,2}):([0-9]{1,2})(?:\.(\d{1,3}))?$/;
-
 /**
  * Delay node field component.
  *
  * home-assistant.io/docs/scripts/#delay accepts `delay` as a fixed duration
- * (object or "HH:MM:SS" string) OR a template string that evaluates to one
- * at runtime (e.g. `"{{ states('input_number.wait_minutes') }}"`) — the
- * latter had no UI path here: DurationInput always parses a string with
- * `parseDurationString` and always writes back the object shape, so a stored
+ * (object, "HH:MM:SS" string or a number of seconds) OR a template string
+ * that evaluates to one at runtime (e.g.
+ * `"{{ states('input_number.wait_minutes') }}"`) — the latter had no UI
+ * path here: DurationInput reads a string with `durationToObject` and
+ * always writes back the object shape, so a stored
  * template would render as an empty 00:00:00 and any interaction with the
  * picker would silently overwrite it with a fixed value.
  *
@@ -44,7 +42,10 @@ export function DelayFields({ node, onChange }: DelayFieldsProps) {
   const continueOnError = node.data.continue_on_error === true;
 
   const delayValue = node.data.delay;
-  const isTemplateMode = typeof delayValue === 'string' && !DURATION_STRING_RE.test(delayValue);
+  // A string the duration picker can't show (a template, or '' from
+  // switching to template mode) is edited as text, kept as written.
+  const isTemplateMode =
+    typeof delayValue === 'string' && (delayValue === '' || durationToObject(delayValue) === null);
   const mode = isTemplateMode ? 'template' : 'duration';
 
   const handleModeChange = (newMode: string) => {
@@ -95,9 +96,7 @@ export function DelayFields({ node, onChange }: DelayFieldsProps) {
       ) : (
         <DurationField
           label="Delay"
-          value={
-            typeof delayValue === 'string' ? parseDurationString(delayValue) : (delayValue ?? {})
-          }
+          value={durationToObject(delayValue) ?? {}}
           onChange={(val) => onChange('delay', val)}
         />
       )}

@@ -1,12 +1,9 @@
-// Shared duration formatting for Delay and Wait nodes
-export interface DurationObject {
-  hours?: number;
-  minutes?: number;
-  seconds?: number;
-  milliseconds?: number;
-}
+import type { DurationValue } from '@/components/panels/node-fields/DurationField';
 
-export function formatDuration(val: string | DurationObject | undefined): string {
+// Shared duration formatting for Delay and Wait nodes
+export function formatDuration(val: DurationValue | undefined): string {
+  // A number is seconds (`delay: 5`, `delay: 1.5`), as HA reads it.
+  if (typeof val === 'number') return `${val}s`;
   if (!val) return '';
   if (typeof val === 'string') return val;
   if (typeof val === 'object') {

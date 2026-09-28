@@ -1,9 +1,16 @@
-import type { FlowNode, JoinNode, SetVariablesNode, StartNode } from '@circuitry/shared';
+import {
+  type FlowNode,
+  isOpaqueStepData,
+  type JoinNode,
+  type SetVariablesNode,
+  type StartNode,
+} from '@circuitry/shared';
 import type { HassEntity } from '@/types/hass';
 import { ActionFields } from './node-fields/ActionFields';
 import { ConditionFields } from './node-fields/ConditionFields';
 import { DelayFields } from './node-fields/DelayFields';
 import { JoinFields } from './node-fields/JoinFields';
+import { OpaqueStepFields } from './node-fields/OpaqueStepFields';
 import { SetVariablesFields } from './node-fields/SetVariablesFields';
 import { StartFields } from './node-fields/StartFields';
 import { TriggerFields } from './node-fields/TriggerFields';
@@ -28,6 +35,8 @@ export function NodeFields({ node, onChange, entities }: NodeFieldsProps) {
       return <ConditionFields node={node} onChange={onChange} entities={entities} />;
 
     case 'action':
+      // A step kept exactly as written (bug #57): read-only, not the service editor.
+      if (isOpaqueStepData(node.data)) return <OpaqueStepFields node={node} />;
       return <ActionFields node={node} onChange={onChange} entities={entities} />;
 
     case 'delay':

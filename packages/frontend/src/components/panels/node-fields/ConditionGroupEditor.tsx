@@ -20,7 +20,7 @@ import {
 } from '@/config/conditionFields';
 import { useHass } from '@/contexts/HassContext';
 import { HaSelect } from '@/ha';
-import { cn } from '@/lib/utils';
+import { clearedToUnset, cn } from '@/lib/utils';
 import type { ConditionNodeData } from '@/store/flow-store';
 import type { HassEntity } from '@/types/hass';
 import { DeviceConditionFields } from './DeviceConditionFields';
@@ -76,7 +76,7 @@ function ConditionTypeFields({
           key={field.name}
           field={field}
           value={(cond as Record<string, unknown>)[field.name]}
-          onChange={(value) => onUpdate({ ...cond, [field.name]: value })}
+          onChange={(value) => onUpdate({ ...cond, [field.name]: clearedToUnset(value) })}
           entities={entities}
         />
       ))}
@@ -209,7 +209,7 @@ function ConditionCard({
               data: cond,
             } as ConditionNode
           }
-          onChange={(key, value) => onUpdate({ ...cond, [key]: value })}
+          onChange={(key, value) => onUpdate({ ...cond, [key]: clearedToUnset(value) })}
           conditionType={condType}
         />
       ) : isState ? (
@@ -222,7 +222,7 @@ function ConditionCard({
               data: cond,
             } as ConditionNode
           }
-          onChange={(key, value) => onUpdate({ ...cond, [key]: value })}
+          onChange={(key, value) => onUpdate({ ...cond, [key]: clearedToUnset(value) })}
           entities={entities}
         />
       ) : isDevice ? (
@@ -235,7 +235,7 @@ function ConditionCard({
               data: cond,
             } as ConditionNode
           }
-          onChange={(key, value) => onUpdate({ ...cond, [key]: value })}
+          onChange={(key, value) => onUpdate({ ...cond, [key]: clearedToUnset(value) })}
           entities={entities}
         />
       ) : (
@@ -255,7 +255,9 @@ export const ConditionGroupEditor = memo(function ConditionGroupEditor({
   const { t } = useTranslation(['common', 'nodes', 'panels']);
 
   const handleAdd = () => {
-    onChange([...conditions, { condition: 'state', entity_id: '', state: '' }]);
+    // Fields start unset, not "": HA gives "" a meaning (bug #65); the
+    // validation shows what still needs filling in.
+    onChange([...conditions, { condition: 'state' }]);
   };
 
   const handleRemove = (idx: number) => {

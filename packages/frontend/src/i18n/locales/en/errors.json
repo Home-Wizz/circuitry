@@ -12,6 +12,12 @@
     "node": {
       "duplicateId": "ID already in use — must be unique within the automation"
     },
+    "native": {
+      "thresholdRequired": "Set the threshold (Home Assistant refuses this without one)",
+      "optionRequired": "This needs a value: Home Assistant refuses it without one",
+      "targetRequired": "Add a target (Home Assistant refuses this without one)",
+      "targetEmpty": "No targets are selected, so this never triggers or matches"
+    },
     "trigger": {
       "platformRequired": "Trigger platform is required",
       "entityRequired": {
@@ -31,14 +37,29 @@
       "tagIdRequired": "At least one tag ID is required",
       "sourceRequired": "Source is required",
       "geoEventRequired": "Event (enter/leave) is required",
-      "commandRequired": "At least one sentence is required"
+      "commandRequired": "At least one sentence is required",
+      "timePatternRequired": "Set hours, minutes or seconds (Home Assistant needs at least one)",
+      "calendarRequired": "Calendar is required",
+      "entityEmpty": "No entities are selected, so this never triggers",
+      "boundRequired": "Set Above, Below, or both (Home Assistant needs at least one)",
+      "boundEmpty": "This is empty: set a number or an entity, or clear it (Home Assistant refuses an empty value)",
+      "eventTypeEmpty": "The event type is empty, so only an event with an empty name triggers this",
+      "timeEmpty": "No times are set, so this never triggers",
+      "webhookIdEmpty": "The webhook ID is empty",
+      "templateEmpty": "The template is empty, so this never triggers",
+      "tagIdEmpty": "The tag ID is empty, so only a tag with an empty ID triggers this",
+      "sourceEmpty": "The source is empty, so no geolocation entity triggers this"
     },
     "action": {
       "serviceOrEventRequired": "Either a service (e.g. light.turn_on) or an event name is required",
-      "serviceFormat": "Service must be in domain.service format (e.g., light.turn_on)"
+      "serviceFormat": "Service must be in domain.service format (e.g., light.turn_on)",
+      "fieldEmpty": "A field this action needs is empty: Home Assistant saves it, but the step fails when it runs",
+      "eventEmpty": "The event name is empty, so this fires an event with no name"
     },
     "wait": {
-      "templateOrTriggerRequired": "Wait node requires either a template condition or trigger. Use a Delay node for simple time-based pauses."
+      "templateOrTriggerRequired": "Wait node requires either a template condition or trigger. Use a Delay node for simple time-based pauses.",
+      "templateEmpty": "The template is empty, so this wait only ends at its timeout",
+      "triggersEmpty": "No triggers are set, so this wait only ends at its timeout"
     },
     "delay": {
       "valueRequired": "Delay value is required"
@@ -55,10 +76,21 @@
       "templateRequired": "Template is required",
       "zoneRequired": "Zone is required",
       "deviceRequired": "Device is required",
-      "groupConditionsRequired": "At least one condition must be defined"
+      "groupConditionsRequired": "At least one condition must be defined",
+      "stateEmpty": "The state is empty: this only matches an entity whose state is empty",
+      "templateEmpty": "The template is empty, so this condition is never true",
+      "triggerIdEmpty": "The trigger ID is empty: this only matches a trigger with an empty ID",
+      "groupEmpty": "This group has no conditions (and/not are then always true, or is always false)",
+      "entityEmpty": "No entities are selected",
+      "boundRequired": "Set Above, Below, or both (Home Assistant needs at least one)",
+      "boundEmpty": "This is empty: set a number or an entity, or clear it (Home Assistant refuses an empty value)",
+      "timeRequired": "Set After, Before or weekdays (Home Assistant needs at least one)",
+      "timeBlank": "This is empty: set a value or clear it (Home Assistant refuses an empty value)",
+      "weekdayEmpty": "No weekdays are selected, so this condition is never true"
     },
     "setVariables": {
-      "atLeastOne": "At least one variable must be defined"
+      "atLeastOne": "At least one variable must be defined",
+      "empty": "No variables are set, so this step does nothing"
     }
   },
   "connection": {

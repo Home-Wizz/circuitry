@@ -5,6 +5,98 @@ rebrand below were written under this project's previous name — FLODE —
 and are kept exactly as originally written for historical accuracy rather
 than edited to say "Circuitry" throughout.
 
+## [2.2.0] — 2026-09-28 — Faithful to Home Assistant
+
+Circuitry now reads automations the way Home Assistant does, writes more
+drawn shapes exactly as drawn, and offers only the options the connected
+Home Assistant takes. Some automations will come out differently the next
+time they're saved; each such change makes the saved automation do what
+the canvas (or the imported YAML) says.
+
+### Fixed
+- **Importing YAML.** Conditions and their shorthands (`and:`/`or:`/`not:`,
+  a template string, `condition: [...]`), delays and wait timeouts given as
+  a number of seconds, one item where Home Assistant takes a list, and
+  `wait_for_trigger:` with a single trigger are now read as Home Assistant
+  reads them. Before, some became empty or always-false steps, or couldn't
+  be imported. A step Circuitry doesn't know (`scene:`,
+  `service_template:`, a future step type) is kept exactly as written
+  instead of becoming `unknown.unknown`.
+- **Values Home Assistant accepts are kept.** Empty strings
+  (`state: ""`, `event_type: ""`), empty and/or/not groups, an explicit zero
+  wait timeout, a template `enabled:` on triggers, conditions and steps,
+  `continue_on_error` on blocks and steps, a service call's templated
+  `target` or `data`, and `event_data_template` were dropped or rewritten.
+  The duration editor read "00:00:01.5" as 1 s 5 ms.
+- **Condition steps.** A condition step inside a branch, a group or a loop
+  body ended the whole automation or joined another block's conditions, and
+  right after an until loop it joined the loop's test. Home Assistant scopes
+  a condition step to its own list, and Circuitry now does too.
+- **Loops.** An until loop whose test can't be evaluated (a missing entity)
+  now stops, as Home Assistant's does, instead of looping forever in the
+  state machine. A `repeat: count` of zero, a negative number, a fraction
+  or a template runs the right number of times, templates reading
+  `repeat.index`, `.first` or `.last` read the right loop, and a loop with
+  an empty body keeps its loop.
+- **Branches that meet again.** When only some branches of a fan-out meet
+  at a step, or a shortcut edge skips past the meeting point, the steps
+  after it ran once per branch; they now run once. Branches that can each
+  end before the step they meet at, and a line drawn back to an earlier
+  step, compile as drawn. Shapes no output can express are refused with
+  the reason.
+- **Choose.** An always-true option followed by other options, and a last
+  option that runs nothing, no longer change which option runs.
+- **Parallels.** A one-branch parallel that sets `wait`, and a branch
+  holding one `sequence:` with `continue_on_error` or a template
+  `enabled:`, keep their meaning.
+- **Reopening state-machine automations** no longer misreads condition
+  lists, loops or blocks kept as written, so the next save doesn't change
+  or drop them.
+- **Opening several things at once.** A YAML list of several automations,
+  a graph with several start nodes, and a trigger Circuitry can't read are
+  refused with the reason instead of opening only part of them.
+- **The trigger, condition and action catalog.** New triggers no longer
+  write a `behavior` Home Assistant refuses. Sun, moon and zone-occupancy
+  triggers and conditions no longer get a target Home Assistant refuses.
+  Threshold numbers carry a unit Home Assistant takes, and triggers and
+  conditions with a threshold start with one. Sun conditions keep their
+  options. Actions that act on no entity don't ask for one. "Toggle water
+  heater", a service Home Assistant doesn't have, is gone. Every option
+  Home Assistant requires has a field and is flagged while it's missing.
+- **Saving.** Several graph saves arriving together (right after Home
+  Assistant starts, or from two tabs) no longer lose all but one.
+- **The trace simulator** follows every branch of a parallel, loops, and
+  the places where branches meet, the way the automation runs.
+- **Fire Event.** The properties panel can switch a step to "Fire Event"
+  again.
+
+### Changed
+- **The properties panel follows your Home Assistant version.** It reads
+  which options each trigger and condition takes from the connected Home
+  Assistant, so an older release gets that release's choices (for example
+  "Any / First / Last" and no "for" before 2026.5). On 2026.9 nothing looks
+  different.
+- **Empty required action fields are flagged.** An action whose service
+  needs a field (a cover position, a notification message, ...) shows a
+  warning while the field is empty: Home Assistant saves it, but the step
+  fails when it runs.
+- **Blocked less often.** The editor blocks only what Home Assistant
+  refuses; a blank state, template or trigger id is allowed.
+
+### Known issues
+- A condition right after the trigger whose only path is "No" stops the
+  automation when Home Assistant can't evaluate it (for example, its entity
+  is missing), instead of taking the "No" path.
+- In state-machine output, a loop uses one of Home Assistant's 10,000
+  repeat iterations per step it passes through, so a long-running loop
+  reaches that limit sooner than the same loop in native output.
+- The entity step of an action can offer an entity that can't do it (for
+  example "Stop cover" for a cover without a stop), and the step then fails
+  when it runs.
+- A few actions whose required values Home Assistant doesn't describe as
+  required (a thermostat's HVAC mode or target temperature, a date/time
+  helper's value) aren't flagged while empty.
+
 ## [2.1.0] — 2026-09-26 — Transpiler Reliability Overhaul
 
 Every automation is checked more thoroughly before it's saved, and many

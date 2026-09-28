@@ -177,8 +177,24 @@ async parse(yamlString: string): Promise<ParseResult> {
     // Step 1: Parse YAML string
     let parsed = yamlLoad(yamlString) as Record<string, unknown> | unknown[];
 
-    // Handle array format (list of automations) - use the first one
+    // A list of automations (automations.yaml): one of them opens. It used
+    // to open the first and drop the rest without a word;
+    // several are refused, naming how many.
     if (Array.isArray(parsed)) {
+      if (parsed.length > 1) {
+        return {
+          ok: false,
+          result: {
+            success: false,
+            errors: [
+              `This YAML holds ${parsed.length} automations; Circuitry opens one at a time. ` +
+                'Paste just the one you want.',
+            ],
+            warnings,
+            hadMetadata: false,
+          },
+        };
+      }
       if (parsed.length === 0) {
         return {
           ok: false,

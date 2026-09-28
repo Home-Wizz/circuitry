@@ -201,7 +201,15 @@ function detectLoops(ctx: Ctx): Map<string, LoopInfo> {
       !isOwnUntilEdge &&
       source.type === 'condition' &&
       (typeof sourceBlockKey === 'string' || targetBlockKey === 'repeat_while');
-    if (isBodyExitIntoEnclosingLoop && target.type !== 'condition') continue;
+    // Bug #114 (2026-09-27): such an edge going back to a step, not to a
+    // loop's head, belongs to no loop this reading knows. It used to be
+    // skipped, reading the side it leaves from as empty -- native did the
+    // same, so the gate agreed with a compile that dropped the loop.
+    if (isBodyExitIntoEnclosingLoop && target.type !== 'condition') {
+      throw new Error(
+        `the edge from "${source.id}" back to "${target.id}" belongs to no loop; cannot tell what it repeats`
+      );
+    }
 
     if (
       target.type === 'condition' &&
@@ -295,6 +303,12 @@ function detectLoops(ctx: Ctx): Map<string, LoopInfo> {
         count: extractCountValue(ctx, source.id),
         incrementNodeId,
       });
+    } else {
+      // #114: nor may any other loop-back edge (a step going back to a
+      // step) be skipped.
+      throw new Error(
+        `the edge from "${source.id}" back to "${target.id}" belongs to no loop; cannot tell what it repeats`
+      );
     }
   }
   return loops;
@@ -321,6 +335,13 @@ function detectLoops(ctx: Ctx): Map<string, LoopInfo> {
  * while, one that goes where the head's does; for an until, one that
  * loops back where the head's does.
  */
+/** Bug #110: a list member has exactly one way in (the member before
+ * it); where other paths also arrive is a statement of its own. Back edges
+ * don't count. Native's hasOneWayIn states the same rule. */
+function hasOneWayIn(ctx: Ctx, nodeId: string): boolean {
+  return (ctx.incoming.get(nodeId) ?? []).filter((e) => !ctx.backEdgeIds.has(e.id)).length === 1;
+}
+
 function loopConditionChain(ctx: Ctx, headId: string, kind: 'while' | 'until'): string[] {
   const chain = [headId];
   const headExits = forwardOutgoing(ctx, headId)
@@ -336,6 +357,7 @@ function loopConditionChain(ctx: Ctx, headId: string, kind: 'while' | 'until'): 
     const next = ctx.nodesById.get(trueEdges[0].target);
     if (next?.type !== 'condition' || chain.includes(next.id)) break;
     if (typeof (next.data as Record<string, unknown> | undefined)?._blockKey === 'string') break;
+    if (!hasOneWayIn(ctx, next.id)) break;
     // Back-edges count here. A while member's false edge that loops back
     // (to the head, or anywhere) means "keep looping" -- the opposite of a
     // list member, whose false leaves the loop -- so `while W: [if C ...]`
@@ -347,12 +369,15 @@ function loopConditionChain(ctx: Ctx, headId: string, kind: 'while' | 'until'): 
     const nextBackFalse = nextFalse.filter((e) => ctx.backEdgeIds.has(e.id));
     let foldable: boolean;
     if (kind === 'while') {
+      // Its false edges go exactly where the head's do: one exit, or all
+      // of them when a parallel follows the loop (it used to
+      // take one exit only, so such a list never folded).
+      const exitKey = (targets: string[]) => [...new Set(targets)].sort().join('\u0000');
       foldable =
         nextFalse.length === 0 ||
-        (headExits.length === 1 &&
-          nextFalse.length === 1 &&
-          nextForwardFalse.length === 1 &&
-          nextForwardFalse[0].target === headExits[0]);
+        (headExits.length > 0 &&
+          nextBackFalse.length === 0 &&
+          exitKey(nextForwardFalse.map((e) => e.target)) === exitKey(headExits));
     } else {
       foldable =
         nextForwardFalse.length === 0 &&
@@ -441,13 +466,19 @@ function setsCounterVariable(node: FlowNode | undefined, varName: string): boole
  * identical to the old findConvergence), or a 2+ element array for a
  * genuine sibling set, ordered nearest-first.
  */
-function findConvergenceSet(ctx: Ctx, startsOrGroups: (string | string[])[]): string[] {
+function findConvergenceSet(
+  ctx: Ctx,
+  startsOrGroups: (string | string[])[],
+  stop: string | Set<string> | null = null
+): string[] {
   // A group of starts is one branch (bug #50, 2026-09-26 -- an if's else
   // that is itself a parallel); see native.ts's findConvergenceSet.
   const groups = startsOrGroups
     .map((s) => (Array.isArray(s) ? s : [s]))
     .filter((g) => g.length > 0);
   if (groups.length < 2) return [];
+  // `stop` (#99): a stop node can itself be where the branches meet, but
+  // nothing past it is (it belongs to whoever set the stop).
   const reachableSets = groups.map((group) => {
     const seen = new Set<string>();
     const queue = [...group];
@@ -455,6 +486,7 @@ function findConvergenceSet(ctx: Ctx, startsOrGroups: (string | string[])[]): st
       const id = queue.shift()!;
       if (seen.has(id)) continue;
       seen.add(id);
+      if (stopHas(stop, id)) continue;
       for (const e of forwardOutgoing(ctx, id)) queue.push(e.target);
     }
     return seen;
@@ -476,6 +508,7 @@ function findConvergenceSet(ctx: Ctx, startsOrGroups: (string | string[])[]): st
       const id = queue.shift()!;
       if (seen.has(id)) continue;
       seen.add(id);
+      if (stopHas(stop, id)) continue;
       for (const e of forwardOutgoing(ctx, id)) {
         if (e.target === toId) return true;
         if (!seen.has(e.target)) queue.push(e.target);
@@ -542,8 +575,11 @@ function parseConditionFromNode(node: ConditionNode): BoolExpr {
  * identically against a `repeat:` step on the YAML side. */
 function fallbackRepeatStep(data: Record<string, unknown>): BStep {
   const repeat = data.repeat as Record<string, unknown>;
+  // The body as one list, not step by step: a condition step gates the
+  // rest of the body (bug #85: read on its own it gated nothing, and a loop
+  // kept whole with one in its body was refused).
   const body: BProgram = Array.isArray(repeat.sequence)
-    ? repeat.sequence.flatMap((s) => normalizeYamlActionLeafForFallback(s as Record<string, unknown>))
+    ? normalizeYamlActionsForFallback(repeat.sequence)
     : [];
   if (repeat.while) {
     return { k: 'repeat', mode: 'while', test: parseConditionExpr(repeat.while), body };
@@ -564,8 +600,8 @@ function fallbackRepeatStep(data: Record<string, unknown>): BStep {
  * parser here directly (rather than via a registration indirection) is
  * safe: no import cycle.
  */
-function normalizeYamlActionLeafForFallback(step: Record<string, unknown>): BProgram {
-  return parseActionSequence([step]);
+function normalizeYamlActionsForFallback(steps: unknown[]): BProgram {
+  return parseActionSequence(steps);
 }
 
 export function normalizeNodeAction(node: FlowNode): BStep | null {
@@ -634,7 +670,16 @@ function recordPathEnd(
   ctx.pathEnds.push(handle ? { nodeId, handle } : { nodeId });
 }
 
-/** Walks each branch of a fan-out, counting it as inside a parallel. */
+/**
+ * Walks each branch of a fan-out up to `stop`, counting it as inside a
+ * parallel. Bug #99 (2026-09-27): branches that meet again before `stop`
+ * when not all of them do (B and C lead to E, D doesn't) are one branch --
+ * a fan-out of their own, E once after both -- not one walk per branch,
+ * which read E into B's branch and into C's (native.ts wrote it that way
+ * too, so the gate passed it). A meeting no nesting of parallels can
+ * write is refused. Same rule as native.ts's buildParallelBranches,
+ * written independently.
+ */
 function walkBranches(
   ctx: Ctx,
   ids: string[],
@@ -642,12 +687,76 @@ function walkBranches(
   visited: Set<string>,
   suppressLoopId?: string
 ): BProgram[] {
+  const groups = meetingGroups(ctx, ids, stop);
   ctx.parallelDepth++;
   try {
-    return ids.map((id) => walk(ctx, id, stop, new Set(visited), suppressLoopId));
+    return groups.map((group) => {
+      if (group.length === 1) return walk(ctx, group[0], stop, new Set(visited), suppressLoopId);
+      if (group.length === ids.length) {
+        throw new Error(
+          `branches ${ids.join(', ')} meet again in a way no parallel can be written for`
+        );
+      }
+      return buildContinuation(ctx, group, stop, new Set(visited), suppressLoopId);
+    });
   } finally {
     ctx.parallelDepth--;
   }
+}
+
+/**
+ * #99: fan-out targets grouped by whether their branches meet before
+ * `stop` -- share a node, forward edges only, neither the stop nor past
+ * it -- linking everything that meets anything in a group. Each group
+ * keeps the place of its first target.
+ */
+function meetingGroups(ctx: Ctx, ids: string[], stop: string | Set<string> | null): string[][] {
+  // What comes after the stop runs once after it, whichever branch has a
+  // (shortcut) edge to it: not a meeting of the branches. Only a stop the
+  // branches lead to counts (a loop's test they go back to comes before
+  // them).
+  const reached = forwardReach(ctx, ids);
+  const stops = stop === null ? [] : stop instanceof Set ? [...stop] : [stop];
+  const afterStop = forwardReach(
+    ctx,
+    stops.filter((id) => reached.has(id))
+  );
+  const reach = ids.map((start) => {
+    const seen = new Set<string>();
+    const queue = [start];
+    while (queue.length > 0) {
+      const id = queue.shift()!;
+      if (seen.has(id) || afterStop.has(id)) continue;
+      seen.add(id);
+      for (const e of forwardOutgoing(ctx, id)) queue.push(e.target);
+    }
+    return seen;
+  });
+  const groups: { members: number[]; nodes: Set<string> }[] = [];
+  ids.forEach((_, i) => {
+    const meeting = groups.filter((g) => [...reach[i]].some((id) => g.nodes.has(id)));
+    const merged = {
+      members: [...meeting.flatMap((g) => g.members), i].sort((a, b) => a - b),
+      nodes: new Set([...meeting.flatMap((g) => [...g.nodes]), ...reach[i]]),
+    };
+    for (const g of meeting) groups.splice(groups.indexOf(g), 1);
+    groups.push(merged);
+  });
+  groups.sort((a, b) => a.members[0] - b.members[0]);
+  return groups.map((g) => g.members.map((i) => ids[i]));
+}
+
+/** Every node reachable from `starts` by forward edges, `starts` included. */
+function forwardReach(ctx: Ctx, starts: string[]): Set<string> {
+  const seen = new Set<string>();
+  const queue = [...starts];
+  while (queue.length > 0) {
+    const id = queue.shift()!;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    for (const e of forwardOutgoing(ctx, id)) queue.push(e.target);
+  }
+  return seen;
 }
 
 function buildContinuation(
@@ -658,11 +767,17 @@ function buildContinuation(
   suppressLoopId?: string,
   sequentialFallback = false,
 ): BProgram {
-  const ids = targetIds.filter((id) => !stopHas(stop, id));
+  // A target that a stop target leads to (#99: a shortcut edge past the
+  // stop) runs once, after the stop, not also here.
+  const afterStop = forwardReach(
+    ctx,
+    targetIds.filter((id) => stopHas(stop, id))
+  );
+  const ids = targetIds.filter((id) => !stopHas(stop, id) && !afterStop.has(id));
   if (ids.length === 0) return [];
   if (ids.length === 1) return walk(ctx, ids[0], stop, visited, suppressLoopId);
 
-  const convergenceSet = findConvergenceSet(ctx, ids);
+  const convergenceSet = findConvergenceSet(ctx, ids, stop);
 
   // Classify each branch as a BARE condition test (its walked program is
   // exactly one `if` step, itself with BOTH then and else empty -- i.e.
@@ -704,7 +819,10 @@ function buildContinuation(
     // that could represent both continuations at once, so this falls
     // through to the general parallel-step handling below (bug #12 fix,
     // 2026-09-06).
-    if (allEmptyConditions && convergenceSet.length === 1) {
+    // #111: a Join goes on once every branch has finished, whether its test
+    // passed or not -- never an OR of them.
+    const atJoin = ctx.nodesById.get(convergenceSet[0])?.type === 'join';
+    if (allEmptyConditions && convergenceSet.length === 1 && !atJoin) {
       const orExpr: BoolExpr = { op: 'or', args: branchConditions };
       const then = walk(ctx, convergenceSet[0], stop, new Set(visited));
       return [{ k: 'if', cond: orExpr, then, else: [] }];
@@ -875,7 +993,10 @@ function buildConditionChain(
     const trueTarget = trueEdges[0].target;
     const nextNode = ctx.nodesById.get(trueTarget);
     const canContinueChain =
-      nextNode?.type === 'condition' && !visited.has(trueTarget) && !ctx.loopsByEntry.has(trueTarget);
+      nextNode?.type === 'condition' &&
+      !visited.has(trueTarget) &&
+      !ctx.loopsByEntry.has(trueTarget) &&
+      hasOneWayIn(ctx, trueTarget);
 
     if (canContinueChain) {
       const nextFalseEdges = forwardOutgoing(ctx, trueTarget).filter((e) => e.sourceHandle === 'false');
@@ -982,7 +1103,7 @@ export function buildTrigger(node: FlowNode): Record<string, unknown> {
   const cleaned: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(data)) {
     if (key.startsWith('_')) continue;
-    if (value === undefined || value === '') continue;
+    if (value === undefined) continue; // "" kept (bug #72)
     if (value === null && key !== 'from' && key !== 'to') continue;
     cleaned[key] = value;
   }
@@ -994,16 +1115,21 @@ export function buildTrigger(node: FlowNode): Record<string, unknown> {
     const { context_user_id, ...rest } = cleaned;
     return { ...rest, context: { user_id: context_user_id } };
   }
+  // A blank editing field (no user): not an HA key, never written (the
+  // strategies' fold drops it too). Kept apart now that "" isn't dropped
+  // wholesale (bug #72).
+  delete cleaned.context_user_id;
   return cleaned;
 }
 
 /**
- * Builds a canonical BProgram for the subtree reachable from `entryNodeId`,
- * stopping at `stopNodeId` (or running to the flow's natural end when
- * null) -- exposed for extractStateMachineFromGraph.ts, which needs the
- * exact same "what does this subtree of the graph mean" reading this file
- * already provides for NativeStrategy's verification (a fan-out branch's
- * content, up to wherever it reconverges).
+ * The branches of a fan-out from `targetIds` as canonical BPrograms, each
+ * read up to `stop` (or to the flow's natural end when null), branches
+ * that meet before it read as one (#99, walkBranches) -- exposed for
+ * extractStateMachineFromGraph.ts, which needs the exact same "what does
+ * this part of the graph mean" reading this file already provides for
+ * NativeStrategy's verification (a fan-out's branches, up to wherever they
+ * reconverge).
  *
  * Reusing this file for a second strategy's verification is NOT the same
  * "shared blind spot" risk this file's own doc comment warns against (that
@@ -1022,13 +1148,12 @@ export function buildTrigger(node: FlowNode): Record<string, unknown> {
  * that file, exactly like this file re-derives native.ts's own
  * choose-chain/loop/convergence rules instead of calling into it.
  */
-export function extractGraphProgramBetween(
+export function extractGraphParallelBranches(
   flow: FlowGraph,
-  entryNodeId: string,
-  stopNodeId: string | Set<string> | null
-): BProgram {
-  const ctx = buildCtx(flow);
-  return walk(ctx, entryNodeId, stopNodeId, new Set());
+  targetIds: string[],
+  stop: Set<string> | null
+): BProgram[] {
+  return walkBranches(buildCtx(flow), targetIds, stop, new Set());
 }
 
 export function extractFromGraph(flow: FlowGraph): GraphExtraction {

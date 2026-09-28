@@ -9,10 +9,16 @@ import type {
   CircuitryMetadata,
   FlowEdge,
   FlowNode,
+  HACondition,
   HATrigger,
   TriggerNode,
 } from '@circuitry/shared';
-import { CircuitryMetadataSchema, HATriggerSchema } from '@circuitry/shared';
+import {
+  CircuitryMetadataSchema,
+  HAConditionSchema,
+  HATriggerSchema,
+  OPAQUE_STEP_KEY,
+} from '@circuitry/shared';
 import { generateEdgeId } from '../utils/generateIds';
 
 /**
@@ -134,19 +140,74 @@ export function unfoldEventContextUserId(data: HATrigger): HATrigger {
 }
 
 /**
- * Create an unknown node for unparseable content
+ * Read one Home Assistant condition into a condition node's data, exactly as
+ * written (decision D3, bug #58). HAConditionSchema accepts at least what HA
+ * accepts, so a condition it rejects is one HA would reject too: the import
+ * fails with a message naming it, instead of the condition being rewritten
+ * into something else. (Before #58 every caller rewrote it into a template
+ * made from its JSON text, which HA always evaluates as false.)
  */
-export function createUnknownNode(nodeId: string, originalData: unknown): ActionNode {
-  const data = originalData as Record<string, unknown> | null | undefined;
+export function importCondition(condition: unknown, where: string): HACondition {
+  const result = HAConditionSchema.safeParse(condition);
+  if (result.success && typeof result.data.condition === 'string') return result.data;
+  if (result.success) {
+    // HA needs a condition type (shorthands are expanded before this).
+    throw new Error(
+      `${where}: this condition can't be read (it has no condition type): ${JSON.stringify(condition)}`
+    );
+  }
+  const issues = result.error.issues
+    .map((issue) => `${issue.path.join('.') || '(condition)'}: ${issue.message}`)
+    .join('; ');
+  throw new Error(`${where}: this condition can't be read (${issues}): ${JSON.stringify(condition)}`);
+}
+
+/**
+ * A step's own `enabled`, as HA takes it: a boolean, or a template that HA
+ * renders when it reaches the step (bug #70). A template used to be
+ * dropped, so a step HA skips ran anyway. Anything else is left out.
+ */
+export function stepEnabledAsWritten(enabled: unknown): boolean | string | undefined {
+  return typeof enabled === 'boolean' || typeof enabled === 'string' ? enabled : undefined;
+}
+
+/**
+ * A condition's own `enabled`, as written (bug #64): `false`, a template
+ * (HA accepts `enabled: "{{ ... }}"` on a condition), or `undefined` for
+ * enabled. `true` is the default, so it's dropped. A disabled block
+ * disables every condition in it.
+ */
+export function conditionEnabledAsWritten(
+  condition: unknown,
+  blockDisabled: boolean
+): false | string | undefined {
+  if (blockDisabled) return false;
+  if (!condition || typeof condition !== 'object' || !('enabled' in condition)) return undefined;
+  const { enabled } = condition;
+  if (enabled === false) return false;
+  return typeof enabled === 'string' ? enabled : undefined;
+}
+
+/**
+ * An action node holding a step the parser doesn't know (`scene:`, the
+ * legacy `service_template:`, a step type Home Assistant adds later),
+ * exactly as written, to be written back unchanged (bug #57, decision
+ * D3; see OPAQUE_STEP_KEY). It used to become `action: unknown.unknown`
+ * with the step under `data:`, which fails when run. Inside a disabled
+ * block the step is disabled, like every other step there.
+ */
+export function createOpaqueStepNode(
+  nodeId: string,
+  step: Record<string, unknown>,
+  blockDisabled: boolean
+): ActionNode {
+  const data: Record<string, unknown> = { ...step, [OPAQUE_STEP_KEY]: true };
+  if (blockDisabled) data.enabled = false;
   return {
     id: nodeId,
     type: 'action',
     position: { x: 0, y: 0 },
-    data: {
-      alias: `Unknown: ${data?.service || data?.trigger || 'Node'}`,
-      service: (data?.service as string) || 'unknown.unknown',
-      data: data as Record<string, unknown> | undefined,
-    },
+    data: data as ActionNode['data'],
   };
 }
 
@@ -173,91 +234,53 @@ export function createEdge(source: string, target: string, sourceHandle?: string
 }
 
 /**
- * Parse trigger configurations
+ * The triggers of a `wait_for_trigger` step, read the way top-level
+ * triggers are. A trigger the schema can't read stops the import with the
+ * reason (the parser's caller reports it). Both parsers used to drop it,
+ * the native one with only a warning, which saved a wait for fewer
+ * triggers than written, or for none.
  */
-export function parseTriggers(
-  triggers: unknown[],
-  warnings: string[],
-  getNextNodeId: (type: string) => string
-): FlowNode[] {
-  // Process all object-type trigger items — do NOT filter with isHATrigger here,
-  // because modern HA may use formats (e.g. dict-keyed or novel trigger types)
-  // that don't have 'platform', 'trigger', or 'entity_id' at the top level.
-  return triggers
-    .filter((t) => typeof t === 'object' && t !== null)
-    .map((trigger, index) => {
-      const nodeId = getNextNodeId('trigger');
-      try {
-        // Validate and parse trigger using HATriggerSchema
-        const result = HATriggerSchema.safeParse(trigger);
-        if (!result.success) {
-          warnings.push(
-            `Trigger ${index} failed schema validation: ${JSON.stringify(result.error.issues)}`
-          );
-          // Return a fallback TRIGGER node (not an action node) so the graph
-          // always has at least one trigger — allowing the import to succeed.
-          return createFallbackTriggerNode(nodeId, trigger);
-        }
-        const node: TriggerNode = {
-          id: nodeId,
-          type: 'trigger',
-          position: { x: 0, y: 0 },
-          data: unfoldEventContextUserId(result.data),
-        };
-        return node;
-      } catch (error) {
-        warnings.push(`Failed to parse trigger ${index}: ${error}`);
-        return createFallbackTriggerNode(nodeId, trigger);
-      }
-    });
+export function importWaitTriggers(triggers: readonly unknown[]): HATrigger[] {
+  return triggers.map((trigger, index) => {
+    const result = HATriggerSchema.safeParse(trigger);
+    if (!result.success) {
+      throw new Error(
+        `Could not read trigger ${index + 1} of a wait_for_trigger: ${result.error.message}`
+      );
+    }
+    return unfoldEventContextUserId(result.data);
+  });
 }
 
 /**
- * Build a best-effort trigger node when HATriggerSchema validation fails.
- * Always returns type:'trigger' so validateGraphStructure does not fail.
+ * Parse trigger configurations. A trigger the schema can't read stops the
+ * import with the reason, as HA refuses it (decision D3; HATriggerSchema
+ * accepts at least what HA does). Such a trigger used to become a
+ * best-effort node -- the first object-valued key read as the trigger
+ * type, or a `state` trigger when there was none -- and a trigger that
+ * wasn't a mapping was dropped.
  */
-export function createFallbackTriggerNode(nodeId: string, originalData: unknown): TriggerNode {
-  const data = (
-    typeof originalData === 'object' && originalData !== null
-      ? (originalData as Record<string, unknown>)
-      : {}
-  ) as Record<string, unknown>;
-
-  // Determine trigger type from various formats:
-  // 1. Modern HA: { trigger: 'state', ... }
-  // 2. Legacy HA: { platform: 'state', ... }
-  // 3. Dict-keyed: { state: { entity_id: '...' } }
-  let triggerType: string;
-  let nestedFields: Record<string, unknown> = {};
-
-  if (typeof data.trigger === 'string') {
-    triggerType = data.trigger;
-    const { platform: _p, trigger: _t, ...rest } = data;
-    nestedFields = rest;
-  } else if (typeof data.platform === 'string') {
-    triggerType = data.platform;
-    const { platform: _p, ...rest } = data;
-    nestedFields = rest;
-  } else {
-    // Dict-keyed format: first key is the trigger type, value contains fields
-    const firstKey = Object.keys(data).find(
-      (k) => !['alias', 'id', 'enabled', 'variables'].includes(k)
-    );
-    if (firstKey && typeof data[firstKey] === 'object' && data[firstKey] !== null) {
-      triggerType = firstKey;
-      nestedFields = data[firstKey] as Record<string, unknown>;
-    } else {
-      triggerType = 'state';
+export function parseTriggers(
+  triggers: unknown[],
+  _warnings: string[],
+  getNextNodeId: (type: string) => string
+): FlowNode[] {
+  return triggers.map((trigger, index) => {
+    const result = HATriggerSchema.safeParse(trigger);
+    if (!result.success || typeof trigger !== 'object' || trigger === null) {
+      throw new Error(
+        `Could not read trigger ${index + 1}: ${
+          result.success ? 'a trigger is a mapping' : result.error.message
+        }`
+      );
     }
-  }
-
-  return {
-    id: nodeId,
-    type: 'trigger',
-    position: { x: 0, y: 0 },
-    data: {
-      trigger: triggerType,
-      ...nestedFields,
-    } as TriggerNode['data'],
-  };
+    const node: TriggerNode = {
+      id: getNextNodeId('trigger'),
+      type: 'trigger',
+      position: { x: 0, y: 0 },
+      data: unfoldEventContextUserId(result.data),
+    };
+    return node;
+  });
 }
+

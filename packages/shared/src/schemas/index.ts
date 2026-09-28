@@ -6,6 +6,7 @@ export {
   EntityIdSchema,
   type Handle,
   HandleSchema,
+  haBoolean,
   type MaxExceeded,
   MaxExceededSchema,
   type NodeId,
@@ -13,6 +14,8 @@ export {
   type Position,
   PositionSchema,
 } from './base';
+// Durations (delay, wait timeout)
+export { type HADuration, HADurationSchema } from './duration';
 // Edge schemas
 export { type ConditionEdge, ConditionEdgeSchema, EdgeSchema, type FlowEdge } from './edges';
 // Graph schemas
@@ -98,6 +101,7 @@ export {
   isConditionNode,
   isDelayNode,
   isJoinNode,
+  isOpaqueStepData,
   isSequenceEndNode,
   isSequenceStartNode,
   isSetVariablesNode,
@@ -107,6 +111,7 @@ export {
   type JoinNode,
   JoinNodeSchema,
   NodeSchema,
+  OPAQUE_STEP_KEY,
   type SequenceEndNode,
   SequenceEndNodeSchema,
   type SequenceStartNode,

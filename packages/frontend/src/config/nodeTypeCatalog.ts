@@ -99,8 +99,8 @@ export const nodeTypes = [
     labelKey: 'nodes:types.wait',
     icon: Hourglass,
     color: NODE_COLORS.wait.palette,
+    // No template yet (not ""): an unfilled wait stays an error.
     defaultData: {
-      wait_template: '',
       timeout: '00:01:00',
     },
   },

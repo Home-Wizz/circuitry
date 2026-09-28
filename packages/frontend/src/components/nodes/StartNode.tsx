@@ -1,5 +1,5 @@
 import { Handle, type NodeProps, Position } from '@xyflow/react';
-import { AlertCircle, Ban, Rocket } from 'lucide-react';
+import { Rocket } from 'lucide-react';
 import { memo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNodeErrors } from '@/hooks/useNodeErrors';
@@ -8,6 +8,7 @@ import { getTraceStateClass, NODE_COLORS, NODE_STATE_CLASSES, SELECTED_NODE_STYL
 import { cn } from '@/lib/utils';
 import type { StartNodeData } from '@/store/flow-store';
 import { useFlowStore } from '@/store/flow-store';
+import { NodeStatusBadge } from './NodeStatusBadge';
 
 const COLORS = NODE_COLORS.start;
 
@@ -25,7 +26,7 @@ export const StartNode = memo(function StartNode({ id, data, selected }: StartNo
   const { t } = useTranslation(['nodes']);
   const activeNodeId = useFlowStore((s) => s.activeNodeId);
   const getExecutionStepNumber = useFlowStore((s) => s.getExecutionStepNumber);
-  const { hasErrors, errorMessages } = useNodeErrors(id);
+  const { hasErrors, errorMessages, warningMessages } = useNodeErrors(id);
   const traceState = useTraceNodeState(id);
   const isActive = activeNodeId === id;
   const stepNumber = getExecutionStepNumber(id);
@@ -47,27 +48,11 @@ export const StartNode = memo(function StartNode({ id, data, selected }: StartNo
         getTraceStateClass(traceState)
       )}
     >
-      {hasErrors && (
-        <div
-          className={cn(
-            'absolute -top-2 -right-2 flex h-5 w-5 items-center justify-center rounded-full shadow-sm',
-            NODE_STATE_CLASSES.errorBadge
-          )}
-          title={errorMessages.join('\n')}
-        >
-          <AlertCircle className="h-3 w-3" />
-        </div>
-      )}
-      {isDisabled && !hasErrors && (
-        <div
-          className={cn(
-            'absolute -top-2 -right-2 flex h-5 w-5 items-center justify-center rounded-full shadow-sm',
-            NODE_STATE_CLASSES.disabledBadge
-          )}
-        >
-          <Ban className="h-3 w-3" />
-        </div>
-      )}
+      <NodeStatusBadge
+        errorMessages={errorMessages}
+        warningMessages={warningMessages}
+        isDisabled={isDisabled}
+      />
 
       <div className="mb-1 flex items-center gap-2">
         <div className={cn('rounded p-1', COLORS.chip)}>

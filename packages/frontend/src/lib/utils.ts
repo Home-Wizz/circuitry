@@ -5,6 +5,10 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+/** A plain object (not null, not an array). */
+export const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
 /**
  * Turns a snake_case identifier (HA domain/service/state names) into a
  * human-readable fallback label, e.g. `turn_on` -> `Turn on`. Used wherever
@@ -54,4 +58,15 @@ let nodeIdCounter = 0;
  */
 export function generateNodeId(type: string): string {
   return `${type}_${Date.now()}_${nodeIdCounter++}`;
+}
+
+/**
+ * A condition field the user cleared, as stored: unset, not "". The
+ * transpiler writes every value a condition holds, "" included, because
+ * Home Assistant gives "" a meaning (`state: ""` matches an empty state;
+ * bug #65), so a blank left in an editor field must not reach the output
+ * as "".
+ */
+export function clearedToUnset(value: unknown): unknown {
+  return value === '' ? undefined : value;
 }

@@ -1,5 +1,3 @@
-import { FlowTranspiler } from '@circuitry/transpiler';
-import type { Edge } from '@xyflow/react';
 import { Play, RotateCcw, Square } from 'lucide-react';
 import { useCallback, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -13,6 +11,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { HaSelect } from '@/ha';
+import { tracePath } from '@/lib/trace-path';
 import { cn } from '@/lib/utils';
 import { useFlowStore } from '@/store/flow-store';
 
@@ -58,7 +57,6 @@ export function TraceSimulator() {
   const { t } = useTranslation(['simulator']);
   const {
     nodes,
-    edges,
     toFlowGraph,
     isSimulating,
     startSimulation,
@@ -75,52 +73,20 @@ export function TraceSimulator() {
   const simulate = useCallback(async () => {
     if (nodes.length === 0) return;
 
-    startSimulation();
-
     try {
-      const flowGraph = toFlowGraph();
-      const transpiler = new FlowTranspiler();
-      const analysis = transpiler.analyzeTopology(flowGraph);
-
-      // Start from entry node
-      let currentNodeId: string | null = analysis.entryNodes[0];
-
-      // Follow the first edge from trigger to find the first action node
-      const firstEdge = edges.find((e) => e.source === currentNodeId);
-      if (firstEdge) {
-        currentNodeId = firstEdge.target;
-      }
-
-      const maxIterations = 100;
-      let iterations = 0;
-
-      while (currentNodeId && currentNodeId !== 'END' && iterations < maxIterations) {
+      // The nodes the saved automation would run, in order, and the edges
+      // it goes down (lib/trace-path.ts: the transpiler's own walk of the
+      // graph, not just the first edge).
+      const { nodeIds, edgeIds } = tracePath(toFlowGraph(), conditionResults);
+      startSimulation(edgeIds);
+      for (const nodeId of nodeIds) {
+        // The Stop button ends the animation.
+        if (!useFlowStore.getState().isSimulating) break;
         // Highlight current node
-        setActiveNode(currentNodeId);
-        addToExecutionPath(currentNodeId);
-
+        setActiveNode(nodeId);
+        addToExecutionPath(nodeId);
         // Wait for visualization
         await new Promise((r) => setTimeout(r, simulationSpeed));
-
-        // Find outgoing edges
-        const outEdges = edges.filter((e) => e.source === currentNodeId);
-        const currentNode = nodes.find((n) => n.id === currentNodeId);
-
-        if (currentNode?.type === 'condition') {
-          // For conditions, randomly determine true/false
-          const result: boolean = conditionResults[currentNodeId] ?? Math.random() > 0.5;
-          const nextEdge: Edge | null =
-            outEdges.find((e) => e.sourceHandle === (result ? 'true' : 'false')) || null;
-          currentNodeId = nextEdge?.target ?? null;
-        } else if (outEdges.length > 0) {
-          // For other nodes, follow the first edge
-          currentNodeId = outEdges[0].target;
-        } else {
-          // No outgoing edges - end simulation
-          currentNodeId = null;
-        }
-
-        iterations++;
       }
 
       // Clear active node when done
@@ -132,7 +98,6 @@ export function TraceSimulator() {
     stopSimulation();
   }, [
     nodes,
-    edges,
     toFlowGraph,
     startSimulation,
     stopSimulation,
@@ -234,7 +199,8 @@ export function TraceSimulator() {
               const alias = (node?.data as { alias?: string })?.alias;
               return (
                 <li
-                  key={nodeId}
+                  // A node a loop runs again appears again.
+                  key={`${i}-${nodeId}`}
                   className={cn(
                     'py-0.5',
                     i === executionPath.length - 1 && isSimulating

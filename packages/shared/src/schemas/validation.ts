@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isOpaqueStepData } from './nodes';
 
 /**
  * Validation schemas for node data.
@@ -7,27 +8,27 @@ import { z } from 'zod';
  */
 
 /**
- * Wait node validation - requires either wait_template or wait_for_trigger.
- * A wait with only timeout is not valid - use a Delay node instead.
+ * Wait node validation (decision D3; the audit after bug #65, checked in a
+ * real HA 2026.9.3). A wait needs `wait_template` or `wait_for_trigger` --
+ * without either HA can't tell what the step is. HA accepts a blank
+ * template and an empty trigger list, so those are warnings (they used to
+ * block saving). A wait with only a timeout isn't a wait: use a Delay node.
  */
 export const WaitNodeValidationSchema = z
-  .object({
-    wait_template: z.string().optional(),
-    wait_for_trigger: z.array(z.any()).optional(),
-    timeout: z.union([z.string(), z.object({})]).optional(),
-  })
+  .object({})
   .passthrough()
-  .refine(
-    (data) => {
-      const hasTemplate = data.wait_template && data.wait_template.trim() !== '';
-      const hasTrigger = data.wait_for_trigger && data.wait_for_trigger.length > 0;
-      return hasTemplate || hasTrigger;
-    },
-    {
-      message: 'errors:validation.wait.templateOrTriggerRequired',
-      path: ['_root'],
+  .superRefine((data, ctx) => {
+    const { error, warn } = reporter(ctx, [], data);
+    const template = data.wait_template;
+    const triggers = data.wait_for_trigger;
+    if (typeof template === 'string') {
+      if (isBlank(template)) warn('errors:validation.wait.templateEmpty', 'wait_template');
+    } else if (Array.isArray(triggers)) {
+      if (triggers.length === 0) warn('errors:validation.wait.triggersEmpty', 'wait_for_trigger');
+    } else {
+      error('errors:validation.wait.templateOrTriggerRequired', '_root');
     }
-  );
+  });
 
 /**
  * Action node validation - requires one of:
@@ -43,6 +44,9 @@ export const ActionNodeValidationSchema = z
   })
   .passthrough()
   .superRefine((data, ctx) => {
+    // A step Circuitry doesn't know, kept exactly as written (bug #57):
+    // nothing here to check; Home Assistant checks it.
+    if (isOpaqueStepData(data)) return;
     // Opaque repeat nodes (repeat.count / repeat.while / repeat.until) are valid without service/event
     if (data.repeat !== null && typeof data.repeat === 'object') return;
 
@@ -59,251 +63,157 @@ export const ActionNodeValidationSchema = z
     // — could never be saved.
     if (typeof data.stop === 'string') return;
 
+    // `set_conversation_response` is its own step type; HA accepts any text,
+    // "" included. It used to be refused for having no service, so an
+    // automation with one couldn't be saved (the audit after bug #65).
+    if (typeof data.set_conversation_response === 'string') return;
+
+    const { error, warn } = reporter(ctx, [], data);
     const hasEvent = typeof data.event === 'string' && data.event.trim() !== '';
     const hasService = typeof data.service === 'string' && data.service.trim() !== '';
 
+    // `event: ""` fires an event with an empty name: HA accepts it, so only
+    // a warning (it used to block saving).
+    if (!hasService && typeof data.event === 'string' && !hasEvent) {
+      warn('errors:validation.action.eventEmpty', 'event');
+      return;
+    }
     if (!hasEvent && !hasService) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'errors:validation.action.serviceOrEventRequired',
-        path: ['service'],
-      });
+      error('errors:validation.action.serviceOrEventRequired', 'service');
       return;
     }
-
     if (hasService && !data.service!.includes('.')) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'errors:validation.action.serviceFormat',
-        path: ['service'],
-      });
+      error('errors:validation.action.serviceFormat', 'service');
     }
   });
 
 /**
- * Helper to check if an entity_id value is non-empty.
- * Handles both string and array formats.
+ * Checks a trigger the way Home Assistant does (decision D3; the audit that
+ * followed bug #65, checked in a real HA 2026.9.3). Errors only for what HA refuses;
+ * warnings for what HA accepts but is almost always a blank left by
+ * mistake. It used to block a blank event type, template, webhook id or
+ * tag id and an empty entity list, and refused an event type given as a
+ * list, all of which HA accepts. Accepts `platform:`, the older key.
  */
-function hasEntityId(entityId: unknown): boolean {
-  if (Array.isArray(entityId)) return entityId.length > 0;
-  if (typeof entityId === 'string') return entityId.trim() !== '';
-  return false;
-}
-
-/**
- * Helper to check if a trigger ID value is valid (non-empty).
- * Handles both string and array formats, ensuring no empty strings.
- */
-function hasValidTriggerId(id: unknown): boolean {
-  if (Array.isArray(id)) {
-    return id.length > 0 && id.every((item) => typeof item === 'string' && item.trim() !== '');
+function checkTrigger(data: Record<string, unknown>, ctx: IssueContext): void {
+  const report = reporter(ctx, [], data);
+  const { error, warn } = report;
+  const type = typeof data.trigger === 'string' ? data.trigger : data.platform;
+  if (typeof type !== 'string' || type.trim() === '') {
+    error('errors:validation.trigger.platformRequired', 'trigger');
+    return;
   }
-  if (typeof id === 'string') return id.trim() !== '';
-  return false;
+  // Required, and HA refuses it blank. An empty list is refused too,
+  // unless `emptyListMessage` is given: HA accepts it then (a warning).
+  const requireFilled = (field: string, message: string, emptyListMessage?: string) => {
+    const v = data[field];
+    if (isMissing(v) || blankIn(v)) error(message, field);
+    else if (isEmptyList(v)) {
+      if (emptyListMessage) warn(emptyListMessage, field);
+      else error(message, field);
+    }
+  };
+  // Required, but HA accepts it blank: only a warning then.
+  const requireSet = (field: string, message: string, emptyMessage: string) => {
+    if (isMissing(data[field])) error(message, field);
+    else if (blankValue(data[field])) warn(emptyMessage, field);
+  };
+  const entities = (message: string) =>
+    checkEntities(data.entity_id, report, message, 'errors:validation.trigger.entityEmpty');
+
+  switch (type) {
+    case 'state':
+      entities('errors:validation.trigger.entityRequired.state');
+      break;
+    case 'numeric_state':
+      entities('errors:validation.trigger.entityRequired.numericState');
+      checkBounds(data, report, 'trigger');
+      break;
+    case 'event':
+      requireSet(
+        'event_type',
+        'errors:validation.trigger.eventTypeRequired',
+        'errors:validation.trigger.eventTypeEmpty'
+      );
+      break;
+    case 'time':
+      requireFilled(
+        'at',
+        'errors:validation.trigger.timeRequired',
+        'errors:validation.trigger.timeEmpty'
+      );
+      break;
+    case 'mqtt':
+      requireFilled('topic', 'errors:validation.trigger.mqttTopicRequired');
+      break;
+    case 'webhook':
+      requireSet(
+        'webhook_id',
+        'errors:validation.trigger.webhookIdRequired',
+        'errors:validation.trigger.webhookIdEmpty'
+      );
+      break;
+    case 'device':
+      requireFilled('device_id', 'errors:validation.trigger.deviceRequired');
+      break;
+    case 'zone':
+      entities('errors:validation.trigger.entityRequired.zone');
+      requireFilled('zone', 'errors:validation.trigger.zoneRequired');
+      break;
+    case 'sun':
+      requireFilled('event', 'errors:validation.trigger.sunEventRequired');
+      break;
+    case 'homeassistant':
+      requireFilled('event', 'errors:validation.trigger.haEventRequired');
+      break;
+    case 'template':
+      requireSet(
+        'value_template',
+        'errors:validation.trigger.templateRequired',
+        'errors:validation.trigger.templateEmpty'
+      );
+      break;
+    case 'tag':
+      requireSet(
+        'tag_id',
+        'errors:validation.trigger.tagIdRequired',
+        'errors:validation.trigger.tagIdEmpty'
+      );
+      break;
+    case 'geo_location':
+      requireSet(
+        'source',
+        'errors:validation.trigger.sourceRequired',
+        'errors:validation.trigger.sourceEmpty'
+      );
+      requireFilled('zone', 'errors:validation.trigger.zoneRequired');
+      requireFilled('event', 'errors:validation.trigger.geoEventRequired');
+      break;
+    case 'conversation':
+      requireFilled('command', 'errors:validation.trigger.commandRequired');
+      break;
+    // HA refuses a time pattern with none of hours/minutes/seconds, and a
+    // calendar trigger without its calendar (#122: checked with HA
+    // 2026.9.3's validators).
+    case 'time_pattern':
+      if (['hours', 'minutes', 'seconds'].every((f) => isMissing(data[f]) || blankValue(data[f]))) {
+        error('errors:validation.trigger.timePatternRequired', 'hours');
+      }
+      break;
+    case 'calendar':
+      requireFilled('entity_id', 'errors:validation.trigger.calendarRequired');
+      break;
+    // 'persistent_notification' has no required fields -- omitting
+    // notification_id/update_type is valid and means "any notification,
+    // any update type" per HA's docs.
+  }
 }
 
-/**
- * Trigger node validation - requires trigger platform and type-specific fields.
- * Accepts both 'trigger' (modern) and 'platform' (legacy) field names.
- */
+/** Trigger node validation: see checkTrigger. */
 export const TriggerNodeValidationSchema = z
-  .object({
-    trigger: z.string().optional(),
-    platform: z.string().optional(),
-    entity_id: z.unknown().optional(),
-    to: z.unknown().optional(),
-    from: z.unknown().optional(),
-    event_type: z.string().optional(),
-    at: z.unknown().optional(),
-    topic: z.string().optional(),
-    webhook_id: z.string().optional(),
-    // string for device triggers (a single device), string|array for the tag
-    // trigger's optional reader-device restriction (see hasEntityId reuse in
-    // the 'device'/'tag' cases below, which accepts either shape).
-    device_id: z.union([z.string(), z.array(z.string())]).optional(),
-    zone: z.string().optional(),
-    event: z.string().optional(),
-    value_template: z.string().optional(),
-    tag_id: z.unknown().optional(),
-    source: z.string().optional(),
-    command: z.unknown().optional(),
-  })
+  .object({})
   .passthrough()
-  .superRefine((data, ctx) => {
-    const triggerType = data.trigger || data.platform;
-    if (!triggerType || triggerType.trim() === '') {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'errors:validation.trigger.platformRequired',
-        path: ['trigger'],
-      });
-      return;
-    }
-
-    switch (triggerType) {
-      case 'state':
-        if (!hasEntityId(data.entity_id)) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message: 'errors:validation.trigger.entityRequired.state',
-            path: ['entity_id'],
-          });
-        }
-        break;
-
-      case 'numeric_state':
-        if (!hasEntityId(data.entity_id)) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message: 'errors:validation.trigger.entityRequired.numericState',
-            path: ['entity_id'],
-          });
-        }
-        break;
-
-      case 'event':
-        if (
-          !data.event_type ||
-          (typeof data.event_type === 'string' && data.event_type.trim() === '')
-        ) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message: 'errors:validation.trigger.eventTypeRequired',
-            path: ['event_type'],
-          });
-        }
-        break;
-
-      case 'time':
-        if (!data.at) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message: 'errors:validation.trigger.timeRequired',
-            path: ['at'],
-          });
-        }
-        break;
-
-      case 'mqtt':
-        if (!data.topic || data.topic.trim() === '') {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message: 'errors:validation.trigger.mqttTopicRequired',
-            path: ['topic'],
-          });
-        }
-        break;
-
-      case 'webhook':
-        if (!data.webhook_id || data.webhook_id.trim() === '') {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message: 'errors:validation.trigger.webhookIdRequired',
-            path: ['webhook_id'],
-          });
-        }
-        break;
-
-      case 'device':
-        if (!hasEntityId(data.device_id)) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message: 'errors:validation.trigger.deviceRequired',
-            path: ['device_id'],
-          });
-        }
-        break;
-
-      case 'zone':
-        if (!hasEntityId(data.entity_id)) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message: 'errors:validation.trigger.entityRequired.zone',
-            path: ['entity_id'],
-          });
-        }
-        if (!data.zone || data.zone.trim() === '') {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message: 'errors:validation.trigger.zoneRequired',
-            path: ['zone'],
-          });
-        }
-        break;
-
-      case 'sun':
-      case 'homeassistant':
-        if (!data.event || data.event.trim() === '') {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message:
-              triggerType === 'sun'
-                ? 'errors:validation.trigger.sunEventRequired'
-                : 'errors:validation.trigger.haEventRequired',
-            path: ['event'],
-          });
-        }
-        break;
-
-      case 'template':
-        if (!data.value_template || data.value_template.trim() === '') {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message: 'errors:validation.trigger.templateRequired',
-            path: ['value_template'],
-          });
-        }
-        break;
-
-      case 'tag':
-        if (!hasEntityId(data.tag_id)) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message: 'errors:validation.trigger.tagIdRequired',
-            path: ['tag_id'],
-          });
-        }
-        break;
-
-      case 'geo_location':
-        if (!data.source || data.source.trim() === '') {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message: 'errors:validation.trigger.sourceRequired',
-            path: ['source'],
-          });
-        }
-        if (!data.zone || data.zone.trim() === '') {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message: 'errors:validation.trigger.zoneRequired',
-            path: ['zone'],
-          });
-        }
-        if (!data.event || data.event.trim() === '') {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message: 'errors:validation.trigger.geoEventRequired',
-            path: ['event'],
-          });
-        }
-        break;
-
-      case 'conversation':
-        if (!hasEntityId(data.command)) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message: 'errors:validation.trigger.commandRequired',
-            path: ['command'],
-          });
-        }
-        break;
-
-      // 'persistent_notification' has no required fields — omitting
-      // notification_id/update_type is valid and means "any notification,
-      // any update type" per HA's docs.
-    }
-  });
+  .superRefine((data, ctx) => checkTrigger(data, ctx));
 
 /**
  * Delay node validation - requires delay value.
@@ -317,8 +227,10 @@ export const DelayNodeValidationSchema = z
     // never be checked no matter what was fixed downstream. Real HA delay
     // objects allow days/hours/minutes/seconds/milliseconds, each a number
     // or a template string.
+    // A number is seconds (`delay: 5`, `delay: 1.5`), as HA reads it.
     delay: z.union([
       z.string(),
+      z.number(),
       z.object({
         days: z.union([z.number(), z.string()]).optional(),
         hours: z.union([z.number(), z.string()]).optional(),
@@ -334,6 +246,10 @@ export const DelayNodeValidationSchema = z
       if (typeof data.delay === 'string') {
         return data.delay.trim() !== '';
       }
+      // HA refuses a negative period ("Time period should be positive").
+      if (typeof data.delay === 'number') {
+        return data.delay >= 0;
+      }
       // Object-based delay is valid only if it actually has a duration
       // field set to something non-empty — an empty `delay: {}` previously
       // passed this check (the refine's object branch always `return true`)
@@ -347,130 +263,182 @@ export const DelayNodeValidationSchema = z
     }
   );
 
+type IssueContext = { addIssue: (issue: z.core.$ZodRawIssue) => void };
+
 /**
- * Condition node validation - requires condition type and type-specific fields.
+ * How every node check reports (decision D3, bug #65): an error is
+ * something Home Assistant refuses, so it blocks saving; a warning is
+ * something HA accepts but is almost always a blank field left by mistake,
+ * so it's shown and saving goes ahead.
+ */
+function reporter(ctx: IssueContext, at: (string | number)[], input: unknown) {
+  return {
+    error: (message: string, field: string) =>
+      ctx.addIssue({ code: 'custom', message, path: [...at, field], input }),
+    warn: (message: string, field: string) =>
+      ctx.addIssue({
+        code: 'custom',
+        message,
+        path: [...at, field],
+        input,
+        params: { severity: 'warning' },
+      }),
+  };
+}
+
+type Report = ReturnType<typeof reporter>;
+
+const isBlank = (v: unknown): boolean => typeof v === 'string' && v.trim() === '';
+const isMissing = (v: unknown): boolean => v === undefined || v === null;
+const isEmptyList = (v: unknown): boolean => Array.isArray(v) && v.length === 0;
+/** A blank string, or a list holding one: what HA refuses in a required field. */
+const blankIn = (v: unknown): boolean => isBlank(v) || (Array.isArray(v) && v.some(isBlank));
+/** An entity HA refuses: none, or a blank string (a blank in a list too). */
+const entityRefused = (v: unknown): boolean => isMissing(v) || blankIn(v);
+/** Set but blank: "", a list that's empty or holds a "". */
+const blankValue = (v: unknown): boolean => blankIn(v) || isEmptyList(v);
+
+/**
+ * `entity_id` of a trigger or condition: HA refuses none or a blank one; it
+ * accepts an empty list (which then matches nothing), so that's a warning.
+ */
+function checkEntities(value: unknown, report: Report, message: string, emptyMessage: string) {
+  if (entityRefused(value)) report.error(message, 'entity_id');
+  else if (isEmptyList(value)) report.warn(emptyMessage, 'entity_id');
+}
+
+/**
+ * `above`/`below` of a numeric_state trigger or condition: HA needs at
+ * least one, and refuses one that's set but blank ("expected float").
+ */
+function checkBounds(data: Record<string, unknown>, report: Report, kind: 'trigger' | 'condition') {
+  for (const bound of ['above', 'below']) {
+    if (isBlank(data[bound])) report.error(`errors:validation.${kind}.boundEmpty`, bound);
+  }
+  if (isMissing(data.above) && isMissing(data.below)) {
+    report.error(`errors:validation.${kind}.boundRequired`, 'above');
+  }
+}
+
+/**
+ * Checks one condition the way Home Assistant does (decision D3: never
+ * stricter than HA; bug #65). An error is something HA refuses -- the
+ * automation couldn't be saved or loaded -- so it blocks saving. A warning
+ * is something HA accepts but is almost always a blank field left by
+ * mistake (`state: ""` only matches an empty state; an empty template is
+ * always false); it's shown, and saving goes ahead. What HA refuses and
+ * accepts was checked in a real HA 2026.9.3. Groups are checked all the way down: a blank entity inside an
+ * `or` is refused by HA the same as one at the top.
+ */
+function checkCondition(data: unknown, ctx: IssueContext, at: (string | number)[]): void {
+  // A template string shorthand, or anything else that isn't an object:
+  // HA reads it, nothing to check here.
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return;
+  const c = data as Record<string, unknown>;
+  const report = reporter(ctx, at, c);
+  const { error, warn } = report;
+  const entities = (message: string) =>
+    checkEntities(c.entity_id, report, message, 'errors:validation.condition.entityEmpty');
+
+  if (typeof c.condition !== 'string' || c.condition.trim() === '') {
+    if (at.length === 0) error('errors:validation.condition.typeRequired', 'condition');
+    return;
+  }
+  switch (c.condition) {
+    case 'state':
+      entities('errors:validation.condition.entityRequired.state');
+      if (c.state === undefined) error('errors:validation.condition.stateRequired', 'state');
+      else if (isBlank(c.state)) warn('errors:validation.condition.stateEmpty', 'state');
+      break;
+
+    case 'numeric_state':
+      entities('errors:validation.condition.entityRequired.numericState');
+      checkBounds(c, report, 'condition');
+      break;
+
+    case 'time':
+      // HA needs one of after/before/weekday and refuses a blank one. An
+      // empty weekday list it accepts, and the condition is then never true.
+      if (isMissing(c.after) && isMissing(c.before) && isMissing(c.weekday)) {
+        error('errors:validation.condition.timeRequired', 'after');
+      }
+      for (const field of ['after', 'before', 'weekday']) {
+        if (blankIn(c[field])) error('errors:validation.condition.timeBlank', field);
+      }
+      if (isEmptyList(c.weekday)) warn('errors:validation.condition.weekdayEmpty', 'weekday');
+      break;
+
+    case 'trigger':
+      if (isMissing(c.id)) error('errors:validation.condition.triggerIdRequired', 'id');
+      else if (blankValue(c.id)) {
+        warn('errors:validation.condition.triggerIdEmpty', 'id');
+      }
+      break;
+
+    case 'template':
+      if (isMissing(c.value_template)) {
+        error('errors:validation.condition.templateRequired', 'value_template');
+      } else if (isBlank(c.value_template)) {
+        warn('errors:validation.condition.templateEmpty', 'value_template');
+      }
+      break;
+
+    case 'zone':
+      entities('errors:validation.condition.entityRequired.zone');
+      if (isMissing(c.zone) || isBlank(c.zone)) {
+        error('errors:validation.condition.zoneRequired', 'zone');
+      }
+      break;
+
+    case 'device':
+      if (isMissing(c.device_id) || isBlank(c.device_id)) {
+        error('errors:validation.condition.deviceRequired', 'device_id');
+      }
+      break;
+
+    case 'or':
+    case 'and':
+    case 'not': {
+      if (!Array.isArray(c.conditions)) {
+        error('errors:validation.condition.groupConditionsRequired', 'conditions');
+      } else if (c.conditions.length === 0) {
+        warn('errors:validation.condition.groupEmpty', 'conditions');
+      } else {
+        c.conditions.forEach((nested, i) => {
+          checkCondition(nested, ctx, [...at, 'conditions', i]);
+        });
+      }
+      break;
+    }
+  }
+}
+
+/**
+ * Condition node validation: see checkCondition. Every other field passes
+ * through unchecked (Home Assistant checks them).
  */
 export const ConditionNodeValidationSchema = z
-  .object({
-    condition: z.string().min(1, 'errors:validation.condition.typeRequired'),
-    entity_id: z.unknown().optional(),
-    state: z.unknown().optional(),
-    value_template: z.string().optional(),
-    zone: z.string().optional(),
-    device_id: z.string().optional(),
-    id: z.unknown().optional(),
-  })
+  .object({})
   .passthrough()
-  .superRefine((data, ctx) => {
-    switch (data.condition) {
-      case 'state':
-        if (!hasEntityId(data.entity_id)) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message: 'errors:validation.condition.entityRequired.state',
-            path: ['entity_id'],
-          });
-        }
-        if (!data.state || (typeof data.state === 'string' && data.state.trim() === '')) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message: 'errors:validation.condition.stateRequired',
-            path: ['state'],
-          });
-        }
-        break;
-
-      case 'numeric_state':
-        if (!hasEntityId(data.entity_id)) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message: 'errors:validation.condition.entityRequired.numericState',
-            path: ['entity_id'],
-          });
-        }
-        break;
-
-      case 'trigger':
-        if (!hasValidTriggerId(data.id)) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message: 'errors:validation.condition.triggerIdRequired',
-            path: ['id'],
-          });
-        }
-        break;
-
-      case 'template':
-        if (!data.value_template || data.value_template.trim() === '') {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message: 'errors:validation.condition.templateRequired',
-            path: ['value_template'],
-          });
-        }
-        break;
-
-      case 'zone':
-        if (!hasEntityId(data.entity_id)) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message: 'errors:validation.condition.entityRequired.zone',
-            path: ['entity_id'],
-          });
-        }
-        if (!data.zone || data.zone.trim() === '') {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message: 'errors:validation.condition.zoneRequired',
-            path: ['zone'],
-          });
-        }
-        break;
-
-      case 'device':
-        if (!data.device_id || data.device_id.trim() === '') {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message: 'errors:validation.condition.deviceRequired',
-            path: ['device_id'],
-          });
-        }
-        break;
-
-      case 'or':
-      case 'and':
-      case 'not': {
-        const conditions = (data as Record<string, unknown>).conditions;
-        if (!Array.isArray(conditions) || conditions.length === 0) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message: 'errors:validation.condition.groupConditionsRequired',
-            path: ['conditions'],
-          });
-        }
-        break;
-      }
-    }
-  });
+  .superRefine((data, ctx) => checkCondition(data, ctx, []));
 
 /**
- * SetVariables node validation - requires at least one variable.
+ * SetVariables node validation (decision D3): HA requires `variables:` but
+ * accepts an empty map, so an empty one is a warning (it used to block
+ * saving).
  */
 export const SetVariablesNodeValidationSchema = z
-  .object({
-    variables: z.record(z.string(), z.unknown()).optional(),
-  })
+  .object({})
   .passthrough()
-  .refine(
-    (data) => {
-      if (!data.variables) return false;
-      return Object.keys(data.variables).length > 0;
-    },
-    {
-      message: 'errors:validation.setVariables.atLeastOne',
-      path: ['variables'],
+  .superRefine((data, ctx) => {
+    const { error, warn } = reporter(ctx, [], data);
+    const variables = data.variables;
+    if (!variables || typeof variables !== 'object' || Array.isArray(variables)) {
+      error('errors:validation.setVariables.atLeastOne', 'variables');
+    } else if (Object.keys(variables).length === 0) {
+      warn('errors:validation.setVariables.empty', 'variables');
     }
-  );
+  });
 
 /**
  * Map node types to their validation schemas.
@@ -501,6 +469,8 @@ export function getNodeValidationSchema(nodeType: string): z.ZodSchema | undefin
 export interface NodeValidationError {
   path: string[];
   message: string;
+  /** A warning: shown on the node, but it doesn't block saving (bug #65). */
+  severity?: 'warning';
 }
 
 /**
@@ -524,5 +494,8 @@ export function validateNodeData(
   return result.error.issues.map((issue) => ({
     path: issue.path.map(String),
     message: issue.message,
+    ...(issue.code === 'custom' && issue.params?.severity === 'warning'
+      ? { severity: 'warning' as const }
+      : {}),
   }));
 }

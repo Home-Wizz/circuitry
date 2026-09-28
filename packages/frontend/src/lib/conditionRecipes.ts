@@ -11,7 +11,7 @@ import {
   Shapes,
   Sun,
 } from 'lucide-react';
-import { getThresholdUnit } from '@/lib/nativeThreshold';
+import { defaultThreshold } from '@/lib/nativeThreshold';
 import type { HassEntity } from '@/types/hass';
 
 /**
@@ -48,22 +48,10 @@ export interface ConditionRecipeFields {
   options?: Record<string, unknown>;
 }
 
-/**
- * Seeds a valid, immediately-editable TYPED threshold (see
- * lib/nativeThreshold.ts) for the `is_value`/`is_target_*`-family condition
- * recipes below, rather than leaving `options` unset — NativeConditionFields
- * defaults an unset one to `{}`, still valid to open and fill in, but a
- * concrete starting point (0, "above") matches how trigger recipes seed
- * their sensor-class thresholds in lib/triggerRecipes.ts.
- */
+/** A condition recipe's starting threshold: lib/nativeThreshold.ts's
+ * defaultThreshold, what the panel shows for one not set (#124). */
 function defaultTypedThresholdOptions(conditionType: string): Record<string, unknown> {
-  const unit = getThresholdUnit(conditionType);
-  return {
-    threshold: {
-      type: 'above',
-      value: { number: 0, ...(unit ? { unit_of_measurement: unit } : {}) },
-    },
-  };
+  return { threshold: defaultThreshold('condition', conditionType) };
 }
 
 export interface ConditionRecipe {
@@ -486,7 +474,9 @@ export const CONDITION_BLOCKS: ConditionBlock[] = [
     key: 'state',
     label: 'State',
     description: 'Tests if an entity is (or is not) in a specific state — the generic form behind every domain-specific recipe above.',
-    data: { condition: 'state', entity_id: '', state: '' },
+    // Blanks start unset, not "": HA gives "" a meaning (bug #65), so a
+    // field left blank must show as missing (an error), not become a value.
+    data: { condition: 'state', entity_id: '' },
   },
   {
     key: 'numeric_state',
@@ -510,7 +500,7 @@ export const CONDITION_BLOCKS: ConditionBlock[] = [
     key: 'template',
     label: 'Template',
     description: 'Passes when a Jinja2 template evaluates to true.',
-    data: { condition: 'template', value_template: '' },
+    data: { condition: 'template' },
   },
   {
     key: 'time',
@@ -522,7 +512,7 @@ export const CONDITION_BLOCKS: ConditionBlock[] = [
     key: 'trigger',
     label: 'Trigger',
     description: 'Passes only when the automation was started by a specific trigger (matched by its id).',
-    data: { condition: 'trigger', id: '' },
+    data: { condition: 'trigger' },
   },
 ];
 

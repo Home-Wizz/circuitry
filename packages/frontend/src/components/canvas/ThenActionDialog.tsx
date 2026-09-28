@@ -43,7 +43,7 @@ import { useIntegrationManifests } from '@/hooks/useIntegrationManifests';
 import { useStableEntityList } from '@/hooks/useStableEntityList';
 import { useTranslations } from '@/hooks/useTranslations';
 import { ACTION_BLOCKS, type ActionBlock, getActionBlockIcon } from '@/lib/actionBlocks';
-import { buildActionNodeData } from '@/lib/actionNodeData';
+import { actionRecipeTakesEntities, buildActionNodeData } from '@/lib/actionNodeData';
 import {
   type ActionRecipe,
   ENTITY_ACTION_CATEGORIES,
@@ -715,7 +715,7 @@ export function ThenActionDialog({
           <WaitForOptionsColumn
             key={index}
             onSelectTemplate={() => {
-              onCommit('wait', { wait_template: '', timeout: '00:01:00' });
+              onCommit('wait', { timeout: '00:01:00' });
               closeDialog();
             }}
             onSelectTrigger={onOpenWhenForWaitTrigger}
@@ -864,7 +864,9 @@ export function ThenActionDialog({
             <ThenTypeResultsPanel
               category={column.category}
               onSelectRecipe={(recipe) =>
-                pushColumn(index, { kind: 'recipeEntities', category: column.category, recipe }, recipe.id)
+                actionRecipeTakesEntities(recipe)
+                  ? pushColumn(index, { kind: 'recipeEntities', category: column.category, recipe }, recipe.id)
+                  : handleSelectRecipe([], recipe)
               }
             />
           </ResultsColumn>

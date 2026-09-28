@@ -1,68 +1,15 @@
-import type {
-  ActionNode,
-  ConditionNode,
-  DelayNode,
-  FlowGraph,
-  FlowNode,
-  SetVariablesNode,
-  TriggerNode,
-  WaitNode,
-} from '@circuitry/shared';
-import { isDeviceAction, isStartNode } from '@circuitry/shared';
+import type { ConditionNode, FlowGraph, FlowNode, TriggerNode } from '@circuitry/shared';
+import { isStartNode } from '@circuitry/shared';
 import type { TopologyAnalysis } from '../analyzer/topology';
 import { findBackEdges } from '../analyzer/topology';
-import { BaseStrategy, type HAYamlOutput } from './base';
+import { GraphClaimError } from '../utils/theOnly';
+import { BaseStrategy, bareParallelBranch, type HAYamlOutput } from './base';
 
-/**
- * `target`/`options` only belong on purpose-specific dotted conditions
- * (e.g. `climate.is_cooling` — `options` holds inline threshold state like
- * `options.threshold`, `target` holds the entity/device/area it applies
- * to). Legacy flat condition types (state, time, sun, zone, ...) never have
- * either in HA's own schema, and HA's config validator rejects them
- * outright as "extra keys not allowed" the moment they show up — regardless
- * of how they got there.
- *
- * A defensive strip here, independent of the frontend fix that stops these
- * fields from being *written* onto the wrong condition type in the first
- * place (see packages/frontend/src/config/conditionFields.ts's
- * getAllConditionFieldNames), means a condition that's already carrying a
- * stale `target`/`options` — from an already-saved automation, or a
- * live-but-unsaved canvas session — transpiles cleanly the moment this
- * ships, without the user having to reconfigure it again just to clear the
- * leftover field. Reported directly: reconfiguring an If/Else condition
- * from a purpose-specific type (with a threshold) to the legacy "Time" type
- * left `options` behind, and saving failed with "extra keys not allowed @
- * ...['options']".
- *
- * Every `sun.*` condition (`sun.is_up`, `sun.is_down`, `sun.is_night`, ...)
- * is the one dotted-condition family that's an exception to "dotted means
- * target/options belong" above: HA's own docs are explicit that these take
- * "no options" at all, and the sun is a global singleton with nothing to
- * target — matches NativeConditionFields.tsx's `isSunSingleton` branch,
- * which suppresses the target/behavior/for fields in the UI for exactly
- * this reason. But nodes still round-trip an `options: {}` (or a stray
- * `target`) onto sun.* conditions from elsewhere (a default filled in at
- * node-creation time, or after switching a condition's type on an existing
- * node), and — same as the flat-condition case above — HA's config
- * validator rejects the *key* outright as "extra keys not allowed" even
- * when its value is an empty object; it's the field's mere presence that's
- * invalid, not what's in it. Reported directly: "none of my automations
- * made with Circuitry that involve is-it-night or sunset/sunrise
- * conditions work" — every one of them was carrying a `sun.is_up`/
- * `sun.is_night` condition with a leftover `options: {}` that HA's
- * schema rejected on save/load.
- */
-export function stripDottedOnlyConditionFields(
-  condition: unknown,
-  rest: Record<string, unknown>
-): Record<string, unknown> {
-  if (typeof condition === 'string' && condition.startsWith('sun.')) {
-    const { target, options, ...cleaned } = rest;
-    return cleaned;
-  }
-  if (typeof condition === 'string' && condition.includes('.')) return rest;
-  const { target, options, ...cleaned } = rest;
-  return cleaned;
+/** The same node ids, in any order. */
+function sameIds(a: string[], b: string[]): boolean {
+  const setA = new Set(a);
+  const setB = new Set(b);
+  return setA.size === setB.size && [...setA].every((id) => setB.has(id));
 }
 
 /**
@@ -101,8 +48,6 @@ interface RepeatPattern {
   incrementNodeId?: string;
   /** For count: the count value */
   count?: number | string;
-  /** The node ID where flow continues after the loop */
-  exitNodeId: string | null;
 }
 
 /**
@@ -129,8 +74,6 @@ interface SequencePattern {
   bodyEntryNodeIds: string[];
   /** All node IDs strictly between start and end */
   bodyNodeIds: string[];
-  /** Where flow continues after the group (sequence_end's own outgoing target) */
-  exitNodeId: string | null;
   alias?: string;
 }
 
@@ -241,25 +184,6 @@ export class NativeStrategy extends BaseStrategy {
   }
 
   /**
-   * Builds a self-contained native HA action sequence starting from an
-   * arbitrary node, for callers that aren't transpiling a whole automation
-   * through generate() — currently only StateMachineStrategy's
-   * generateParallelEntryBlocks (see its doc comment), which needs to inline
-   * one branch of a `parallel:` block for a trigger with multiple direct
-   * targets. Reuses this class's own tree-walker (buildSequenceFromNode)
-   * rather than StateMachineStrategy hand-rolling a second, separate way to
-   * turn a condition/delay/wait/action chain into YAML — CLAUDE.md's DRY
-   * rule again. Every non-cyclic subtree (the only kind a parallel branch
-   * can legally be — a back-edge looping out of one branch into shared
-   * state isn't representable in HA's `parallel:` regardless) transpiles
-   * exactly like it would if it were the sole path out of a trigger.
-   */
-  buildActionsFromEntryPoint(flow: FlowGraph, entryNodeId: string): unknown[] {
-    const preparedFlow = this.prepareForTraversal(flow);
-    return this.buildSequenceFromNode(preparedFlow, entryNodeId, new Set());
-  }
-
-  /**
    * Finds the shared convergence node (if any) that every one of the given
    * branch-start node ids eventually reaches, using this class's own
    * back-edge-aware BFS reachability search (findConvergencePoint) --
@@ -288,31 +212,6 @@ export class NativeStrategy extends BaseStrategy {
   findConvergenceSetForBranches(flow: FlowGraph, branchStartIds: string[]): string[] {
     const preparedFlow = this.prepareForTraversal(flow);
     return this.findConvergenceSet(preparedFlow, branchStartIds);
-  }
-
-  /**
-   * Builds a self-contained native HA action sequence starting from an
-   * arbitrary node but stopping BEFORE a given boundary node, instead of
-   * running to the natural end of the subtree like buildActionsFromEntryPoint
-   * does. Exposed for StateMachineStrategy's generateParallelEntryBlocks: once
-   * findConvergencePointForBranches has located a shared continuation node,
-   * each parallel branch must be built only up to that point -- the
-   * continuation itself belongs to the state machine's normal per-node
-   * dispatch (already generated for every node via generateNodeBlock), not
-   * duplicated inline inside one branch of the `parallel:` block.
-   *
-   * stopNodeId may be a single node id (the classic case) or a Set of node
-   * ids (bug #12 fix, 2026-09-06): when 2+ branches share 2+ sibling
-   * convergence nodes, StateMachineStrategy needs to bound a branch's walk
-   * at ANY member of that sibling set, not just one of them.
-   */
-  buildActionsUntilNode(
-    flow: FlowGraph,
-    entryNodeId: string,
-    stopNodeId: string | Set<string>
-  ): unknown[] {
-    const preparedFlow = this.prepareForTraversal(flow);
-    return this.buildSequenceUntilNode(preparedFlow, entryNodeId, stopNodeId, new Set());
   }
 
   generate(flow: FlowGraph, analysis: TopologyAnalysis): HAYamlOutput {
@@ -599,6 +498,7 @@ export class NativeStrategy extends BaseStrategy {
         (e) => e.source === nextNode.id && e.sourceHandle === 'false' && !this.backEdgeIds.has(e.id)
       );
       if (nextFalseEdges.length !== 0) break;
+      if (!this.hasOneWayIn(flow, nextNode.id)) break;
       // Item 4: a member may loop back on false only to where this
       // until's own test does (its inherited else); anywhere else it's
       // another construct's exit.
@@ -608,6 +508,21 @@ export class NativeStrategy extends BaseStrategy {
       condId = trueEdge.target;
     }
     return conditionNodeIds;
+  }
+
+  /**
+   * Bug #110 (2026-09-27): a list member has exactly one way in, the true
+   * edge of the member before it -- what the parser builds, and what the
+   * state machine's andMemberFalseTargets has always required. A condition
+   * something else also leads to (where branches meet) is a statement of
+   * its own; every list fold here used to take it in anyway (an until's
+   * exit into it became `until: [U, M]`). Back edges don't count (a loop's
+   * test is re-entered by its own back edge).
+   */
+  private hasOneWayIn(flow: FlowGraph, nodeId: string): boolean {
+    return (
+      flow.edges.filter((e) => e.target === nodeId && !this.backEdgeIds.has(e.id)).length === 1
+    );
   }
 
   /** Whether `nodeId` has a false edge that is a back-edge (to anywhere
@@ -641,7 +556,16 @@ export class NativeStrategy extends BaseStrategy {
       if (!sourceNode || !targetNode) continue;
 
       const edgeKind = this.classifyRepeatBackEdge(sourceNode, targetNode, edge.sourceHandle);
-      if (edgeKind === null) continue;
+      // Bug #114 (2026-09-27): a loop-back edge no loop here owns -- an
+      // if's side, or a step, going back to an earlier step rather than to
+      // a loop's head (a loop drawn by hand inside or next to another).
+      // Ignoring it made the side look empty and the loop vanish from the
+      // output. Native can't write it; the state machine follows it.
+      if (edgeKind === null) {
+        throw new GraphClaimError(
+          `the edge from "${edge.source}" back to "${edge.target}" isn't a loop native can write`
+        );
+      }
 
       if (edgeKind === 'while' || edgeKind === 'while-body-exit') {
         // ── while pattern ──
@@ -656,11 +580,9 @@ export class NativeStrategy extends BaseStrategy {
         // after the chain below) so the chain-collection loop can tell a
         // genuine AND'd while-condition apart from a nested if/else that
         // merely happens to sit right after the while-header in the graph.
-        const falseEdge = flow.edges.find(
-          (e) =>
-            e.source === firstCondId && e.sourceHandle === 'false' && !this.backEdgeIds.has(e.id)
-        );
-        const chainExitTarget = falseEdge?.target ?? null;
+        // All of them: a `parallel:` after the loop is
+        // several false edges, and a member's false must go to all of them.
+        const headExitIds = this.forwardTargets(flow, firstCondId, 'false');
 
         // Collect condition chain: follow true edges from condition to
         // condition. Only fold the next condition into the while-header
@@ -704,11 +626,14 @@ export class NativeStrategy extends BaseStrategy {
           // extractor used to disagree, so the gate caught it, until it
           // learned the same fold.
           const canFold =
+            this.hasOneWayIn(flow, nextNode.id) &&
             !this.loopsBackOnFalse(flow, nextNode.id) &&
             (nextFalseEdges.length === 0 ||
-              (chainExitTarget !== null &&
-                nextFalseEdges.length === 1 &&
-                nextFalseEdges[0].target === chainExitTarget)) &&
+              (headExitIds.length > 0 &&
+                sameIds(
+                  nextFalseEdges.map((e) => e.target),
+                  headExitIds
+                ))) &&
             // Second, more decisive guard added 2026-09-06 (Bug #13, Phase B
             // item 3 -- see the identical guard's own doc comment in the
             // until-pattern branch below for the full explanation): a node
@@ -746,7 +671,6 @@ export class NativeStrategy extends BaseStrategy {
           bodyNodeIds,
           bodyEntryNodeIds,
           backEdgeSourceId,
-          exitNodeId: falseEdge?.target ?? null,
         });
       } else if (edgeKind === 'until') {
         // ── until pattern ──
@@ -813,14 +737,24 @@ export class NativeStrategy extends BaseStrategy {
         // siblings a loop already claims before it walks them itself.
         const bodyEntryNodeIds = [firstBodyId];
 
+        // Bug #115 (2026-09-28): a hand-wired until list can give a member
+        // its own false back-edge to the body start -- the same loop-back
+        // as the head's, the member's inherited else. That edge is the same
+        // loop seen from the member, whose chain is only itself; it used to
+        // replace the head's record, so the loop tested the member alone.
+        // Keep the longer list, as the graph gate's setLoop does.
+        const sameLoop = patterns.get(firstBodyId);
+        if (
+          sameLoop?.type === 'until' &&
+          (sameLoop.conditionNodeIds.includes(firstCondId) ||
+            conditionNodeIds.includes(sameLoop.conditionNodeIds[0])) &&
+          sameLoop.conditionNodeIds.length >= conditionNodeIds.length
+        ) {
+          continue;
+        }
+
         // Body nodes: traverse forward from firstBodyId until we hit the condition
         const bodyNodeIds = this.collectNodesUntil(flow, firstBodyId, new Set(conditionNodeIds));
-
-        // Exit: last condition's true path
-        const lastCondId = conditionNodeIds[conditionNodeIds.length - 1];
-        const trueEdge = flow.edges.find(
-          (e) => e.source === lastCondId && e.sourceHandle === 'true' && !this.backEdgeIds.has(e.id)
-        );
 
         patterns.set(firstBodyId, {
           type: 'until',
@@ -829,7 +763,6 @@ export class NativeStrategy extends BaseStrategy {
           bodyNodeIds,
           bodyEntryNodeIds,
           backEdgeSourceId: firstCondId,
-          exitNodeId: trueEdge?.target ?? null,
         });
       } else if (edgeKind === 'count') {
         // ── count pattern ──
@@ -852,10 +785,19 @@ export class NativeStrategy extends BaseStrategy {
         const conditionNodeIds = [condId];
 
         // Find the increment node: it's a set_variables predecessor of the condition
-        const condPredEdges = flow.edges.filter(
-          (e) => e.target === condId && !this.backEdgeIds.has(e.id)
-        );
-        const incrementNodeId = condPredEdges.length > 0 ? condPredEdges[0].source : undefined;
+        // (the parser's shape: one forward edge into the test, from the
+        // increment). Only that shape counts: for native the
+        // topology check already refuses a loop test with several forward
+        // edges into it (hasConvergenceAtLoopCondition), but the state
+        // machine's sub-builder sees hand-drawn loops too, where the first
+        // of several was taken as the increment and left out of the body.
+        const condPredIds = flow.edges
+          .filter((e) => e.target === condId && !this.backEdgeIds.has(e.id))
+          .map((e) => e.source);
+        const incrementNodeId =
+          condPredIds.length === 1 && this.getNode(flow, condPredIds[0])?.type === 'set_variables'
+            ? condPredIds[0]
+            : undefined;
 
         // An empty-body `repeat.count` has the back-edge target itself
         // equal to the increment node (see YamlParser.ts: `loopTargetId =
@@ -885,12 +827,16 @@ export class NativeStrategy extends BaseStrategy {
         // Init node: when the loop has a body, the back-edge target IS the
         // init node directly; for an empty-body loop, recover it the old
         // way (the increment node's own set_variables predecessor).
+        const initCandidates = flow.edges
+          .filter((e) => e.target === backEdgeTargetId && !this.backEdgeIds.has(e.id))
+          .map((e) => e.source)
+          .filter((id) => this.getNode(flow, id)?.type === 'set_variables');
+        // One, as the parser builds it; never the first of several.
         const initNodeId = hasBody
           ? backEdgeTargetId
-          : flow.edges
-              .filter((e) => e.target === backEdgeTargetId && !this.backEdgeIds.has(e.id))
-              .map((e) => e.source)
-              .find((id) => this.getNode(flow, id)?.type === 'set_variables');
+          : initCandidates.length === 1
+            ? initCandidates[0]
+            : undefined;
 
         // Extract count from the condition's value_template
         const condNode = this.getNode(flow, condId);
@@ -906,11 +852,6 @@ export class NativeStrategy extends BaseStrategy {
           }
         }
 
-        // Exit: condition's false path
-        const falseEdge = flow.edges.find(
-          (e) => e.source === condId && e.sourceHandle === 'false' && !this.backEdgeIds.has(e.id)
-        );
-
         // Entry is the init node if it exists, otherwise the back-edge target
         const entryNodeId = initNodeId ?? backEdgeTargetId;
 
@@ -924,7 +865,6 @@ export class NativeStrategy extends BaseStrategy {
           initNodeId,
           incrementNodeId,
           count: countValue,
-          exitNodeId: falseEdge?.target ?? null,
         });
       }
     }
@@ -1093,16 +1033,12 @@ export class NativeStrategy extends BaseStrategy {
       if (!endNodeId) continue; // Unpaired start — leave as a transparent node
 
       const bodyNodeIds = this.collectNodesUntil(flow, bodyEntryNodeIds, new Set([endNodeId]));
-      const exitEdge = flow.edges.find(
-        (e) => e.source === endNodeId && !this.backEdgeIds.has(e.id)
-      );
 
       patterns.set(node.id, {
         entryNodeId: node.id,
         endNodeId,
         bodyEntryNodeIds,
         bodyNodeIds,
-        exitNodeId: exitEdge?.target ?? null,
         alias: 'alias' in node.data && typeof node.data.alias === 'string' ? node.data.alias : undefined,
       });
     }
@@ -1111,8 +1047,7 @@ export class NativeStrategy extends BaseStrategy {
   }
 
   /**
-   * Every node flow continues to after a loop or a sequence group. A
-   * pattern's `exitNodeId` is only the first of them.
+   * Every node flow continues to after a loop or a sequence group.
    *
    * Item 4 (2026-09-26): continuing from that one node dropped the rest
    * when the construct was followed by a parallel -- `sequence: [repeat:
@@ -1121,21 +1056,79 @@ export class NativeStrategy extends BaseStrategy {
    * common remaining shape in the YAML-shapes fuzzer).
    */
   private patternExitIds(flow: FlowGraph, pattern: RepeatPattern | SequencePattern): string[] {
-    const forward = (source: string, handle?: 'true' | 'false'): string[] =>
-      flow.edges
-        .filter(
-          (e) =>
-            e.source === source &&
-            !this.backEdgeIds.has(e.id) &&
-            (handle === undefined || e.sourceHandle === handle)
-        )
-        .map((e) => e.target);
-    if (!('type' in pattern)) return forward(pattern.endNodeId);
-    if (pattern.type === 'while') return forward(pattern.conditionNodeIds[0], 'false');
-    if (pattern.type === 'until') {
-      return forward(pattern.conditionNodeIds[pattern.conditionNodeIds.length - 1], 'true');
+    if (!('type' in pattern)) return this.forwardTargets(flow, pattern.endNodeId);
+    if (pattern.type === 'while') {
+      return this.forwardTargets(flow, pattern.conditionNodeIds[0], 'false');
     }
-    return forward(pattern.backEdgeSourceId, 'false');
+    if (pattern.type === 'until') {
+      return this.forwardTargets(
+        flow,
+        pattern.conditionNodeIds[pattern.conditionNodeIds.length - 1],
+        'true'
+      );
+    }
+    return this.forwardTargets(flow, pattern.backEdgeSourceId, 'false');
+  }
+
+  /** Every node a node's forward (not loop-back) edges go to, through
+   * `handle` when given. */
+  private forwardTargets(flow: FlowGraph, source: string, handle?: 'true' | 'false'): string[] {
+    return flow.edges
+      .filter(
+        (e) =>
+          e.source === source &&
+          !this.backEdgeIds.has(e.id) &&
+          (handle === undefined || e.sourceHandle === handle)
+      )
+      .map((e) => e.target);
+  }
+
+  /**
+   * The loop or `sequence:` group that starts at `nodeId`, followed by what
+   * comes after it (up to `stopNodeId` when given), or null when neither
+   * starts here. One copy for both walkers: a loop is checked first, since
+   * where both start at one node the loop's body opens with the group.
+   * The bounded walker used to check the group first, so an until loop
+   * whose body opens with a group, inside a branch, lost its loop (found
+   * by the construct-by-position table, H2.3; the gate refused it).
+   */
+  private buildPatternAtNode(
+    flow: FlowGraph,
+    nodeId: string,
+    visited: Set<string>,
+    stopNodeId?: string | Set<string>
+  ): unknown[] | null {
+    const repeatPattern = this.repeatPatterns.get(nodeId);
+    if (repeatPattern) {
+      const repeatBlock = this.buildRepeatBlock(flow, repeatPattern, visited);
+      if (repeatBlock) {
+        return [
+          repeatBlock,
+          ...this.buildAfterPattern(
+            flow,
+            this.patternExitIds(flow, repeatPattern),
+            visited,
+            stopNodeId
+          ),
+        ];
+      }
+    }
+    const sequencePattern = this.sequencePatterns.get(nodeId);
+    if (sequencePattern) {
+      visited.add(nodeId);
+      const group = this.buildSequenceBlock(flow, sequencePattern, visited);
+      visited.add(sequencePattern.endNodeId);
+      return [
+        group,
+        ...this.buildAfterPattern(
+          flow,
+          this.patternExitIds(flow, sequencePattern),
+          visited,
+          stopNodeId
+        ),
+      ];
+    }
+    return null;
   }
 
   /** Continues after a loop or group: one exit as a plain continuation, 2+
@@ -1221,7 +1214,13 @@ export class NativeStrategy extends BaseStrategy {
     // fuzzer, 2026-09-25, as a follow-up to the then/else reconvergence
     // fix above (that fix is what first started constructing a
     // multi-member stop boundary here).
-    const remainingTargets = targetIds.filter((id) => !stopSet.has(id));
+    //
+    // Likewise a target that one of those stop targets leads to (#99: a
+    // shortcut edge past the stop, B -> E -> F plus B -> F): it runs once,
+    // after the stop, not also here.
+    const stopTargets = targetIds.filter((id) => stopSet.has(id));
+    const afterStop = this.reachedAvoiding(flow, stopTargets, '');
+    const remainingTargets = targetIds.filter((id) => !stopSet.has(id) && !afterStop.has(id));
 
     if (remainingTargets.length === 0) return [];
     if (remainingTargets.length === 1) {
@@ -1247,12 +1246,17 @@ export class NativeStrategy extends BaseStrategy {
     // arbitrarily treating one of them as "the" continuation -- each
     // sibling becomes its own further fan-out/convergence step, correctly
     // handling arbitrary nesting depth.
-    const convergenceSet = this.findConvergenceSet(flow, remainingTargets);
+    // Bounded by the caller's stop set (#99): a meeting point past it is
+    // not this fan-out's to build.
+    const convergenceSet = this.findConvergenceSet(flow, remainingTargets, stopSet);
     const convergencePoints = convergenceSet.length > 0 ? convergenceSet : [...stopSet];
     const boundSet = new Set(convergencePoints);
-    const parallelActions = remainingTargets.map((id) =>
-      this.buildSequenceUntilNode(flow, id, boundSet, new Set(visited))
-    );
+    const parallelActions = this.buildParallelBranches(
+      flow,
+      remainingTargets,
+      boundSet,
+      visited
+    ).map((b) => b.steps);
     const filteredBranches = parallelActions.filter((a) => a.length > 0);
 
     const sequence: unknown[] = [];
@@ -1260,8 +1264,8 @@ export class NativeStrategy extends BaseStrategy {
       // Flatten single-action branches to avoid double-nesting (- - service:),
       // same convention as buildFanOut/buildSequenceUntilNode's own nested
       // fan-out case.
-      const flattenedBranches = filteredBranches.map((branch) =>
-        branch.length === 1 ? branch[0] : branch
+      const flattenedBranches = filteredBranches.map(
+        (branch) => bareParallelBranch(branch) ?? branch
       );
       sequence.push({ parallel: flattenedBranches });
     }
@@ -1443,17 +1447,17 @@ export class NativeStrategy extends BaseStrategy {
     let conditionsWithTruePath = 0;
     let conditionsWithFalsePath = 0;
 
+    // Every edge of each handle: a condition fanning out
+    // through a handle has several targets there, and each is kept, so a
+    // fan-out is never mistaken for one arm of an OR (its other targets
+    // were dropped).
     for (const cond of conditions) {
-      const trueEdge = flow.edges.find((e) => e.source === cond.id && e.sourceHandle === 'true');
-      const falseEdge = flow.edges.find((e) => e.source === cond.id && e.sourceHandle === 'false');
-      if (trueEdge) {
-        trueTargets.add(trueEdge.target);
-        conditionsWithTruePath++;
-      }
-      if (falseEdge) {
-        falseTargets.add(falseEdge.target);
-        conditionsWithFalsePath++;
-      }
+      const trueEdges = flow.edges.filter((e) => e.source === cond.id && e.sourceHandle === 'true');
+      const falseEdges = flow.edges.filter((e) => e.source === cond.id && e.sourceHandle === 'false');
+      for (const edge of trueEdges) trueTargets.add(edge.target);
+      for (const edge of falseEdges) falseTargets.add(edge.target);
+      if (trueEdges.length > 0) conditionsWithTruePath++;
+      if (falseEdges.length > 0) conditionsWithFalsePath++;
     }
 
     // OR via true paths: all conditions have the same true target
@@ -1464,6 +1468,8 @@ export class NativeStrategy extends BaseStrategy {
         return null;
       }
       const convergenceNode = [...trueTargets][0];
+      // #111: a Join waits for every branch, whether its test passed or not.
+      if (this.getNode(flow, convergenceNode)?.type === 'join') return null;
       return {
         conditions: conditions as ConditionNode[],
         convergenceNode,
@@ -1479,6 +1485,7 @@ export class NativeStrategy extends BaseStrategy {
         return null;
       }
       const convergenceNode = [...falseTargets][0];
+      if (this.getNode(flow, convergenceNode)?.type === 'join') return null;
       return {
         conditions: conditions as ConditionNode[],
         convergenceNode,
@@ -1558,20 +1565,6 @@ export class NativeStrategy extends BaseStrategy {
   }
 
   /**
-   * Build a single trigger configuration
-   */
-  private buildTrigger(node: TriggerNode): Record<string, unknown> {
-    // Trigger nodes aren't currently tagged with any internal Circuitry field by
-    // block-factories.ts, but stripping here too costs nothing and closes
-    // the gap automatically if that ever changes (see stripInternalFields's
-    // doc comment in base.ts).
-    const trigger: Record<string, unknown> = this.stripInternalFields(node.data);
-
-    // Clean up undefined/empty values (but keep explicit from/to: null — see cleanTriggerFields)
-    return this.cleanTriggerFields(this.foldEventContextUserId(trigger));
-  }
-
-  /**
    * Find condition nodes whose specified handle (true/false) points to a given target node
    * Returns the condition sources if there are multiple (OR pattern), empty array otherwise
    */
@@ -1581,6 +1574,9 @@ export class NativeStrategy extends BaseStrategy {
     handleType: 'true' | 'false',
     visited: Set<string>
   ): ConditionNode[] {
+    // #111: a Join goes on once every branch has finished, whether its
+    // test passed or not -- never an OR of them.
+    if (this.getNode(flow, targetNodeId)?.type === 'join') return [];
     const sources = flow.edges
       .filter(
         (e) =>
@@ -1607,14 +1603,10 @@ export class NativeStrategy extends BaseStrategy {
     const oppositeTargets = new Set<string>();
     let sourcesWithOpposite = 0;
     for (const src of sources) {
-      const edge = flow.edges.find(
-        (e) =>
-          e.source === src.id && e.sourceHandle === oppositeHandle && !this.backEdgeIds.has(e.id)
-      );
-      if (edge) {
-        oppositeTargets.add(edge.target);
-        sourcesWithOpposite++;
-      }
+      // All of them, so a fan-out there counts as diverging.
+      const opposite = this.forwardTargets(flow, src.id, oppositeHandle);
+      for (const target of opposite) oppositeTargets.add(target);
+      if (opposite.length > 0) sourcesWithOpposite++;
     }
     // If opposite paths diverge → not a clean OR pattern, skip detection
     if (sourcesWithOpposite > 0 && oppositeTargets.size > 1) {
@@ -1745,29 +1737,10 @@ export class NativeStrategy extends BaseStrategy {
       return sequence;
     }
 
-    // Check if this node is the entry point of a repeat pattern
-    const repeatPattern = this.repeatPatterns.get(nodeId);
-    if (repeatPattern) {
-      const repeatBlock = this.buildRepeatBlock(flow, repeatPattern, visited);
-      if (repeatBlock) {
-        sequence.push(repeatBlock);
-        // Continue from the exit node(s)
-        sequence.push(
-          ...this.buildAfterPattern(flow, this.patternExitIds(flow, repeatPattern), visited)
-        );
-        return sequence;
-      }
-    }
-
-    // Check if this node is the entry point of a sequence (Grouping actions) pattern
-    const sequencePattern = this.sequencePatterns.get(nodeId);
-    if (sequencePattern) {
-      visited.add(nodeId);
-      sequence.push(this.buildSequenceBlock(flow, sequencePattern, visited));
-      visited.add(sequencePattern.endNodeId);
-      sequence.push(
-        ...this.buildAfterPattern(flow, this.patternExitIds(flow, sequencePattern), visited)
-      );
+    // A loop or a group starting here, and what follows it.
+    const pattern = this.buildPatternAtNode(flow, nodeId, visited);
+    if (pattern) {
+      sequence.push(...pattern);
       return sequence;
     }
 
@@ -2151,6 +2124,109 @@ export class NativeStrategy extends BaseStrategy {
   }
 
   /**
+   * Bug #99 (2026-09-27): the branches of one fan-out, each as its own step
+   * list, walked no further than `bound` (null: to their ends). Branches
+   * that meet again before `bound` when not all of them do (B and C lead
+   * to E, D doesn't) make one branch: a parallel of their own followed by
+   * what comes after they meet, `parallel: [[parallel: [B, C], E], D]`, so
+   * E runs once, after B and C -- what a Join set to "All" promises, and
+   * what a plain meeting means everywhere else. Walking
+   * each branch on its own ran E once per branch. Branches that meet in a
+   * way no nesting of parallels can write (B meets C, C meets D, B and D
+   * don't meet) are refused rather than guessed.
+   * extractFromGraph.ts's meetingGroups applies the same rule independently.
+   */
+  private buildParallelBranches(
+    flow: FlowGraph,
+    targetIds: string[],
+    bound: Set<string> | null,
+    visited: Set<string>
+  ): { targets: string[]; steps: unknown[] }[] {
+    return this.meetingGroups(flow, targetIds, bound).map((group) => {
+      if (group.length === 1) {
+        const steps = bound
+          ? this.buildSequenceUntilNode(flow, group[0], bound, new Set(visited))
+          : this.buildSequenceFromNode(flow, group[0], new Set(visited));
+        return { targets: group, steps };
+      }
+      if (group.length === targetIds.length) {
+        throw new GraphClaimError(
+          `the branches starting at ${targetIds.join(', ')} meet again in a way a parallel can't be written for`
+        );
+      }
+      const steps = bound
+        ? this.buildFanOutUntilNode(flow, group, bound, new Set(visited))
+        : this.buildFanOut(flow, group, new Set(visited));
+      return { targets: group, steps };
+    });
+  }
+
+  /**
+   * buildParallelBranches (#99) for StateMachineStrategy, whose fan-outs
+   * inline their branches as native steps -- this class's own tree-walker
+   * rather than a second way to turn a chain into YAML (CLAUDE.md's DRY
+   * rule): one entry per branch, several targets when their branches meet.
+   * With `bound`, each branch stops before it (the continuation belongs to
+   * the state machine's own per-node dispatch); without, it runs to its
+   * end. (Replaces buildActionsFromEntryPoint/buildActionsUntilNode, which
+   * built one target at a time.)
+   */
+  buildParallelBranchesForTargets(
+    flow: FlowGraph,
+    targetIds: string[],
+    bound: Set<string> | null
+  ): { targets: string[]; steps: unknown[] }[] {
+    const preparedFlow = this.prepareForTraversal(flow);
+    return this.buildParallelBranches(preparedFlow, targetIds, bound, new Set());
+  }
+
+  /**
+   * #99: fan-out targets grouped by whether their branches meet before
+   * `bound` (a node both reach, forward edges only, not past `bound`; a
+   * group links everything that meets anything in it). Groups keep the
+   * order of their first target; one group per target when none meet.
+   */
+  private meetingGroups(
+    flow: FlowGraph,
+    targetIds: string[],
+    bound: Set<string> | null
+  ): string[][] {
+    // What comes after the bound runs once after it, whichever branch has a
+    // (shortcut) edge to it: not a meeting of the branches. Only a bound
+    // the branches lead to counts: a loop's test they return to by its
+    // back edge comes BEFORE the body they are part of.
+    const reached = this.reachedAvoiding(flow, targetIds, '');
+    const boundAhead = [...(bound ?? [])].filter((id) => reached.has(id));
+    const afterBound = this.reachedAvoiding(flow, boundAhead, '');
+    const reach = targetIds.map((start) => {
+      const seen = new Set<string>();
+      const queue = [start];
+      while (queue.length > 0) {
+        const id = queue.shift()!;
+        if (seen.has(id) || afterBound.has(id)) continue;
+        seen.add(id);
+        for (const e of this.getOutgoingEdges(flow, id)) {
+          if (!this.backEdgeIds.has(e.id)) queue.push(e.target);
+        }
+      }
+      return seen;
+    });
+    const groupOf = targetIds.map((_, i) => i);
+    const root = (i: number): number => (groupOf[i] === i ? i : root(groupOf[i]));
+    for (let i = 0; i < targetIds.length; i++) {
+      for (let j = i + 1; j < targetIds.length; j++) {
+        if ([...reach[i]].some((id) => reach[j].has(id))) groupOf[root(j)] = root(i);
+      }
+    }
+    const groups = new Map<number, string[]>();
+    targetIds.forEach((id, i) => {
+      const r = root(i);
+      groups.set(r, [...(groups.get(r) ?? []), id]);
+    });
+    return [...groups.values()];
+  }
+
+  /**
    * Build a `{ parallel: [...] }` step (plus whatever follows once the
    * branches reconverge, if they do) from a set of fan-out target node
    * ids. A single target is just delegated straight to
@@ -2189,14 +2265,14 @@ export class NativeStrategy extends BaseStrategy {
 
     if (convergenceSet.length > 0) {
       const boundSet = new Set(convergenceSet);
-      const parallelActions = targetIds.map((id) =>
-        this.buildSequenceUntilNode(flow, id, boundSet, new Set(visited))
+      const parallelActions = this.buildParallelBranches(flow, targetIds, boundSet, visited).map(
+        (b) => b.steps
       );
       const filteredBranches = parallelActions.filter((a) => a.length > 0);
       if (filteredBranches.length > 0) {
         // Flatten single-action branches to avoid double-nesting (- - service:)
-        const flattenedBranches = filteredBranches.map((branch) =>
-          branch.length === 1 ? branch[0] : branch
+        const flattenedBranches = filteredBranches.map(
+          (branch) => bareParallelBranch(branch) ?? branch
         );
         sequence.push({
           parallel: flattenedBranches,
@@ -2208,14 +2284,14 @@ export class NativeStrategy extends BaseStrategy {
         sequence.push(...this.buildFanOut(flow, convergenceSet, new Set(visited)));
       }
     } else {
-      const parallelActions = targetIds.map((id) =>
-        this.buildSequenceFromNode(flow, id, new Set(visited))
+      const parallelActions = this.buildParallelBranches(flow, targetIds, null, visited).map(
+        (b) => b.steps
       );
       const filteredBranches = parallelActions.filter((a) => a.length > 0);
       if (filteredBranches.length > 0) {
         // Flatten single-action branches to avoid double-nesting (- - service:)
-        const flattenedBranches = filteredBranches.map((branch) =>
-          branch.length === 1 ? branch[0] : branch
+        const flattenedBranches = filteredBranches.map(
+          (branch) => bareParallelBranch(branch) ?? branch
         );
         sequence.push({
           parallel: flattenedBranches,
@@ -2336,21 +2412,17 @@ export class NativeStrategy extends BaseStrategy {
     ) {
       return false;
     }
+    // Bug #110: where other paths also arrive is a statement of its own.
+    if (!this.hasOneWayIn(flow, next.id)) return false;
     const isConstructHead =
       typeof (next.data as Record<string, unknown> | undefined)?._blockKey === 'string';
-    if (isConstructHead) {
-      const a = new Set(nextFalseTargets);
-      const b = new Set(chainElseTargets);
-      return a.size === b.size && [...a].every((id) => b.has(id));
-    }
+    if (isConstructHead) return sameIds(nextFalseTargets, chainElseTargets);
     if (nextFalseTargets.length === 0) return true;
     // Its false edges go exactly where the chain's else does -- one target,
     // or several when what follows is a parallel (YamlParser wires every
     // member's false edge to all of them; bug #51, 2026-09-26: requiring
     // exactly one made such a list fold on every other save).
-    const a = new Set(nextFalseTargets);
-    const b = new Set(chainElseTargets);
-    return a.size === b.size && [...a].every((id) => b.has(id));
+    return sameIds(nextFalseTargets, chainElseTargets);
   }
 
   /**
@@ -2454,7 +2526,8 @@ export class NativeStrategy extends BaseStrategy {
     });
   }
 
-  /** Every node reachable from `starts` by forward edges without passing through `avoidId`. */
+  /** Every node reachable from `starts` by forward edges without passing
+   * through `avoidId` (`''`: avoiding nothing). */
   private reachedAvoiding(flow: FlowGraph, starts: string[], avoidId: string): Set<string> {
     const seen = new Set<string>([avoidId]);
     const queue = starts.filter((id) => id !== avoidId);
@@ -2668,54 +2741,11 @@ export class NativeStrategy extends BaseStrategy {
       return []; // Avoid infinite loops
     }
 
-    // Check if this node is the entry point of a sequence (Grouping actions)
-    // pattern — checked here too (not just in buildSequenceFromNode), since
-    // this bounded walker is exactly what builds each Parallel branch's
-    // mini-sequence, the primary motivating use case for naming a group.
-    const sequencePattern = this.sequencePatterns.get(nodeId);
-    if (sequencePattern) {
-      visited.add(nodeId);
-      const seq: unknown[] = [this.buildSequenceBlock(flow, sequencePattern, visited)];
-      visited.add(sequencePattern.endNodeId);
-      seq.push(
-        ...this.buildAfterPattern(
-          flow,
-          this.patternExitIds(flow, sequencePattern),
-          visited,
-          stopNodeId
-        )
-      );
-      return seq;
-    }
-
-    // Check if this node is the entry point of a repeat pattern — checked
-    // here too (not just in buildSequenceFromNode), for the same reason as
-    // the sequencePattern check above: this bounded walker is exactly what
-    // builds each Parallel branch's mini-sequence, and a repeat/while or
-    // repeat/until loop can live inside one just as easily as a named
-    // group can. Without this check, a loop nested in a parallel branch
-    // falls through to the plain condition handling below, where the
-    // back-edge exclusion at the `outgoing` filter silently truncates the
-    // loop body's "then" to a single pass and the "else" to whatever
-    // follows the loop — turning "keep checking until clear, then run the
-    // body" into "check once, maybe wait once, then give up forever" with
-    // no error, warning, or validation failure to signal the corruption.
-    const repeatPattern = this.repeatPatterns.get(nodeId);
-    if (repeatPattern) {
-      const repeatBlock = this.buildRepeatBlock(flow, repeatPattern, visited);
-      if (repeatBlock) {
-        const seq: unknown[] = [repeatBlock];
-        seq.push(
-          ...this.buildAfterPattern(
-            flow,
-            this.patternExitIds(flow, repeatPattern),
-            visited,
-            stopNodeId
-          )
-        );
-        return seq;
-      }
-    }
+    // A loop or a group starting here, and what follows it up to the stop
+    // node -- checked in this bounded walker too, which builds each
+    // parallel branch's own sequence, where both can sit.
+    const pattern = this.buildPatternAtNode(flow, nodeId, visited, stopNodeId);
+    if (pattern) return pattern;
 
     visited.add(nodeId);
 
@@ -2932,43 +2962,10 @@ export class NativeStrategy extends BaseStrategy {
   }
 
   /**
-   * Map a single condition object (used for individual conditions in an array)
-   */
-  private mapSingleCondition(data: Record<string, unknown>): Record<string, unknown> {
-    const { condition, conditions, alias, template, ...rest } = this.stripInternalFields(data);
-    const out: Record<string, unknown> = {
-      condition: condition,
-      ...stripDottedOnlyConditionFields(condition, rest),
-      // Preserved even for conditions nested inside and/or groups — this was
-      // previously dropped here (destructured out above, never re-added),
-      // silently losing a user-set alias on every export of a named
-      // sub-condition inside a logical group.
-      ...(alias ? { alias } : {}),
-    };
-    // For template conditions, ensure value_template is set from template if needed
-    if (condition === 'template' && !rest.value_template && template) {
-      out.value_template = template;
-    }
-    // Recursively map nested group conditions
-    if (Array.isArray(conditions) && conditions.length > 0) {
-      out.conditions = (conditions as Record<string, unknown>[])
-        .map((c) => this.mapSingleCondition(c))
-        .filter(
-          (c) => c && (!Array.isArray(c.conditions) || (c.conditions as unknown[]).length > 0)
-        );
-    }
-    return Object.fromEntries(Object.entries(out).filter(([, v]) => v !== undefined && v !== ''));
-  }
-
-  /**
    * Build condition configuration
    */
   private buildCondition(node: ConditionNode): Record<string, unknown> {
     this.recordNodeOrder(node.id);
-    // stripInternalFields is a method (needs `this`), so it's captured here
-    // rather than called from inside the plain-function mapCondition closure
-    // below, which recurses without a bound `this`.
-    const stripInternal = this.stripInternalFields.bind(this);
     // A condition node stamped with one of these _blockKey values (see
     // YamlParser.ts's parseIfBlock/parseChooseBlock/repeat-while/repeat-until
     // comments, "Only the first condition in the chain gets the alias from
@@ -2986,276 +2983,15 @@ export class NativeStrategy extends BaseStrategy {
     // if-step AND the nested `condition: or` object). Only the OUTERMOST
     // (gate) condition is suppressed here -- a genuinely-nested condition
     // inside its own `conditions: [...]` group (recursed into below) never
-    // carries this _blockKey and keeps its own alias untouched, matching
-    // mapSingleCondition's identical, deliberately-preserved behavior for
-    // that case.
+    // carries this _blockKey and keeps its own alias untouched (see
+    // buildConditionData).
     const suppressGateAlias =
       node.data &&
       typeof node.data === 'object' &&
       ['if_else', 'choose', 'repeat_while', 'repeat_until'].includes(
         (node.data as Record<string, unknown>)._blockKey as string
       );
-    // Helper to recursively map condition to condition
-    function mapCondition(data: Record<string, unknown>, isTopLevel: boolean): Record<string, unknown> {
-      if (!data || typeof data !== 'object') return data;
-      // Destructure and exclude internal Circuitry fields and legacy 'template' key
-      const { condition, conditions, alias, template, ...rest } = stripInternal(data);
-      const out: Record<string, unknown> = {
-        condition: condition,
-        ...stripDottedOnlyConditionFields(condition, rest),
-        // Preserved for conditions nested inside and/or groups — see the
-        // identical fix/comment in mapSingleCondition above (this is that
-        // function's OR-convergence/choose-path twin, previously dropping
-        // alias here too). Suppressed only at the top level of a
-        // block-gate condition (see suppressGateAlias above) — the
-        // wrapping block already carries this same alias on its own key.
-        ...(alias && !(isTopLevel && suppressGateAlias) ? { alias } : {}),
-      };
-      // For template conditions, ensure value_template is set from template if needed
-      if (condition === 'template' && !rest.value_template && template) {
-        out.value_template = template;
-      }
-      // Recursively map nested group conditions
-      if (Array.isArray(conditions) && conditions.length > 0) {
-        out.conditions = conditions
-          .map((c) => mapCondition(c, false))
-          .filter((c) => c && (!Array.isArray(c.conditions) || c.conditions.length > 0));
-      }
-      // Normalize id: ["x"] → "x" — HA API sometimes returns trigger condition ids as single-element arrays
-      if (Array.isArray(out.id) && (out.id as unknown[]).length === 1) {
-        out.id = (out.id as unknown[])[0];
-      }
-      return Object.fromEntries(Object.entries(out).filter(([, v]) => v !== undefined && v !== ''));
-    }
-    return mapCondition(node.data, true);
+    return this.buildConditionData(node.data, !!suppressGateAlias);
   }
 
-  /**
-   * Build service call action or device action
-   */
-  private buildActionCall(node: ActionNode): Record<string, unknown> {
-    // Check if this is a device action (needs special format)
-    if (isDeviceAction(node.data.data)) {
-      const deviceData = node.data.data;
-      const action: Record<string, unknown> = {
-        device_id: deviceData.device_id,
-        domain: deviceData.domain,
-        type: deviceData.type,
-      };
-
-      if (node.data.alias) {
-        action.alias = node.data.alias;
-      }
-
-      // Add entity_id if present
-      if (deviceData.entity_id) {
-        action.entity_id = deviceData.entity_id;
-      }
-
-      // Add subtype if present
-      if (deviceData.subtype) {
-        action.subtype = deviceData.subtype;
-      }
-
-      // Add any additional parameters (like 'option' for select)
-      const knownFields = ['type', 'device_id', 'domain', 'entity_id', 'subtype'];
-      for (const [key, value] of Object.entries(deviceData)) {
-        if (!knownFields.includes(key) && value !== undefined) {
-          action[key] = value;
-        }
-      }
-
-      if (node.data.enabled === false) {
-        action.enabled = false;
-      }
-
-      return action;
-    }
-
-    // Check if this is a fallback repeat action (opaque repeat block)
-    if (node.data.repeat) {
-      const repeatData = node.data.repeat;
-      const action: Record<string, unknown> = {
-        repeat: {
-          ...(repeatData.count !== undefined ? { count: repeatData.count } : {}),
-          ...(repeatData.while ? { while: repeatData.while } : {}),
-          ...(repeatData.until ? { until: repeatData.until } : {}),
-          ...(repeatData.for_each !== undefined ? { for_each: repeatData.for_each } : {}),
-          sequence: repeatData.sequence ?? [],
-        },
-      };
-      if (node.data.alias) action.alias = node.data.alias;
-      if (node.data.continue_on_error) action.continue_on_error = node.data.continue_on_error;
-      if (node.data.enabled === false) action.enabled = false;
-      return action;
-    }
-
-    // Check if this is a fire event action
-    if (typeof node.data.event === 'string' && node.data.event.trim() !== '') {
-      const action: Record<string, unknown> = { event: node.data.event };
-      if (node.data.alias) action.alias = node.data.alias;
-      if (node.data.event_data && Object.keys(node.data.event_data).length > 0) {
-        action.event_data = node.data.event_data;
-      }
-      if (node.data.continue_on_error) action.continue_on_error = node.data.continue_on_error;
-      if (node.data.enabled === false) action.enabled = false;
-      return action;
-    }
-
-    // Check if this is a stop action
-    if ('stop' in node.data) {
-      const action: Record<string, unknown> = { stop: node.data.stop ?? '' };
-      if (node.data.alias) action.alias = node.data.alias;
-      if (node.data.error === true) action.error = true;
-      // `response_variable` on `stop` — home-assistant.io/docs/scripts/#stopping-a-script-sequence:
-      // "To return a response from a script, use the response_variable option.
-      // This option expects the name of the variable that contains the data
-      // to return." Same field name/shape as the service-call response_variable
-      // above, so it round-trips through the same HAAction#response_variable
-      // shared type — no schema change needed.
-      if (node.data.response_variable) action.response_variable = node.data.response_variable;
-      if (node.data.continue_on_error) action.continue_on_error = node.data.continue_on_error;
-      if (node.data.enabled === false) action.enabled = false;
-      return action;
-    }
-
-    // Standard service call format — output as 'action:' (HA 2024.8+ preferred key)
-    // stripInternalFields (base.ts) drops every `_`-prefixed Circuitry-internal
-    // field (_blockKey, _placeholder, _ifElseBranch, _parallelBranch, ...) up
-    // front — see its doc comment for why this replaced a hand-maintained
-    // per-field exclusion list here (a real save failure: "extra keys not
-    // allowed @ ...['_ifElseBranch']", from _ifElseBranch/_parallelBranch
-    // having been missing from that list).
-    const {
-      alias,
-      service,
-      action: _originalActionKey, // excluded from extraProps
-      id: _id, // excluded from extraProps — HA doesn't support id on action steps, see below
-      target,
-      data,
-      data_template,
-      response_variable,
-      continue_on_error,
-      enabled,
-      repeat: _repeat,
-      ...extraProps
-    } = this.stripInternalFields(node.data);
-    const action: Record<string, unknown> = {
-      ...extraProps,
-      alias,
-      action: service, // use 'action:' key (replaces legacy 'service:')
-    };
-
-    // `id` is intentionally dropped here (not just excluded from
-    // extraProps) — HA's SERVICE_SCHEMA (and the other action-type schemas
-    // below) don't support a per-step `id:` at all; only triggers do. Real
-    // HA rejects it outright ("extra keys not allowed"), it's not just
-    // ignored, so this can't be preserved even for round-trip fidelity.
-
-    if (target) {
-      action.target = target;
-    }
-
-    if (data && Object.keys(data as object).length > 0) {
-      action.data = data;
-    }
-
-    if (data_template) {
-      action.data_template = data_template;
-    }
-
-    if (response_variable) {
-      action.response_variable = response_variable;
-    }
-
-    if (continue_on_error) {
-      action.continue_on_error = continue_on_error;
-    }
-
-    if (enabled === false) {
-      action.enabled = false;
-    }
-
-    return action;
-  }
-
-  /**
-   * Build delay action
-   */
-  private buildDelay(node: DelayNode): Record<string, unknown> {
-    // Use spread pattern to preserve unknown properties from custom integrations.
-    // `id` is dropped — HA's action-step schemas don't support it, only triggers do.
-    const { alias, delay: delayValue, id: _id, ...extraProps } = this.stripInternalFields(node.data);
-    const delay: Record<string, unknown> = {
-      ...extraProps, // Preserve extra properties
-      alias,
-      delay: delayValue,
-    };
-
-    return delay;
-  }
-
-  /**
-   * Build wait action
-   */
-  private buildWait(node: WaitNode): Record<string, unknown> {
-    // Use spread pattern to preserve unknown properties from custom integrations.
-    // `id` is dropped — HA's action-step schemas don't support it, only triggers do.
-    const {
-      alias,
-      id: _id,
-      wait_template,
-      wait_for_trigger,
-      timeout,
-      continue_on_timeout,
-      ...extraProps
-    } = this.stripInternalFields(node.data);
-    const wait: Record<string, unknown> = {
-      ...extraProps, // Preserve extra properties
-      alias,
-    };
-
-    if (wait_template) {
-      wait.wait_template = wait_template;
-    } else if (wait_for_trigger) {
-      wait.wait_for_trigger = wait_for_trigger.map((triggerData) => {
-        const trigger: Record<string, unknown> = { ...triggerData };
-        return this.cleanTriggerFields(this.foldEventContextUserId(trigger));
-      });
-    }
-
-    // A literal all-zero timeout is not "no limit" in HA — it's "give up
-    // instantly" — so it must be treated the same as no timeout at all
-    // (omit the key) rather than written verbatim. See
-    // BaseStrategy.hasMeaningfulDuration's doc comment for the full
-    // explanation and the HA issue confirming this.
-    if (this.hasMeaningfulDuration(timeout)) {
-      wait.timeout = timeout;
-    }
-
-    if (continue_on_timeout !== undefined) {
-      wait.continue_on_timeout = continue_on_timeout;
-    }
-
-    return wait;
-  }
-
-  /**
-   * Build set variables action
-   */
-  private buildSetVariables(node: SetVariablesNode): Record<string, unknown> {
-    // Use spread pattern to preserve unknown properties from custom integrations.
-    // `id` is dropped — HA's action-step schemas don't support it, only triggers do.
-    const { alias, id: _id, variables, ...extraProps } = this.stripInternalFields(node.data);
-    const setVars: Record<string, unknown> = {
-      ...extraProps, // Preserve extra properties
-      variables,
-    };
-
-    if (alias) {
-      setVars.alias = alias;
-    }
-
-    return setVars;
-  }
 }

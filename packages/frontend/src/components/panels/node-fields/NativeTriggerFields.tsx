@@ -9,17 +9,18 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { HaSelect } from '@/ha';
+import { useNativeDescription } from '@/hooks/useNativeDescriptions';
+import { MOON_PHASES } from '@/lib/moonPhases';
+import { resolveOptionFields, resolveTargetless, resolveThresholdUnits } from '@/lib/nativeDescriptions';
 import {
   getThresholdRange,
   getThresholdUnit,
-  getTriggerBehaviorVariant,
   getTriggerThresholdShape,
-  triggerAllowsAnyThreshold,
-  triggerHasFor,
-  triggerIsTargetless,
   type TypedThreshold,
+  triggerAllowsAnyThreshold,
 } from '@/lib/nativeThreshold';
-import { HaSelect } from '@/ha';
+import { getSunPeriodField } from '@/lib/sunPeriodField';
 import { getTriggerDurationField } from '@/lib/triggerDurationField';
 import { getTriggerEnumField } from '@/lib/triggerEnumField';
 import {
@@ -30,6 +31,7 @@ import {
 import { getNodeDataObject, toStringArray } from '@/utils/nodeData';
 import { DurationField, type DurationValue } from './DurationField';
 import { NativeTargetField, type TargetValue } from './NativeTargetField';
+import { OptionSelectField } from './OptionSelectField';
 import { ThresholdTypeField } from './ThresholdTypeField';
 import { ThresholdValueField } from './ThresholdValueField';
 
@@ -50,12 +52,9 @@ import { ThresholdValueField } from './ThresholdValueField';
  * `behavior` and `for` turned out to apply to nearly EVERY dotted trigger
  * (a catalog-wide audit found them on plain boolean ones too —
  * `lock.locked`, `door.opened`, `alarm_control_panel.armed`, ... — not just
- * threshold-bearing types), so both default to shown; see
- * lib/nativeThreshold.ts's `triggerHasFor`/`triggerHasNoOptions` for the
- * short, individually-confirmed exception lists. `behavior`'s literal
- * values (each/first/all vs the older any/first/last) are per-type — see
- * `getTriggerBehaviorVariant` — a genuine, HA-acknowledged split
- * (home-assistant/frontend#29731) rather than something to normalize away.
+ * threshold-bearing types); lib/nativeDescriptions.ts says which take them:
+ * what the connected HA describes, else tables checked against HA 2026.9.3's
+ * own validators (#117).
  */
 interface NativeTriggerFieldsProps {
   node: FlowNode;
@@ -64,21 +63,21 @@ interface NativeTriggerFieldsProps {
   triggerType: string;
 }
 
-// home-assistant.io/triggers/moon.phase_changed/: "Accepts `any` (every
-// phase change) or one of `new_moon`, `waxing_crescent`, `first_quarter`,
-// `waxing_gibbous`, `full_moon`, `waning_gibbous`, `last_quarter`, or
-// `waning_crescent`." Default `any`.
-const MOON_PHASES = [
-  'any',
-  'new_moon',
-  'waxing_crescent',
-  'first_quarter',
-  'waxing_gibbous',
-  'full_moon',
-  'waning_gibbous',
-  'last_quarter',
-  'waning_crescent',
-] as const;
+// moon.phase_changed's `phase`: `any` (its default: every change) or one
+// phase.
+const TRIGGER_MOON_PHASES = ['any', ...MOON_PHASES] as const;
+
+/** The label for each behavior value HA has used for a trigger. */
+const TRIGGER_BEHAVIOR_LABELS = {
+  each: 'nodes:triggers.native.behaviorEach',
+  first: 'nodes:triggers.native.behaviorFirst',
+  all: 'nodes:triggers.native.behaviorAll',
+  any: 'nodes:triggers.native.behaviorAny',
+  last: 'nodes:triggers.native.behaviorLast',
+} as const;
+
+const hasBehaviorLabel = (value: string): value is keyof typeof TRIGGER_BEHAVIOR_LABELS =>
+  value in TRIGGER_BEHAVIOR_LABELS;
 
 type NativeTriggerOptions = {
   behavior?: string;
@@ -103,9 +102,17 @@ export function NativeTriggerFields({ node, onChange, triggerType }: NativeTrigg
   const shape = getTriggerThresholdShape(triggerType);
   const unit = getThresholdUnit(triggerType);
   const range = getThresholdRange(triggerType);
-  const behaviorVariant = getTriggerBehaviorVariant(triggerType);
-  const showBehavior = behaviorVariant !== 'none';
-  const showFor = triggerHasFor(triggerType);
+  // What the connected HA describes for this trigger, else the tables
+  // (lib/nativeDescriptions.ts): the same fields either way on HA 2026.9.
+  const description = useNativeDescription('trigger', triggerType);
+  const { behavior: behaviorField, hasFor: showFor } = resolveOptionFields('trigger', triggerType, description);
+  // A value the automation already holds that isn't offered (the older
+  // `any`/`last` of an imported one, say) is listed too, so the panel shows
+  // what the automation does.
+  const behaviors =
+    behaviorField && options.behavior && !behaviorField.values.includes(options.behavior)
+      ? [...behaviorField.values, options.behavior]
+      : behaviorField?.values;
   const enumField = getTriggerEnumField(triggerType);
   const durationField = getTriggerDurationField(triggerType);
   const offsetField = getTriggerOffsetField(triggerType);
@@ -116,8 +123,9 @@ export function NativeTriggerFields({ node, onChange, triggerType }: NativeTrigg
   // `zone.occupancy_detected`/`occupancy_cleared` are targetless for their
   // own, individually-confirmed reasons — see triggerIsTargetless's doc
   // comment in lib/nativeThreshold.ts.
-  const isTargetless = triggerIsTargetless(triggerType);
+  const isTargetless = resolveTargetless('trigger', triggerType, description);
   const isMoonPhase = triggerType === 'moon.phase_changed';
+  const periodField = getSunPeriodField(triggerType);
 
   const updateOptions = (patch: Partial<NativeTriggerOptions>) =>
     onChange('options', { ...options, ...patch });
@@ -139,30 +147,24 @@ export function NativeTriggerFields({ node, onChange, triggerType }: NativeTrigg
     <>
       {!isTargetless && <NativeTargetField target={target} onChange={(v) => onChange('target', v)} />}
 
-      {showBehavior && (
+      {behaviorField && behaviors && (
         <FormField
           label={t('nodes:triggers.native.behaviorLabel')}
           description={t('nodes:triggers.native.behaviorDescription')}
         >
           <Select
-            value={options.behavior ?? (behaviorVariant === 'any-first-last' ? 'any' : 'each')}
+            value={options.behavior ?? behaviorField.default}
             onValueChange={(v) => updateOptions({ behavior: v })}
           >
             <SelectTrigger>
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {behaviorVariant === 'any-first-last' ? (
-                <SelectItem value="any">{t('nodes:triggers.native.behaviorAny')}</SelectItem>
-              ) : (
-                <SelectItem value="each">{t('nodes:triggers.native.behaviorEach')}</SelectItem>
-              )}
-              <SelectItem value="first">{t('nodes:triggers.native.behaviorFirst')}</SelectItem>
-              {behaviorVariant === 'any-first-last' ? (
-                <SelectItem value="last">{t('nodes:triggers.native.behaviorLast')}</SelectItem>
-              ) : (
-                <SelectItem value="all">{t('nodes:triggers.native.behaviorAll')}</SelectItem>
-              )}
+              {behaviors.map((behavior) => (
+                <SelectItem key={behavior} value={behavior}>
+                  {hasBehaviorLabel(behavior) ? t(TRIGGER_BEHAVIOR_LABELS[behavior]) : behavior}
+                </SelectItem>
+              ))}
             </SelectContent>
           </Select>
         </FormField>
@@ -171,12 +173,12 @@ export function NativeTriggerFields({ node, onChange, triggerType }: NativeTrigg
       {enumField && (
         <FormField
           label={t(`nodes:triggers.native.enumFieldLabels.${enumField.labelKey}`)}
-          description={t('nodes:triggers.native.enumFieldDescription')}
+          description={t(`nodes:triggers.native.enumFieldDescriptions.${enumField.labelKey}`)}
         >
           <IdList
             values={toStringArray(options[enumField.optionsKey])}
             onChange={(vals) => updateOptions({ [enumField.optionsKey]: vals })}
-            placeholder={t('nodes:triggers.native.enumFieldPlaceholder')}
+            placeholder={t(`nodes:triggers.native.enumFieldPlaceholders.${enumField.labelKey}`)}
           />
         </FormField>
       )}
@@ -249,30 +251,27 @@ export function NativeTriggerFields({ node, onChange, triggerType }: NativeTrigg
       )}
 
       {isMoonPhase && (
-        <FormField label={t('nodes:triggers.native.moonPhaseLabel')}>
-          <HaSelect
-            value={options.phase ?? 'any'}
-            onChange={(v) => updateOptions({ phase: String(v) })}
-            options={MOON_PHASES.map((phase) => ({
-              value: phase,
-              label: t(`nodes:triggers.native.moonPhases.${phase}`),
-            }))}
-            fallback={
-              <Select value={options.phase ?? 'any'} onValueChange={(v) => updateOptions({ phase: v })}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {MOON_PHASES.map((phase) => (
-                    <SelectItem key={phase} value={phase}>
-                      {t(`nodes:triggers.native.moonPhases.${phase}`)}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            }
-          />
-        </FormField>
+        <OptionSelectField
+          label={t('nodes:triggers.native.moonPhaseLabel')}
+          value={options.phase ?? 'any'}
+          options={TRIGGER_MOON_PHASES.map((phase) => ({
+            value: phase,
+            label: t(`nodes:triggers.native.moonPhases.${phase}`),
+          }))}
+          onChange={(phase) => updateOptions({ phase })}
+        />
+      )}
+
+      {periodField && (
+        <OptionSelectField
+          label={t('nodes:triggers.native.periodLabel')}
+          value={typeof options.period === 'string' ? options.period : periodField.default}
+          options={periodField.values.map((period) => ({
+            value: period,
+            label: t(`nodes:triggers.native.periods.${period}`),
+          }))}
+          onChange={(period) => updateOptions({ period })}
+        />
       )}
 
       {shape === 'flat' && (
@@ -299,6 +298,7 @@ export function NativeTriggerFields({ node, onChange, triggerType }: NativeTrigg
           forValue={showFor ? (options.for ?? {}) : undefined}
           onForChange={showFor ? (v) => updateOptions({ for: v }) : undefined}
           unit={unit}
+          units={resolveThresholdUnits(triggerType, description)}
           min={range?.min}
           max={range?.max}
           allowAny={triggerAllowsAnyThreshold(triggerType)}

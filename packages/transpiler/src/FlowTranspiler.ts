@@ -1,5 +1,8 @@
 import type { FlowGraph } from '@circuitry/shared';
 import { dump as yamlDump } from 'js-yaml';
+import { unwritableMeeting } from './analyzer/condition-meetings';
+import { untilLoopingBackToSeveral } from './analyzer/loop-entry-anchors';
+import { nodesReadingLoopVariable } from './analyzer/loop-variable';
 import { normalizeGraph } from './analyzer/normalize';
 import { analyzeTopology, type TopologyAnalysis } from './analyzer/topology';
 import { type ValidationResult, validateFlowGraph } from './analyzer/validator';
@@ -7,6 +10,7 @@ import { type ParseResult, YamlParser } from './parser/YamlParser';
 import type { HAYamlOutput, TranspilerStrategy } from './strategies/base';
 import { NativeStrategy } from './strategies/native';
 import { StateMachineStrategy } from './strategies/state-machine';
+import { GraphClaimError } from './utils/theOnly';
 import { verifyNativeOutput } from './verification/verifyNativeOutput';
 import { verifyStateMachineOutput } from './verification/verifyStateMachineOutput';
 
@@ -110,6 +114,37 @@ export class FlowTranspiler {
     // path that just ends gets one meaning (decision D1, path-endings.ts).
     // Generation AND verification both use the normalized graph.
     const flow = normalizeGraph(validation.graph);
+    // #109: an until test that loops back to several places normalizing
+    // couldn't make into one (not clearly a parallel body): which of its
+    // edges closes the loop can't be told, so nothing is guessed.
+    // #111: branches that can each end before the step they meet at, where
+    // a branch is more than one test going straight to it: HA can't run
+    // that step only when some branch got there.
+    const meeting = unwritableMeeting(flow);
+    if (meeting !== null) {
+      return {
+        success: false,
+        errors: [
+          `Branches meet at "${meeting}", and each of them can end before getting there. That step ` +
+            'would run only if one of them reaches it, which Home Assistant can write only when ' +
+            'each branch is a single condition leading straight to it. To run it once every ' +
+            'branch has finished instead, put a Join in front of it.',
+        ],
+        warnings,
+      };
+    }
+    const ambiguousUntil = untilLoopingBackToSeveral(flow);
+    if (ambiguousUntil !== null) {
+      return {
+        success: false,
+        errors: [
+          `The until loop tested at "${ambiguousUntil}" loops back to several places, and they ` +
+            "aren't the starts of one parallel body entered together. Add a Join at the start " +
+            'of the loop body and loop back to it.',
+        ],
+        warnings,
+      };
+    }
 
     // Step 2: Analyze topology
     const analysis = this.analyzeTopology(flow);
@@ -167,7 +202,7 @@ export class FlowTranspiler {
     }
 
     // Steps 4-6: Generate YAML output, inject _circuitry_metadata, serialize.
-    let { output, yaml, config } = this.generateAndSerialize(
+    let { output, yaml, config, claim } = this.generateAndSerialize(
       flow,
       strategy,
       analysis,
@@ -197,7 +232,8 @@ export class FlowTranspiler {
     // gate falls back to on a native verification failure -- but its own
     // output is no longer given a free pass; Step 8 verifies it too.
     if (strategy.name === 'native') {
-      const verification = verifyNativeOutput(flow, yaml);
+      const verification =
+        claim !== undefined ? { valid: false, reason: claim } : verifyNativeOutput(flow, yaml);
       if (!verification.valid) {
         if (options.forceStrategy === 'native') {
           // The caller explicitly asked for native output -- per this
@@ -209,9 +245,12 @@ export class FlowTranspiler {
           return {
             success: false,
             errors: [
+              // Not `analysis.recommendedStrategy`: native only gets here
+              // when it could handle the topology, which is exactly when
+              // the recommendation is native itself (bug #77).
               `Native strategy produced output that does not behaviorally match the flow graph ` +
-                `(${verification.reason ?? 'unspecified mismatch'}). Use the recommended strategy ` +
-                `instead: ${analysis.recommendedStrategy}.`,
+                `(${verification.reason ?? 'unspecified mismatch'}). Use the state-machine strategy ` +
+                `instead (Auto falls back to it for this flow).`,
             ],
             analysis,
             warnings,
@@ -229,7 +268,7 @@ export class FlowTranspiler {
             `(${verification.reason ?? 'unspecified mismatch'}); fell back to the state-machine strategy.`
         );
         strategy = this.strategies.find((s) => s.name === 'state-machine') ?? new StateMachineStrategy();
-        ({ output, yaml, config } = this.generateAndSerialize(
+        ({ output, yaml, config, claim } = this.generateAndSerialize(
           flow,
           strategy,
           analysis,
@@ -259,8 +298,33 @@ export class FlowTranspiler {
     // StateMachineStrategy's shape-recognition code needs the same "never
     // trust blindly" treatment as NativeStrategy's, not a free pass as the
     // universal fallback.
+    // Bug #79 (2026-09-27): the state machine writes a loop drawn on the
+    // canvas as states of its own dispatch loop, so a template that reads
+    // HA's loop variable (`repeat.index`, `repeat.first`, ...) would read
+    // the dispatch loop's instead. A loop read from YAML that does is kept
+    // whole (written as a real `repeat:`); anything else is refused here
+    // rather than saved doing something else.
     if (strategy.name === 'state-machine') {
-      const smVerification = verifyStateMachineOutput(flow, yaml);
+      const readers = nodesReadingLoopVariable(flow);
+      if (readers.length > 0) {
+        return {
+          success: false,
+          errors: [
+            `This flow can only be saved as a state machine, and a template in it reads the loop ` +
+              `variable \`repeat\` (repeat.index, repeat.first, ...), which the state machine can't ` +
+              `keep: its loops aren't Home Assistant repeats. Nodes: ${readers.join(', ')}.`,
+          ],
+          analysis,
+          warnings,
+        };
+      }
+    }
+
+    if (strategy.name === 'state-machine') {
+      const smVerification =
+        claim !== undefined
+          ? { valid: false, reason: claim }
+          : verifyStateMachineOutput(flow, yaml);
       if (!smVerification.valid) {
         return {
           success: false,
@@ -300,8 +364,18 @@ export class FlowTranspiler {
     analysis: TopologyAnalysis,
     options: YamlOptions,
     warnings: string[]
-  ): { output: HAYamlOutput; yaml: string; config?: Record<string, unknown> } {
-    const output = strategy.generate(flow, analysis);
+  ): { output: HAYamlOutput; yaml: string; config?: Record<string, unknown>; claim?: string } {
+    // A claim the strategy checks (theOnly) that doesn't hold
+    // for this graph: no output, and the reason goes where a verification
+    // failure's does -- auto-selected native falls back to the state
+    // machine, anything else fails loudly. Never a guess, never a crash.
+    let output: HAYamlOutput;
+    try {
+      output = strategy.generate(flow, analysis);
+    } catch (e) {
+      if (!(e instanceof GraphClaimError)) throw e;
+      return { output: { warnings: [], strategy: strategy.name }, yaml: '', claim: e.message };
+    }
     warnings.push(...output.warnings);
 
     // Inject _circuitry_metadata with node positions. Only this key is ever

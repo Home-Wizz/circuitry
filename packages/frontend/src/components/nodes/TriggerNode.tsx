@@ -1,5 +1,5 @@
 import { Handle, type NodeProps, Position } from '@xyflow/react';
-import { AlertCircle, Ban, Zap } from 'lucide-react';
+import { Zap } from 'lucide-react';
 import { memo } from 'react';
 import { DottedThresholdInlineEditor } from '@/components/nodes/DottedThresholdInlineEditor';
 import { NumericStateInlineEditor } from '@/components/nodes/NumericStateInlineEditor';
@@ -13,6 +13,7 @@ import { getTraceStateClass, NODE_COLORS, NODE_STATE_CLASSES, SELECTED_NODE_STYL
 import {
   getThresholdRange,
   getThresholdUnit,
+  getThresholdUnits,
   getTriggerThresholdShape,
   triggerAllowsAnyThreshold,
   type TypedThreshold,
@@ -20,6 +21,7 @@ import {
 import { cn } from '@/lib/utils';
 import type { TriggerNodeData } from '@/store/flow-store';
 import { useFlowStore } from '@/store/flow-store';
+import { NodeStatusBadge } from './NodeStatusBadge';
 
 const COLORS = NODE_COLORS.trigger;
 
@@ -31,7 +33,7 @@ export const TriggerNode = memo(function TriggerNode({ id, data, selected }: Tri
   const activeNodeId = useFlowStore((s) => s.activeNodeId);
   const getExecutionStepNumber = useFlowStore((s) => s.getExecutionStepNumber);
   const updateNodeData = useFlowStore((s) => s.updateNodeData);
-  const { hasErrors, errorMessages } = useNodeErrors(id);
+  const { hasErrors, errorMessages, warningMessages } = useNodeErrors(id);
   const openMoreInfo = useMoreInfo();
   const { getTriggerDisplayInfo } = useTriggerCardDisplay();
   const traceState = useTraceNodeState(id);
@@ -68,27 +70,11 @@ export const TriggerNode = memo(function TriggerNode({ id, data, selected }: Tri
         getTraceStateClass(traceState)
       )}
     >
-      {hasErrors && (
-        <div
-          className={cn(
-            'absolute -top-2 -right-2 flex h-5 w-5 items-center justify-center rounded-full shadow-sm',
-            NODE_STATE_CLASSES.errorBadge
-          )}
-          title={errorMessages.join('\n')}
-        >
-          <AlertCircle className="h-3 w-3" />
-        </div>
-      )}
-      {isDisabled && !hasErrors && (
-        <div
-          className={cn(
-            'absolute -top-2 -right-2 flex h-5 w-5 items-center justify-center rounded-full shadow-sm',
-            NODE_STATE_CLASSES.disabledBadge
-          )}
-        >
-          <Ban className="h-3 w-3" />
-        </div>
-      )}
+      <NodeStatusBadge
+        errorMessages={errorMessages}
+        warningMessages={warningMessages}
+        isDisabled={isDisabled}
+      />
       <div className="mb-1 flex items-center gap-2">
         <div className={cn('rounded p-1', COLORS.chip)}>
           <Icon className={cn('h-4 w-4', COLORS.text)} />
@@ -143,6 +129,7 @@ export const TriggerNode = memo(function TriggerNode({ id, data, selected }: Tri
               shape={thresholdShape}
               threshold={triggerOptions.threshold as number | string | TypedThreshold | undefined}
               unit={getThresholdUnit(data.trigger)}
+              units={getThresholdUnits(data.trigger)}
               min={getThresholdRange(data.trigger)?.min}
               max={getThresholdRange(data.trigger)?.max}
               allowAny={triggerAllowsAnyThreshold(data.trigger)}

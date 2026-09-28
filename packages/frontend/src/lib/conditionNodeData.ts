@@ -1,5 +1,7 @@
 import type { DeviceCondition } from '@/hooks/useDeviceAutomation';
 import type { ConditionBlock, ConditionRecipe } from '@/lib/conditionRecipes';
+import { conditionIsTargetless, defaultThreshold } from '@/lib/nativeThreshold';
+import { isRecord } from '@/lib/utils';
 
 /**
  * The outcomes AndConditionDialog.tsx's Miller-column picker can produce —
@@ -18,6 +20,17 @@ export type ConditionSelection =
   | { kind: 'recipe'; entityIds: string[]; recipe: ConditionRecipe }
   | { kind: 'deviceCondition'; condition: DeviceCondition };
 
+/** A new purpose-specific condition's options: a threshold type starts
+ * with the threshold the panel shows (#124, #127). */
+function startingOptions(
+  condition: unknown,
+  options: Record<string, unknown> | undefined
+): Record<string, unknown> | undefined {
+  if (typeof condition !== 'string' || !condition.includes('.')) return options;
+  const threshold = options?.threshold ?? defaultThreshold('condition', condition);
+  return threshold !== undefined ? { ...options, threshold } : options;
+}
+
 /**
  * Single source of truth for turning a condition-picker selection into the
  * actual `data` fields a condition node needs — mirrors
@@ -26,11 +39,16 @@ export type ConditionSelection =
  */
 export function buildConditionNodeData(selection: ConditionSelection): Record<string, unknown> {
   switch (selection.kind) {
-    // Blocks (and/or/not/template/time/trigger) have no entity target at
-    // all — the block's own `data` is already a complete, minimal starting
-    // point for that condition type.
-    case 'block':
-      return { ...selection.block.data };
+    // Blocks (and/or/not/template/time/trigger, and the sun conditions,
+    // which take no entity) have no entity target at all — the block's own
+    // `data` is the starting point, with the threshold the panel shows
+    // where the type has one (#127: #124 seeded recipes only, so "Sun
+    // elevation" started with none).
+    case 'block': {
+      const { data } = selection.block;
+      const options = startingOptions(data.condition, isRecord(data.options) ? data.options : undefined);
+      return { ...data, ...(options ? { options } : {}) };
+    }
 
     // "By target" picker shortcut, mirroring buildTriggerNodeData's
     // identical case: jump straight to a legacy `state` condition pre-filled
@@ -41,14 +59,16 @@ export function buildConditionNodeData(selection: ConditionSelection): Record<st
 
     case 'recipe': {
       const { entityIds, recipe } = selection;
-      const { condition, options } = recipe.fields;
+      const { condition } = recipe.fields;
+      const options = startingOptions(condition, recipe.fields.options);
       // Every recipe in lib/conditionRecipes.ts is a purpose-specific,
       // dotted `domain.is_*` condition (unlike triggers, there's no legacy
       // fallback branch to handle here — see that file's doc comment) —
       // always a `target`/`options` shape.
       return {
         condition,
-        target: { entity_id: entityIds },
+        // None for a condition with no target in HA (#118).
+        ...(conditionIsTargetless(condition) ? {} : { target: { entity_id: entityIds } }),
         ...(options ? { options } : {}),
       };
     }

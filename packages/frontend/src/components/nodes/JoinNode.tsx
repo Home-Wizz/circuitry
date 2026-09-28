@@ -1,7 +1,8 @@
 import { Handle, type NodeProps, Position } from '@xyflow/react';
-import { AlertCircle, Ban } from 'lucide-react';
+import { Ban } from 'lucide-react';
 import { memo } from 'react';
 import { useTranslation } from 'react-i18next';
+import { StepStopsHere } from '@/components/nodes/ConventionMarkers';
 import { nodeTypes } from '@/config/nodeTypeCatalog';
 import { useNodeErrors } from '@/hooks/useNodeErrors';
 import { useTraceNodeState } from '@/hooks/useTraceNodeState';
@@ -9,6 +10,7 @@ import { getTraceStateClass, NODE_COLORS, NODE_STATE_CLASSES, SELECTED_NODE_STYL
 import { cn } from '@/lib/utils';
 import type { JoinNodeData } from '@/store/flow-store';
 import { useFlowStore } from '@/store/flow-store';
+import { NodeStatusBadge } from './NodeStatusBadge';
 
 const COLORS = NODE_COLORS.join;
 
@@ -28,7 +30,7 @@ export const JoinNode = memo(function JoinNode({ id, data, selected }: JoinNodeP
   const { t } = useTranslation(['nodes']);
   const activeNodeId = useFlowStore((s) => s.activeNodeId);
   const getExecutionStepNumber = useFlowStore((s) => s.getExecutionStepNumber);
-  const { hasErrors, errorMessages } = useNodeErrors(id);
+  const { hasErrors, errorMessages, warningMessages } = useNodeErrors(id);
   const traceState = useTraceNodeState(id);
   const isActive = activeNodeId === id;
   const stepNumber = getExecutionStepNumber(id);
@@ -52,27 +54,11 @@ export const JoinNode = memo(function JoinNode({ id, data, selected }: JoinNodeP
         getTraceStateClass(traceState)
       )}
     >
-      {hasErrors && (
-        <div
-          className={cn(
-            'absolute -top-2 -right-2 flex h-5 w-5 items-center justify-center rounded-full shadow-sm',
-            NODE_STATE_CLASSES.errorBadge
-          )}
-          title={errorMessages.join('\n')}
-        >
-          <AlertCircle className="h-3 w-3" />
-        </div>
-      )}
-      {isDisabled && !hasErrors && (
-        <div
-          className={cn(
-            'absolute -top-2 -right-2 flex h-5 w-5 items-center justify-center rounded-full shadow-sm',
-            NODE_STATE_CLASSES.disabledBadge
-          )}
-        >
-          <Ban className="h-3 w-3" />
-        </div>
-      )}
+      <NodeStatusBadge
+        errorMessages={errorMessages}
+        warningMessages={warningMessages}
+        isDisabled={isDisabled}
+      />
       <Handle type="target" position={Position.Left} className={cn('w-3! h-3!', COLORS.handle)} />
 
       <div className="flex items-center gap-2">
@@ -104,6 +90,7 @@ export const JoinNode = memo(function JoinNode({ id, data, selected }: JoinNodeP
       </div>
 
       <Handle type="source" position={Position.Right} className={cn('w-3! h-3!', COLORS.handle)} />
+      <StepStopsHere nodeId={id} />
     </div>
   );
 });

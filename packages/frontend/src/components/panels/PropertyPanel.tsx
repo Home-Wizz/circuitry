@@ -1,4 +1,4 @@
-import type { FlowNode } from '@circuitry/shared';
+import { type FlowNode, isOpaqueStepData } from '@circuitry/shared';
 import { Trash2 } from 'lucide-react';
 import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -13,6 +13,7 @@ import { getNodeTypeLabelKey } from '@/config/nodeTypeCatalog';
 import { HaSwitch } from '@/ha';
 import { useNodeErrors } from '@/hooks/useNodeErrors';
 import { useResolvedEntities } from '@/hooks/useResolvedEntities';
+import { clearedToUnset } from '@/lib/utils';
 import { useFlowStore } from '@/store/flow-store';
 import { Separator } from '../ui/separator';
 import { AutomationSettingsPanel } from './AutomationSettingsPanel';
@@ -52,8 +53,13 @@ export function PropertyPanel() {
     const deviceId = typeof nodeData.device_id === 'string' ? nodeData.device_id : '';
     const isDeviceNode = triggerType === 'device' || deviceId;
 
-    // For device nodes, exclude ALL properties to prevent duplicates with API-driven fields
-    if (isDeviceNode && (selectedNode.type === 'trigger' || selectedNode.type === 'condition')) {
+    // For device nodes, exclude ALL properties to prevent duplicates with API-driven fields.
+    // Same for a step kept exactly as written (bug #57): OpaqueStepFields
+    // shows it read-only, so no per-key editor for it either.
+    if (
+      (isDeviceNode && (selectedNode.type === 'trigger' || selectedNode.type === 'condition')) ||
+      isOpaqueStepData(nodeData)
+    ) {
       const allNodeProperties = Object.keys(nodeData);
       const handledSet = new Set([...baseHandled, ...allNodeProperties]);
       return handledSet;
@@ -63,7 +69,7 @@ export function PropertyPanel() {
   }, [selectedNode]);
 
   // Must be before early return — hooks can't be called conditionally.
-  const { getFieldError } = useNodeErrors(selectedNode?.id ?? '');
+  const { getFieldError, warningMessages } = useNodeErrors(selectedNode?.id ?? '');
 
   if (!selectedNode) {
     return <AutomationSettingsPanel />;
@@ -95,11 +101,27 @@ export function PropertyPanel() {
         </Button>
       </div>
 
+      {/* Warnings (bug #65): Home Assistant accepts these, so they don't
+          block saving; errors are shown next to their fields. */}
+      {warningMessages.length > 0 && (
+        <div
+          role="status"
+          className="space-y-1 rounded-md border border-warning/60 bg-warning/10 px-3 py-2 text-foreground text-xs"
+        >
+          <p className="font-medium">{t('help.nodeWarnings')}</p>
+          <ul className="list-disc space-y-0.5 pl-4">
+            {warningMessages.map((message) => (
+              <li key={message}>{message}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       <FormField label={t('labels.alias')}>
         <Input
           type="text"
           value={typeof selectedNode.data.alias === 'string' ? selectedNode.data.alias : ''}
-          onChange={(e) => handleChange('alias', e.target.value)}
+          onChange={(e) => handleChange('alias', clearedToUnset(e.target.value))}
           placeholder={t('placeholders.optionalDisplayName')}
         />
       </FormField>
@@ -140,6 +162,16 @@ export function PropertyPanel() {
           }
         />
       </div>
+      {/* `enabled:` given as a template (HA renders it when it gets there;
+          bugs #64, #69, #70): shown, since the switch alone reads "on". */}
+      {typeof selectedNode.data.enabled === 'string' && (
+        <div className="space-y-1 text-muted-foreground text-xs">
+          <p>{t('help.enabledTemplate')}</p>
+          <code className="block overflow-x-auto whitespace-pre rounded bg-muted px-2 py-1 font-mono">
+            {selectedNode.data.enabled}
+          </code>
+        </div>
+      )}
 
       <Separator />
 

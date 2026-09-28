@@ -1,11 +1,19 @@
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { HaSelector } from '@/ha';
 import {
   isEntityThresholdValue,
   isNumberThresholdValue,
   type ThresholdValue,
+  thresholdNumber,
 } from '@/lib/nativeThreshold';
 
 /** The bare (unwrapped) shape used by light's FLAT `options.threshold` — a plain number or a plain entity-id string, as opposed to the TYPED shape's `{number,...}`/`{entity}` wrapped values. */
@@ -15,7 +23,11 @@ interface ThresholdValueFieldPropsBase {
   min?: number;
   max?: number;
   step?: number;
+  /** The unit a new number gets (see lib/nativeThreshold.ts's getThresholdUnit). */
   unit?: string;
+  /** Where HA takes a number in several units, the ones it takes: a picker
+   * next to the number chooses (getThresholdUnits; #119). */
+  units?: string[];
 }
 
 interface WrappedThresholdValueFieldProps extends ThresholdValueFieldPropsBase {
@@ -50,7 +62,7 @@ type ThresholdValueFieldProps = WrappedThresholdValueFieldProps | BareThresholdV
  * there, not the widget that produced it.
  */
 export function ThresholdValueField(props: ThresholdValueFieldProps) {
-  const { value, onChange, min, max, step, unit, bare } = props;
+  const { value, onChange, min, max, step, unit, units, bare } = props;
   const { t } = useTranslation(['nodes']);
   const isEntity = bare ? typeof value === 'string' : isEntityThresholdValue(value);
   const numberValue = bare
@@ -66,10 +78,18 @@ export function ThresholdValueField(props: ThresholdValueFieldProps) {
     if (bare) {
       (onChange as BareThresholdValueFieldProps['onChange'])(n);
     } else {
-      (onChange as WrappedThresholdValueFieldProps['onChange'])({
-        number: n,
-        ...(unit ? { unit_of_measurement: unit } : {}),
-      });
+      (onChange as WrappedThresholdValueFieldProps['onChange'])(
+        thresholdNumber(n, props.value, unit, units)
+      );
+    }
+  };
+
+  // The unit the number is in: its own, or the default a new one gets.
+  const shownUnit =
+    (!bare && thresholdNumber(numberValue, props.value, unit, units).unit_of_measurement) || unit;
+  const emitUnit = (u: string) => {
+    if (!bare) {
+      (onChange as WrappedThresholdValueFieldProps['onChange'])({ number: numberValue, unit_of_measurement: u });
     }
   };
 
@@ -118,21 +138,44 @@ export function ThresholdValueField(props: ThresholdValueFieldProps) {
           }
         />
       ) : (
-        <HaSelector
-          selector={{ number: { min, max, step, mode: 'box', unit_of_measurement: unit } }}
-          value={numberValue}
-          onChange={(v) => emitNumber(typeof v === 'number' ? v : Number(v) || 0)}
-          fallback={
-            <Input
-              type="number"
-              min={min}
-              max={max}
-              step={step}
+        <div className="flex gap-1.5">
+          <div className="min-w-0 flex-1">
+            <HaSelector
+              selector={{
+                number: { min, max, step, mode: 'box', unit_of_measurement: units ? undefined : shownUnit },
+              }}
               value={numberValue}
-              onChange={(e) => emitNumber(Number(e.target.value))}
+              onChange={(v) => emitNumber(typeof v === 'number' ? v : Number(v) || 0)}
+              fallback={
+                <Input
+                  type="number"
+                  min={min}
+                  max={max}
+                  step={step}
+                  value={numberValue}
+                  onChange={(e) => emitNumber(Number(e.target.value))}
+                />
+              }
             />
-          }
-        />
+          </div>
+          {units && units.length > 1 && !bare && (
+            <Select value={shownUnit} onValueChange={emitUnit}>
+              <SelectTrigger
+                className="w-24 shrink-0"
+                aria-label={t('nodes:triggers.native.thresholdUnitLabel')}
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {units.map((u) => (
+                  <SelectItem key={u} value={u}>
+                    {u}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
+        </div>
       )}
     </div>
   );

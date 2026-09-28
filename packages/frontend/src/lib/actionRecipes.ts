@@ -192,7 +192,6 @@ function buildCategories(): EntityActionCategory[] {
   push('water_heater', 'Water heater', [
     { id: 'water_heater_turn_on', label: 'Turn on water heater', description: 'Turns on a water heater.', service: 'water_heater.turn_on' },
     { id: 'water_heater_turn_off', label: 'Turn off water heater', description: 'Turns off a water heater.', service: 'water_heater.turn_off' },
-    { id: 'water_heater_toggle', label: 'Toggle water heater', description: 'Toggles a water heater on or off.', service: 'water_heater.toggle' },
     { id: 'water_heater_set_temperature', label: 'Set water heater temperature', description: 'Sets the target temperature of a water heater.', service: 'water_heater.set_temperature' },
     { id: 'water_heater_set_operation_mode', label: 'Set water heater operation mode', description: 'Sets the operation mode of a water heater.', service: 'water_heater.set_operation_mode' },
   ]);

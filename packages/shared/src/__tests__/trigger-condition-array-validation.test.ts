@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest';
-import { ConditionNodeValidationSchema } from '../schemas/validation';
+import { ConditionNodeValidationSchema, validateNodeData } from '../schemas/validation';
 
 describe('Trigger Condition ID Array Support', () => {
   it('should accept trigger condition with single string ID', () => {
@@ -23,52 +23,30 @@ describe('Trigger Condition ID Array Support', () => {
     expect(result.success).toBe(true);
   });
 
-  it('should reject trigger condition with empty string ID', () => {
-    const triggerConditionWithEmptyString = {
-      condition: 'trigger',
-      id: '',
-    };
-
-    const result = ConditionNodeValidationSchema.safeParse(triggerConditionWithEmptyString);
-    expect(result.success).toBe(false);
-    expect(result.error?.issues).toContainEqual(
-      expect.objectContaining({
-        message: 'errors:validation.condition.triggerIdRequired',
-        path: ['id'],
-      })
-    );
+  // HA accepts a blank trigger id (checked in HA 2026.9.3, bug #65), so
+  // the editor only warns: saving isn't blocked (decision D3).
+  it('warns about, but does not block, a trigger condition with empty string ID', () => {
+    expect(validateNodeData('condition', { condition: 'trigger', id: '' })).toEqual([
+      { path: ['id'], message: 'errors:validation.condition.triggerIdEmpty', severity: 'warning' },
+    ]);
   });
 
-  it('should reject trigger condition with empty array ID', () => {
-    const triggerConditionWithEmptyArray = {
-      condition: 'trigger',
-      id: [],
-    };
-
-    const result = ConditionNodeValidationSchema.safeParse(triggerConditionWithEmptyArray);
-    expect(result.success).toBe(false);
-    expect(result.error?.issues).toContainEqual(
-      expect.objectContaining({
-        message: 'errors:validation.condition.triggerIdRequired',
-        path: ['id'],
-      })
-    );
+  // HA accepts a blank trigger id (checked in HA 2026.9.3, bug #65), so
+  // the editor only warns: saving isn't blocked (decision D3).
+  it('warns about, but does not block, a trigger condition with empty array ID', () => {
+    expect(validateNodeData('condition', { condition: 'trigger', id: [] })).toEqual([
+      { path: ['id'], message: 'errors:validation.condition.triggerIdEmpty', severity: 'warning' },
+    ]);
   });
 
-  it('should reject trigger condition with array containing empty string', () => {
-    const triggerConditionWithEmptyStringInArray = {
-      condition: 'trigger',
-      id: ['arriving', '', 'leaving'],
-    };
-
-    const result = ConditionNodeValidationSchema.safeParse(triggerConditionWithEmptyStringInArray);
-    expect(result.success).toBe(false);
-    expect(result.error?.issues).toContainEqual(
-      expect.objectContaining({
-        message: 'errors:validation.condition.triggerIdRequired',
-        path: ['id'],
-      })
-    );
+  // HA accepts a blank trigger id (checked in HA 2026.9.3, bug #65), so
+  // the editor only warns: saving isn't blocked (decision D3).
+  it('warns about, but does not block, a trigger condition with array containing empty string', () => {
+    expect(
+      validateNodeData('condition', { condition: 'trigger', id: ['arriving', '', 'leaving'] })
+    ).toEqual([
+      { path: ['id'], message: 'errors:validation.condition.triggerIdEmpty', severity: 'warning' },
+    ]);
   });
 
   it('should reject trigger condition without ID', () => {

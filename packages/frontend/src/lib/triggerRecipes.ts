@@ -65,8 +65,8 @@ export interface TriggerRecipeFields {
   /** Only set for recipes that trigger off an attribute rather than the entity's own state (e.g. climate's current_temperature, timer's last_transition). */
   attribute?: string;
   /**
-   * Purpose-specific-trigger-only: extra `options` beyond the `behavior`
-   * every one of them gets by default (see buildTriggerNodeData) — e.g.
+   * Purpose-specific-trigger-only: the `options` a new node starts with
+   * (see buildTriggerNodeData) — e.g.
    * `{ threshold: { type: 'above', value: {...} } }` (TYPED) for every
    * threshold-bearing domain's `crossed_threshold`/`level_crossed`/
    * `brightness_crossed_threshold` triggers — see lib/nativeThreshold.ts.
@@ -460,7 +460,7 @@ const SENSOR_NATIVE: Record<
   battery: {
     changedTrigger: 'battery.level_changed',
     changedDescription: 'Triggers when the battery level of one or more batteries changes.',
-    thresholdTrigger: 'battery.level_crossed',
+    thresholdTrigger: 'battery.level_crossed_threshold',
     thresholdDescription: 'Triggers after one or more battery level readings cross a threshold.',
   },
   humidity: {
@@ -1085,7 +1085,7 @@ function buildCategories(): { browsable: EntityTriggerCategory[]; lookupOnly: En
   // off the `last_transition` attribute. `timer.remaining_time_reached` was
   // entirely missing before this pass — its only option is a required
   // `options.remaining` duration (HH:MM:SS), with no `behavior`/`for` (see
-  // nativeThreshold.ts's `getTriggerBehaviorVariant`/`triggerHasFor`, and
+  // nativeThreshold.ts's `triggerOptionFields`, and
   // lib/triggerDurationField.ts for the new required-duration-option field
   // type this needed — nothing in the existing threshold/enum classifiers
   // fit, since `remaining` isn't a numeric threshold or a mode string).
@@ -1673,10 +1673,9 @@ function buildCategories(): { browsable: EntityTriggerCategory[]; lookupOnly: En
   });
 
   // --- assist_satellite ---
-  // All 4 confirmed via home-assistant.io/triggers/ index and individually
-  // verified (assist_satellite.started_listening's raw markdown source) to
-  // use the standard target + behavior (each/first/all) + for shape, no
-  // special-casing needed.
+  // HA's names are idle/listening/processing/responding (assist_satellite/
+  // trigger.py; #117 -- `started_listening` and the like never existed, so
+  // those three couldn't be saved). Labels are HA's strings.json names.
   categories.push({
     groupKey: 'assist_satellite',
     domain: 'assist_satellite',
@@ -1685,27 +1684,28 @@ function buildCategories(): { browsable: EntityTriggerCategory[]; lookupOnly: En
     recipes: [
       {
         id: 'assist_satellite_idle',
-        label: 'Assist satellite became idle',
-        description: 'Triggers when one or more Assist satellites become idle.',
+        label: 'Satellite became idle',
+        description: 'Triggers when one or more Assist satellites become idle after having processed a command.',
         fields: { trigger: 'assist_satellite.idle' },
       },
       {
-        id: 'assist_satellite_started_listening',
-        label: 'Assist satellite started listening',
-        description: 'Triggers when one or more Assist satellites start listening.',
-        fields: { trigger: 'assist_satellite.started_listening' },
+        id: 'assist_satellite_listening',
+        label: 'Satellite started listening',
+        description: 'Triggers when one or more Assist satellites start listening for a command from someone.',
+        fields: { trigger: 'assist_satellite.listening' },
       },
       {
-        id: 'assist_satellite_started_processing',
-        label: 'Assist satellite started processing',
-        description: 'Triggers when one or more Assist satellites start processing a response.',
-        fields: { trigger: 'assist_satellite.started_processing' },
+        id: 'assist_satellite_processing',
+        label: 'Satellite started processing',
+        description: 'Triggers when one or more Assist satellites start processing a command after having heard it.',
+        fields: { trigger: 'assist_satellite.processing' },
       },
       {
-        id: 'assist_satellite_started_responding',
-        label: 'Assist satellite started responding',
-        description: 'Triggers when one or more Assist satellites start responding.',
-        fields: { trigger: 'assist_satellite.started_responding' },
+        id: 'assist_satellite_responding',
+        label: 'Satellite started responding',
+        description:
+          'Triggers when one or more Assist satellites start responding to a command after having processed it, or start announcing something.',
+        fields: { trigger: 'assist_satellite.responding' },
       },
     ],
   });

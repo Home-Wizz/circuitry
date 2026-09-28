@@ -1,6 +1,6 @@
 import type { FlowNode, TriggerPlatform } from '@circuitry/shared';
 import { ArrowLeft } from 'lucide-react';
-import { useEffect } from 'react';
+import { useCallback, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { FormField } from '@/components/forms/FormField';
 import { DynamicFieldRenderer } from '@/components/ui/DynamicFieldRenderer';
@@ -17,6 +17,7 @@ import type { DeviceTrigger } from '@/hooks/useDeviceAutomation';
 import { useNodeErrors } from '@/hooks/useNodeErrors';
 import { buildTriggerNodeData, type TriggerSelection } from '@/lib/triggerNodeData';
 import type { TriggerRecipe } from '@/lib/triggerRecipes';
+import { clearedToUnset } from '@/lib/utils';
 import type { HassEntity } from '@/types/hass';
 import { getNodeDataString } from '@/utils/nodeData';
 import { DeviceTriggerFields } from './DeviceTriggerFields';
@@ -57,8 +58,15 @@ interface TriggerFieldsProps {
  * Handles platform selection and renders appropriate field configuration.
  * Extracts trigger rendering logic from PropertyPanel.
  */
-export function TriggerFields({ node, onChange, entities }: TriggerFieldsProps) {
+export function TriggerFields({ node, onChange: onChangeRaw, entities }: TriggerFieldsProps) {
   const { t } = useTranslation(['nodes']);
+  // A cleared field is stored unset, not "": the transpiler writes a
+  // trigger's "" as it is, since HA gives it a meaning (`event_type: ""`;
+  // bug #72), so a blank left in an editor field must not reach the output.
+  const onChange = useCallback(
+    (key: string, value: unknown) => onChangeRaw(key, clearedToUnset(value)),
+    [onChangeRaw]
+  );
   const { getFieldError } = useNodeErrors(node.id);
   // No fallback to 'state' here — an unset trigger is what tells us to show
   // the By target / By type picker below instead of the normal fields.
@@ -140,7 +148,7 @@ export function TriggerFields({ node, onChange, entities }: TriggerFieldsProps) 
   // back into its "no platform chosen yet" branch below.
   const handleBackToPicker = () => {
     clearAllTriggerFields();
-    onChange('trigger', '');
+    onChange('trigger', undefined);
   };
 
   // Freshly-dropped trigger nodes start with no platform set (see NodePalette's

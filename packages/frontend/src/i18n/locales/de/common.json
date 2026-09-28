@@ -94,7 +94,9 @@
     "clickNodesToAdd": "Klicken zum Hinzufügen",
     "dragToConnect": "Ziehen zum Verbinden",
     "deleteToRemove": "Löschen zum Entfernen",
-    "backspaceDeleteKey": "Rücktaste/Entf-Taste"
+    "backspaceDeleteKey": "Rücktaste/Entf-Taste",
+    "enabledTemplate": "Aktiviert über ein Template, das Home Assistant an dieser Stelle auswertet. Der Schalter ersetzt es.",
+    "nodeWarnings": "Home Assistant akzeptiert das, aber es ist vermutlich nicht so gemeint. Speichern ist trotzdem möglich."
   },
   "titles": {
     "appName": "Circuitry",

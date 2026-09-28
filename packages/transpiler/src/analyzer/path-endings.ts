@@ -40,7 +40,7 @@ export function normalizePathEndings(flow: FlowGraph): FlowGraph {
   for (const end of ends) {
     const from = byId.get(end.nodeId);
     if (!from) continue;
-    const stopId = `${end.nodeId}__path_end${end.handle === 'true' ? '_true' : ''}`;
+    const stopId = pathEndStopId(end.nodeId, end.handle);
     if (byId.has(stopId)) continue;
     const stopNode = {
       id: stopId,
@@ -58,6 +58,12 @@ export function normalizePathEndings(flow: FlowGraph): FlowGraph {
     } as FlowEdge);
   }
   return { ...withChoose, nodes, edges };
+}
+
+/** The id of the `stop` step rule 2 adds where a path ends, at `nodeId`'s
+ * `handle` (a condition's side; none for a step). */
+export function pathEndStopId(nodeId: string, handle?: string): string {
+  return `${nodeId}__path_end${handle === 'true' ? '_true' : ''}`;
 }
 
 const blockKey = (node: FlowNode | undefined): unknown =>

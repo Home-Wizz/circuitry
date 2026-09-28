@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { PositionSchema } from './base';
 import {
+  type HAAction,
   HAActionSchema,
   HAConditionSchema,
   HADelaySchema,
@@ -38,13 +39,40 @@ export type ConditionNode = z.infer<typeof ConditionNodeSchema>;
 // ACTION NODE
 // ============================================
 
+/**
+ * An opaque step's data (see OPAQUE_STEP_KEY) is the step exactly as HA
+ * accepted it, so HA checks it, not these schemas: a service call with a
+ * templated `target:` or `data:` failed the node schema and couldn't be
+ * opened (bug #89).
+ */
+const OpaqueStepDataSchema = z.custom<HAAction>((data) => isOpaqueStepData(data));
+
 export const ActionNodeSchema = z.looseObject({
   id: z.string().min(1),
   type: z.literal('action'),
   position: PositionSchema,
-  data: HAActionSchema,
+  data: z.union([OpaqueStepDataSchema, HAActionSchema]),
 });
 export type ActionNode = z.infer<typeof ActionNodeSchema>;
+
+/**
+ * An action node can hold a step Circuitry doesn't know (`scene:`, the
+ * legacy `service_template:`, or a step type Home Assistant adds later).
+ * Its `data` is then the step exactly as written plus this key set to
+ * `true`; it is written back unchanged (internal `_` keys are never
+ * written) and the canvas shows it locked. Before, such a step became
+ * `action: unknown.unknown`, which fails when run (bug #57, decision D3).
+ */
+export const OPAQUE_STEP_KEY = '_opaque';
+
+/** True if an action node's `data` holds an opaque step (see OPAQUE_STEP_KEY). */
+export function isOpaqueStepData(data: unknown): boolean {
+  return (
+    typeof data === 'object' &&
+    data !== null &&
+    (data as Record<string, unknown>)[OPAQUE_STEP_KEY] === true
+  );
+}
 
 // ============================================
 // DELAY NODE

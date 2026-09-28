@@ -7,10 +7,15 @@
  * only relocated.
  */
 import type { ConditionNode, FlowEdge, FlowNode } from '@circuitry/shared';
-import { HAConditionSchema, isHACondition } from '@circuitry/shared';
 import { generateNodeId } from '../utils/generateIds';
 import { parseActions } from './action-block-parser';
-import { createEdge, parseTriggers } from './parser-shared';
+import {
+  conditionList,
+  normalizeActionLists,
+  toList,
+  withoutNoOpSteps,
+} from './action-type-guards';
+import { createEdge, importCondition, parseTriggers } from './parser-shared';
 
 /**
  * Parse automation structure into nodes and edges (native format)
@@ -55,15 +60,13 @@ export function parseAutomationStructure(
   // Parse conditions (if present at top level - support both 'condition' and 'conditions')
   let firstActionNodeIds: string[] = [];
   const conditionData = content.conditions || content.condition;
-  // Normalize to array and check if non-empty
-  const conditions = Array.isArray(conditionData)
-    ? conditionData
-    : conditionData
-      ? [conditionData]
-      : [];
+  // One condition, a list or a template string, shorthands expanded the
+  // way HA expands them (bug #59; `or:`/`not:`/template shorthands used to
+  // be filtered out here, and the import then crashed).
+  const conditions = conditionList(conditionData);
 
   if (conditions.length > 0) {
-    const conditionResults = parseConditions(conditions, warnings, getNextNodeId);
+    const conditionResults = parseConditions(conditions, getNextNodeId);
     nodes.push(...conditionResults.nodes);
     edges.push(...conditionResults.edges);
 
@@ -108,7 +111,9 @@ export function parseAutomationStructure(
     warnings.push('No actions found in automation');
     return { nodes, edges };
   }
-  const actions = Array.isArray(actionData) ? actionData : [actionData];
+  // Every nested action list in list form, as HA reads it (bugs #62, #67),
+  // without the steps that do nothing (bug #78).
+  const actions = withoutNoOpSteps(normalizeActionLists(toList(actionData)));
   const actionResults = parseActions(actions, {
     warnings,
     previousNodeIds: firstActionNodeIds,
@@ -127,56 +132,21 @@ export function parseAutomationStructure(
  */
 export function parseConditions(
   conditions: unknown[],
-  warnings: string[],
   getNextNodeId: (type: string) => string
 ): { nodes: ConditionNode[]; edges: FlowEdge[]; outputNodeIds: string[] } {
   const nodes: ConditionNode[] = [];
   const edges: FlowEdge[] = [];
   const outputNodeIds: string[] = [];
 
-  conditions.filter(isHACondition).forEach((condition, index) => {
-    const nodeId = getNextNodeId('condition');
-    try {
-      const result = HAConditionSchema.safeParse(condition);
-      if (!result.success) {
-        warnings.push(
-          `Condition ${index} failed schema validation: ${JSON.stringify(result.error.issues)}`
-        );
-        nodes.push({
-          id: nodeId,
-          type: 'condition',
-          position: { x: 0, y: 0 },
-          data: {
-            condition: 'template',
-            alias: 'Unknown Condition',
-            value_template: JSON.stringify(condition),
-          },
-        });
-        return;
-      }
-
-      const node: ConditionNode = {
-        id: nodeId,
-        type: 'condition',
-        position: { x: 0, y: 0 },
-        data: result.data,
-      };
-      nodes.push(node);
-      outputNodeIds.push(nodeId);
-    } catch (error) {
-      warnings.push(`Failed to parse condition ${index}: ${error}`);
-      // Create a minimal valid unknown condition node
-      nodes.push({
-        id: nodeId,
-        type: 'condition',
-        position: { x: 0, y: 0 },
-        data: {
-          condition: 'template',
-          alias: 'Unknown Condition',
-          value_template: JSON.stringify(condition),
-        },
-      });
-    }
+  conditions.forEach((condition, index) => {
+    const node: ConditionNode = {
+      id: getNextNodeId('condition'),
+      type: 'condition',
+      position: { x: 0, y: 0 },
+      data: importCondition(condition, `Condition ${index}`),
+    };
+    nodes.push(node);
+    outputNodeIds.push(node.id);
   });
   return { nodes, edges, outputNodeIds };
 }

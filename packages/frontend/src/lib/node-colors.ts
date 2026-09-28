@@ -32,7 +32,7 @@ export const SELECTED_NODE_STYLE: CSSProperties = {
   outlineOffset: '2px',
 };
 
-interface NodeColorClasses {
+export interface NodeColorClasses {
   /** Card border */
   border: string;
   /** Card background tint */
@@ -149,6 +149,8 @@ export const NODE_COLORS: Record<NodeColorToken, NodeColorClasses> = {
 export const NODE_STATE_CLASSES = {
   error: 'border-destructive ring-2 ring-destructive/40',
   errorBadge: 'bg-destructive text-destructive-foreground',
+  /** Something HA accepts but that is probably a mistake; doesn't block saving (bug #65). */
+  warningBadge: 'bg-warning text-warning-foreground',
   disabledBadge: 'bg-muted-foreground text-background',
   active: 'node-active ring-4 ring-success',
   /** Trace overlay (Phase E) — real HA run, distinct from validation `error`/live `active`. */

@@ -97,6 +97,7 @@
       "thresholdDescription": "Helligkeitsprozentsatz, auf den der Trigger achtet.",
       "thresholdModeNumber": "Zahl",
       "thresholdModeEntity": "Entität",
+      "thresholdUnitLabel": "Einheit",
       "thresholdTypeLabel": "Schwellenwerttyp",
       "thresholdTypes": {
         "any": "Beliebige Änderung",
@@ -118,8 +119,20 @@
         "zone": "Zone",
         "eventType": "Ereignistyp(en)"
       },
-      "enumFieldDescription": "Modus-Wert(e), auf die geachtet werden soll — nur die auf dem Zielgerät verfügbaren Modi sind gültig; die genauen Werte finden Sie in den Geräteeinstellungen. Leer lassen, um bei jeder Moduländerung auszulösen.",
-      "enumFieldPlaceholder": "Modus hinzufügen...",
+      "enumFieldDescriptions": {
+        "hvacMode": "HVAC-Modus/-Modi, auf die geachtet werden soll — nur die vom Zielgerät unterstützten Modi sind gültig; die genauen Werte finden Sie in den Geräteeinstellungen.",
+        "mode": "Modus-Wert(e), auf die geachtet werden soll — nur die vom Zielgerät unterstützten Modi sind gültig; die genauen Werte finden Sie in den Geräteeinstellungen. Leer lassen, um bei jeder Moduländerung auszulösen.",
+        "operationMode": "Betriebsmodus/-modi, auf die geachtet werden soll — nur die vom Ziel-Warmwasserbereiter unterstützten Modi sind gültig; die genauen Werte finden Sie in den Geräteeinstellungen.",
+        "zone": "Die zu überwachende Zone, z. B. zone.home.",
+        "eventType": "Ereignistyp(en), auf die geachtet werden soll — die Ziel-Ereignis-Entität listet die Typen auf, die sie auslösen kann."
+      },
+      "enumFieldPlaceholders": {
+        "hvacMode": "Modus hinzufügen...",
+        "mode": "Modus hinzufügen...",
+        "operationMode": "Modus hinzufügen...",
+        "zone": "zone.home",
+        "eventType": "Ereignistyp hinzufügen..."
+      },
       "durationFieldLabels": {
         "remaining": "Verbleibende Zeit"
       },
@@ -138,6 +151,12 @@
       "offsetTypeBefore": "Vorher",
       "offsetTypeAfter": "Nachher",
       "moonPhaseLabel": "Mondphase",
+      "periodLabel": "Zeitraum",
+      "periods": {
+        "any": "Beliebig",
+        "morning": "Morgens",
+        "evening": "Abends"
+      },
       "moonPhases": {
         "any": "Beliebig",
         "new_moon": "Neumond",
@@ -315,10 +334,23 @@
         "hvacMode": "HVAC-Modus(e)",
         "mode": "Modus/Modi",
         "operationMode": "Betriebsmodus(e)",
-        "option": "Option(en)"
+        "option": "Option(en)",
+        "zone": "Zone(n)"
       },
-      "enumFieldDescription": "Zu prüfende(r) Modus-/Optionswert(e) — nur die auf dem Zielgerät verfügbaren Modi sind gültig; die genauen Werte finden Sie in den Geräteeinstellungen.",
-      "enumFieldPlaceholder": "Modus oder Option hinzufügen...",
+      "enumFieldDescriptions": {
+        "hvacMode": "Zu prüfende(r) HVAC-Modus/-Modi — nur die vom Zielgerät unterstützten Modi sind gültig; die genauen Werte finden Sie in den Geräteeinstellungen.",
+        "mode": "Zu prüfende(r) Modus-Wert(e) — nur die vom Zielgerät unterstützten Modi sind gültig; die genauen Werte finden Sie in den Geräteeinstellungen.",
+        "operationMode": "Zu prüfende(r) Betriebsmodus/-modi — nur die vom Ziel-Warmwasserbereiter unterstützten Modi sind gültig; die genauen Werte finden Sie in den Geräteeinstellungen.",
+        "option": "Zu prüfende Option(en) — die eigenen Optionen der Ziel-Auswahl.",
+        "zone": "Die zu prüfende(n) Zone(n), z. B. zone.home."
+      },
+      "enumFieldPlaceholders": {
+        "hvacMode": "Modus hinzufügen...",
+        "mode": "Modus hinzufügen...",
+        "operationMode": "Modus hinzufügen...",
+        "option": "Option hinzufügen...",
+        "zone": "zone.home"
+      },
       "singleValueLabel": "Wert",
       "singleValueDescription": "Der exakte Textwert, mit dem verglichen werden soll.",
       "bareBooleanNotice": "\"{{conditionType}}\" ist eine einfache Ja/Nein-Prüfung ohne weitere Einstellungen — sie wird komplett eigenständig erfüllt oder nicht erfüllt, daher bleibt dieser Bereich absichtlich leer."
@@ -481,7 +513,10 @@
     "repeatForEachModeList": "Liste",
     "repeatForEachModeTemplate": "Vorlage",
     "continueOnError": "Bei Fehler fortfahren",
-    "continueOnErrorDescription": "Wenn dieser Schritt fehlschlägt, wird der Rest der Sequenz trotzdem ausgeführt, anstatt die Automatisierung oder das Skript anzuhalten."
+    "continueOnErrorDescription": "Wenn dieser Schritt fehlschlägt, wird der Rest der Sequenz trotzdem ausgeführt, anstatt die Automatisierung oder das Skript anzuhalten.",
+    "opaqueStepTitle": "YAML-Schritt",
+    "opaqueStepKept": "Unverändert übernommen",
+    "opaqueStepPanelDescription": "Circuitry kann diese Art von Schritt nicht bearbeiten, daher wird er unverändert gespeichert. Ändere ihn im YAML-Editor von Home Assistant oder lösche ihn hier."
   },
   "fieldOptions": {
     "weekday": {
@@ -689,7 +724,7 @@
   "wait": {
     "nMoreTriggers_one": "+{{count}} weiterer Auslöser",
     "nMoreTriggers_other": "+{{count}} weitere Auslöser",
-    "timeoutLabel": "Zeitüberschreitung:",
+    "timeoutLabel": "Zeitüberschreitung",
     "waitType": "Wartetyp",
     "waitTypeDescription": "Wählen Sie, worauf gewartet werden soll.",
     "types": {
@@ -701,9 +736,11 @@
     "triggersHeading": "Auslöser",
     "noTriggers": "Noch keine Auslöser hinzugefügt.",
     "addTrigger": "Auslöser hinzufügen",
-    "timeoutDescription": "Maximale Wartezeit vor dem Fortfahren. Leer lassen für unbegrenztes Warten.",
+    "timeoutDescription": "Aus: so lange warten wie nötig. An: nach der unten angegebenen Zeit aufgeben.",
     "continueOnTimeout": "Bei Zeitüberschreitung fortfahren",
-    "continueOnTimeoutDescription": "Wenn aktiviert, fährt die Automatisierung fort, wenn die Zeitüberschreitung abläuft. Wenn deaktiviert, stoppt die Automatisierung."
+    "continueOnTimeoutDescription": "Wenn aktiviert, fährt die Automatisierung fort, wenn die Zeitüberschreitung abläuft. Wenn deaktiviert, stoppt die Automatisierung.",
+    "timeoutDurationLabel": "Aufgeben nach",
+    "timeoutDurationDescription": "0 gibt sofort auf."
   },
   "deviceCondition": {
     "domainLabel": "Domain",
@@ -975,5 +1012,11 @@
     "eco": "Eco",
     "performance": "Leistung",
     "high_demand": "Hoher Bedarf"
+  },
+  "conventions": {
+    "and": "UND",
+    "andHint": "Mit der Bedingung davor verkettet: Schlägt diese fehl, läuft deren Sonst-Zweig.",
+    "stopsHere": "Endet hier",
+    "stopsHereHint": "Hier ist nichts verbunden, daher endet die Automation an dieser Stelle."
   }
 }

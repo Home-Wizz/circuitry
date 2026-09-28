@@ -37,9 +37,10 @@ const TRIGGER_ENUM_FIELDS: Record<string, TriggerEnumField> = {
   // before this, so NativeTriggerFields.tsx rendered target+behavior+for
   // but silently dropped the actual HVAC mode(s) being watched for.
   'climate.hvac_mode_changed': { optionsKey: 'hvac_mode', labelKey: 'hvacMode', required: true },
-  // home-assistant.io/triggers/humidifier.mode_changed/: "mode string — the
-  // mode(s) that should fire the trigger; omit to fire on any mode change."
-  'humidifier.mode_changed': { optionsKey: 'mode', labelKey: 'mode', required: false },
+  // humidifier.mode_changed: HA's docs say "omit to fire on any mode
+  // change", but its schema requires a non-empty `mode` list (#122: checked
+  // with HA 2026.9.3's MODE_CHANGED_TRIGGER_SCHEMA).
+  'humidifier.mode_changed': { optionsKey: 'mode', labelKey: 'mode', required: true },
   // home-assistant.io/triggers/water_heater.operation_mode_changed/:
   // "operation_mode string | list Required — Only modes supported by the
   // targeted water heater are valid."

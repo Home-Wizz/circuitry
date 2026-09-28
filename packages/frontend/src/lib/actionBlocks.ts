@@ -187,7 +187,8 @@ export const ACTION_BLOCKS: ActionBlock[] = [
     // to an inline `condition:` guard step (see native.ts's buildCondition
     // usage for non-branching condition nodes) — no separate action-side
     // representation needed.
-    commit: { kind: 'node', type: 'condition', data: { condition: 'state', entity_id: '', state: '' } },
+    // `state` starts unset, not "" (bug #65; see conditionRecipes.ts).
+    commit: { kind: 'node', type: 'condition', data: { condition: 'state', entity_id: '' } },
   },
   {
     key: 'fire_event',
@@ -202,7 +203,11 @@ export const ACTION_BLOCKS: ActionBlock[] = [
       kind: 'node',
       type: 'action',
       data: {
-        event: '',
+        // No event name yet (not ""): HA accepts `event: ""` and the
+        // transpiler writes it, so an unnamed event would save with only a
+        // warning (the trigger/action audit after bug #65). Unset, it stays
+        // an error until named, as before.
+        event: undefined,
         event_data: {},
         service: undefined,
         target: undefined,

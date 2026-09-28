@@ -211,6 +211,21 @@ function dropNoOpSteps(program: BProgram): BProgram {
   const out: BProgram = [];
   for (const step of program) {
     if (step.k === 'if' && step.then.length === 0 && step.else.length === 0) continue;
+    // An if whose condition is decided -- all its conditions disabled (HA
+    // counts a disabled condition as removed, so the list passes) -- runs
+    // one branch, always. The graph side reads such a node's branch as the
+    // rest of the flow (`if (disabled) -> ... -> after`), native writes it
+    // as a sibling (`if (disabled) then [...]`, then `after`); both are the
+    // same run. Splicing the branch in is safe for `variables` too: HA
+    // assigns a variable in the nearest scope that defines it, else at the
+    // top level (script_variables.py), so an if's branch has no scope of
+    // its own. Left unhandled, a disabled `sequence:` group holding a
+    // condition failed the gate and fell back to the state machine
+    // (found 2026-09-27 in a real-HA fixture run).
+    if (step.k === 'if' && step.cond.op === 'const') {
+      out.push(...(step.cond.value ? step.then : step.else));
+      continue;
+    }
     if (step.k === 'parallel') {
       const branches = step.branches.filter((b) => b.length > 0);
       if (branches.length === 0) continue;

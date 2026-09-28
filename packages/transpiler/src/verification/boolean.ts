@@ -1,3 +1,5 @@
+import { stripDottedOnlyConditionFields } from '../utils/conditionFields';
+
 /**
  * Canonical boolean-equivalence engine for Home Assistant condition objects.
  *
@@ -101,7 +103,14 @@ function stripCosmeticFields(value: unknown): unknown {
     return value.map(stripCosmeticFields);
   }
   if (value && typeof value === 'object') {
-    const entries = Object.entries(value as Record<string, unknown>).filter(
+    // A condition's keys HA refuses (a stray target/options) mean nothing:
+    // read it without them, as the strategies write it (#120).
+    const { condition, ...rest } = value as Record<string, unknown>;
+    const fields =
+      typeof condition === 'string'
+        ? { condition, ...stripDottedOnlyConditionFields(condition, rest) }
+        : (value as Record<string, unknown>);
+    const entries = Object.entries(fields).filter(
       ([key, v]) => key !== 'alias' && !key.startsWith('_') && !(key === 'enabled' && v === true)
     );
     const out: Record<string, unknown> = {};
@@ -164,7 +173,10 @@ export function parseConditionExpr(raw: unknown, context: 'and' | 'or' = 'and'):
   if (typeof raw === 'string') {
     // Bare-template shorthand: a `conditions:`/`if:` entry can be a plain
     // template string instead of a `condition: template` object.
-    return { op: 'leaf', key: normalizeAtomicCondition({ condition: 'template', value_template: raw }) };
+    return {
+      op: 'leaf',
+      key: normalizeAtomicCondition({ condition: 'template', value_template: raw }),
+    };
   }
   if (Array.isArray(raw)) {
     if (raw.length === 1) return parseConditionExpr(raw[0], context);
@@ -178,7 +190,7 @@ export function parseConditionExpr(raw: unknown, context: 'and' | 'or' = 'and'):
     return { op: 'and', args: raw.map((r) => parseConditionExpr(r, 'and')) };
   }
   if (typeof raw === 'object') {
-    const obj = raw as Record<string, unknown>;
+    const obj = expandShorthand(raw as Record<string, unknown>);
 
     // A disabled condition -- of ANY type, including a whole and:/or:/not:
     // group, not just a leaf -- "behaves as if it were removed" (see this
@@ -211,6 +223,35 @@ export function parseConditionExpr(raw: unknown, context: 'and' | 'or' = 'and'):
     return { op: 'leaf', key: normalizeAtomicCondition(obj) };
   }
   return { op: 'const', value: true };
+}
+
+/** Keys HA's shorthand condition schemas allow beside the shorthand key. */
+const SHORTHAND_BASE_KEYS = new Set(['alias', 'enabled', 'note']);
+
+/** `{and|or|not: [...]}` with at most alias/enabled/note beside it (HA's
+ * expand_condition_shorthand). The gate's own copy of the parser's rule. */
+export function isConditionShorthand(obj: Record<string, unknown>): boolean {
+  if ('conditions' in obj || 'condition' in obj) return false;
+  return ['and', 'or', 'not'].some(
+    (key) => key in obj && Object.keys(obj).every((k) => k === key || SHORTHAND_BASE_KEYS.has(k))
+  );
+}
+
+/** HA's condition shorthands expanded: `{and|or|not: [...]}` and
+ * `{condition: [...]}` (a list is an and). They used to be read as one
+ * unknown leaf, which never equals the parser's expanded form (a checker
+ * gap the hard-case corpus showed, 2026-09-27). */
+function expandShorthand(obj: Record<string, unknown>): Record<string, unknown> {
+  if (isConditionShorthand(obj)) {
+    const key = ['and', 'or', 'not'].find((k) => k in obj) as string;
+    const { [key]: inner, ...rest } = obj;
+    return { ...rest, condition: key, conditions: inner };
+  }
+  if (Array.isArray(obj.condition)) {
+    const { condition: inner, ...rest } = obj;
+    return { ...rest, condition: 'and', conditions: inner };
+  }
+  return obj;
 }
 
 function asArray(value: unknown): unknown[] {

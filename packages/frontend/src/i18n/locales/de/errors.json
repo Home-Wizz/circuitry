@@ -12,6 +12,12 @@
     "node": {
       "duplicateId": "ID bereits vergeben — muss innerhalb der Automatisierung eindeutig sein"
     },
+    "native": {
+      "thresholdRequired": "Schwellenwert festlegen (Home Assistant lehnt dies ohne einen ab)",
+      "optionRequired": "Hier fehlt ein Wert: Home Assistant lehnt dies ohne einen ab",
+      "targetRequired": "Ein Ziel hinzufügen (Home Assistant lehnt dies ohne eines ab)",
+      "targetEmpty": "Keine Ziele ausgewählt, daher löst dies nie aus bzw. trifft nie zu"
+    },
     "trigger": {
       "platformRequired": "Auslöser-Typ ist erforderlich",
       "entityRequired": {
@@ -31,14 +37,29 @@
       "tagIdRequired": "Mindestens eine Tag-ID ist erforderlich",
       "sourceRequired": "Quelle ist erforderlich",
       "geoEventRequired": "Ereignis (Betreten/Verlassen) ist erforderlich",
-      "commandRequired": "Mindestens ein Satz ist erforderlich"
+      "commandRequired": "Mindestens ein Satz ist erforderlich",
+      "timePatternRequired": "Stunden, Minuten oder Sekunden festlegen (Home Assistant braucht mindestens eines)",
+      "calendarRequired": "Kalender ist erforderlich",
+      "entityEmpty": "Keine Entitäten ausgewählt, daher löst dies nie aus",
+      "boundRequired": "Über, Unter oder beides angeben (Home Assistant braucht mindestens eines)",
+      "boundEmpty": "Dieses Feld ist leer: eine Zahl oder Entität angeben oder es leeren (Home Assistant lehnt einen leeren Wert ab)",
+      "eventTypeEmpty": "Der Ereignistyp ist leer, daher löst nur ein Ereignis ohne Namen dies aus",
+      "timeEmpty": "Keine Uhrzeiten angegeben, daher löst dies nie aus",
+      "webhookIdEmpty": "Die Webhook-ID ist leer",
+      "templateEmpty": "Das Template ist leer, daher löst dies nie aus",
+      "tagIdEmpty": "Die Tag-ID ist leer, daher löst nur ein Tag mit leerer ID dies aus",
+      "sourceEmpty": "Die Quelle ist leer, daher löst keine Geolocation-Entität dies aus"
     },
     "action": {
       "serviceOrEventRequired": "Dienst (z.B. light.turn_on) oder Ereignisname ist erforderlich",
-      "serviceFormat": "Dienst muss im Format domain.dienst angegeben werden (z.B. light.turn_on)"
+      "serviceFormat": "Dienst muss im Format domain.dienst angegeben werden (z.B. light.turn_on)",
+      "fieldEmpty": "Ein Feld, das diese Aktion braucht, ist leer: Home Assistant speichert sie, aber der Schritt schlägt beim Ausführen fehl",
+      "eventEmpty": "Der Ereignisname ist leer, daher wird ein Ereignis ohne Namen ausgelöst"
     },
     "wait": {
-      "templateOrTriggerRequired": "Warte-Knoten erfordert eine Vorlagenbedingung oder einen Auslöser. Verwenden Sie einen Verzögerungs-Knoten für einfache zeitbasierte Pausen."
+      "templateOrTriggerRequired": "Warte-Knoten erfordert eine Vorlagenbedingung oder einen Auslöser. Verwenden Sie einen Verzögerungs-Knoten für einfache zeitbasierte Pausen.",
+      "templateEmpty": "Das Template ist leer, daher endet dieses Warten erst mit dem Timeout",
+      "triggersEmpty": "Keine Auslöser angegeben, daher endet dieses Warten erst mit dem Timeout"
     },
     "delay": {
       "valueRequired": "Verzögerungswert ist erforderlich"
@@ -55,10 +76,21 @@
       "templateRequired": "Vorlage ist erforderlich",
       "zoneRequired": "Zone ist erforderlich",
       "deviceRequired": "Gerät ist erforderlich",
-      "groupConditionsRequired": "Mindestens eine Bedingung muss definiert werden"
+      "groupConditionsRequired": "Mindestens eine Bedingung muss definiert werden",
+      "stateEmpty": "Der Zustand ist leer: Das trifft nur auf eine Entität mit leerem Zustand zu",
+      "templateEmpty": "Das Template ist leer, daher ist diese Bedingung nie erfüllt",
+      "triggerIdEmpty": "Die Auslöser-ID ist leer: Das trifft nur auf einen Auslöser mit leerer ID zu",
+      "groupEmpty": "Diese Gruppe hat keine Bedingungen (und/nicht sind dann immer erfüllt, oder nie)",
+      "entityEmpty": "Keine Entitäten ausgewählt",
+      "boundRequired": "Über, Unter oder beides angeben (Home Assistant braucht mindestens eines)",
+      "boundEmpty": "Dieses Feld ist leer: eine Zahl oder Entität angeben oder es leeren (Home Assistant lehnt einen leeren Wert ab)",
+      "timeRequired": "Nach, Vor oder Wochentage angeben (Home Assistant braucht mindestens eines)",
+      "timeBlank": "Dieses Feld ist leer: einen Wert angeben oder es leeren (Home Assistant lehnt einen leeren Wert ab)",
+      "weekdayEmpty": "Keine Wochentage ausgewählt, daher ist diese Bedingung nie erfüllt"
     },
     "setVariables": {
-      "atLeastOne": "Mindestens eine Variable muss definiert werden"
+      "atLeastOne": "Mindestens eine Variable muss definiert werden",
+      "empty": "Keine Variablen angegeben, daher bewirkt dieser Schritt nichts"
     }
   },
   "connection": {

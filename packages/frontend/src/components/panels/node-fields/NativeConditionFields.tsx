@@ -12,19 +12,22 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { HaSelect } from '@/ha';
+import { useNativeDescription } from '@/hooks/useNativeDescriptions';
 import { getConditionEnumField, hasConditionSingleValueField } from '@/lib/conditionEnumField';
+import { MOON_PHASES } from '@/lib/moonPhases';
+import { resolveOptionFields, resolveTargetless, resolveThresholdUnits } from '@/lib/nativeDescriptions';
 import {
-  conditionHasFor,
-  getConditionBehaviorVariant,
   getConditionThresholdShape,
   getThresholdRange,
   getThresholdUnit,
   type SimpleThreshold,
   type TypedThreshold,
 } from '@/lib/nativeThreshold';
+import { getSunPeriodField } from '@/lib/sunPeriodField';
 import { getNodeDataObject, toStringArray } from '@/utils/nodeData';
 import { DurationField, type DurationValue } from './DurationField';
 import { NativeTargetField, type TargetValue } from './NativeTargetField';
+import { OptionSelectField } from './OptionSelectField';
 import { SimpleThresholdField } from './SimpleThresholdField';
 import { ThresholdTypeField } from './ThresholdTypeField';
 import { ThresholdValueField } from './ThresholdValueField';
@@ -34,19 +37,10 @@ import { ThresholdValueField } from './ThresholdValueField';
  * `light.is_brightness`, `humidity.is_value`, `lock.is_locked`) — mirrors
  * NativeTriggerFields.tsx's target/threshold editor (sharing
  * NativeTargetField, ThresholdTypeField, ThresholdValueField and
- * SimpleThresholdField per CLAUDE.md's DRY mandate), but conditions
- * uniformly use `behavior: any|all` (triggers vary by type — see
- * NativeTriggerFields.tsx). `behavior` and `for` turned out to apply to
- * nearly EVERY dotted condition (a catalog-wide audit found them on plain
- * boolean ones too — `lock.is_locked`, `fan.is_on`, `motion.is_detected`,
- * ... — not just threshold-bearing types), so both default to shown. An
- * earlier pass here also excluded light's is_on/is_off/is_brightness and the
- * whole air_quality domain as supposed "confirmed" exceptions to `for` —
- * re-verified directly against each domain's strings.json (the literal UI
- * field schema HA ships) and found to be wrong for all of them; see
- * lib/nativeThreshold.ts's `conditionHasFor` doc comment for the correction.
- * The only real exceptions left are `sun.*` (handled below) and — on the
- * trigger side only — `light.brightness_changed`.
+ * SimpleThresholdField per CLAUDE.md's DRY mandate). Which conditions take
+ * `behavior` (any/all) and `for` is lib/nativeDescriptions.ts's reading:
+ * what the connected HA describes, else tables checked against HA 2026.9.3's
+ * own validators (#117).
  *
  * Before this component existed, ConditionFields.tsx had no branch at all
  * for dotted condition types — they rendered zero fields.
@@ -98,21 +92,19 @@ export function NativeConditionFields({ node, onChange, conditionType }: NativeC
   const unit = getThresholdUnit(conditionType);
   const range = getThresholdRange(conditionType);
   const isSunSingleton = conditionType.startsWith('sun.');
-  // Uniform `any`/`all` across every domain audited this session — kept as
-  // a function call (not a hardcoded literal) for symmetry with
-  // NativeTriggerFields.tsx and in case a future HA release adds an
-  // exception. Sun conditions have no `behavior` at all (singleton target).
-  const behaviorVariant = isSunSingleton ? 'none' : getConditionBehaviorVariant(conditionType);
-  const showBehavior = behaviorVariant !== 'none';
-  // `for` turned out to be the rule, not the exception, across the whole
-  // catalog (see nativeThreshold.ts's catalog-wide audit doc comment) — only
-  // light's is_on/is_off/is_brightness and the whole air_quality domain
-  // (boolean + numeric) confirmed to lack it, plus every sun.* singleton.
-  const showFor = !isSunSingleton && conditionHasFor(conditionType);
+  // Which conditions take `behavior` (any/all) and `for`: what the
+  // connected HA describes, else the tables (lib/nativeDescriptions.ts).
+  const description = useNativeDescription('condition', conditionType);
+  const { behavior: behaviorField, hasFor: showFor } = resolveOptionFields(
+    'condition',
+    conditionType,
+    description
+  );
   const isTwilight =
     conditionType === 'sun.is_morning_twilight' || conditionType === 'sun.is_evening_twilight';
   const enumField = getConditionEnumField(conditionType);
   const isSingleValue = hasConditionSingleValueField(conditionType);
+  const periodField = getSunPeriodField(conditionType);
   // Bare-boolean sun singletons (`sun.is_night`/`is_up`/`is_set`/
   // `is_ascending`/`is_descending`) are the one case where every field below
   // is suppressed — `!isSunSingleton` guards target, and behavior/for are
@@ -127,7 +119,8 @@ export function NativeConditionFields({ node, onChange, conditionType }: NativeC
   // selected. Since none of the field cases above the `for` block apply
   // when this is true, checking their inputs before render would just
   // re-derive the same conditions those JSX blocks already gate on.
-  const isBareBoolean = isSunSingleton && shape === 'none' && !enumField && !isSingleValue && !isTwilight;
+  const isBareBoolean =
+    isSunSingleton && shape === 'none' && !enumField && !isSingleValue && !isTwilight && !periodField;
 
   const updateOptions = (patch: Partial<NativeConditionOptions>) =>
     onChange('options', { ...options, ...patch });
@@ -166,15 +159,17 @@ export function NativeConditionFields({ node, onChange, conditionType }: NativeC
         </p>
       )}
 
-      {!isSunSingleton && <NativeTargetField target={target} onChange={(v) => onChange('target', v)} />}
+      {!resolveTargetless('condition', conditionType, description) && (
+        <NativeTargetField target={target} onChange={(v) => onChange('target', v)} />
+      )}
 
-      {showBehavior && (
+      {behaviorField && (
         <FormField
           label={t('nodes:conditions.native.behaviorLabel')}
           description={t('nodes:conditions.native.behaviorDescription')}
         >
           <RadioCardGroup
-            value={options.behavior ?? 'all'}
+            value={options.behavior ?? behaviorField.default}
             onChange={(v) => updateOptions({ behavior: v })}
             options={[
               {
@@ -226,6 +221,7 @@ export function NativeConditionFields({ node, onChange, conditionType }: NativeC
           forValue={showFor ? (options.for ?? {}) : undefined}
           onForChange={showFor ? (v) => updateOptions({ for: v }) : undefined}
           unit={unit}
+          units={resolveThresholdUnits(conditionType, description)}
           min={range?.min}
           max={range?.max}
         />
@@ -234,14 +230,38 @@ export function NativeConditionFields({ node, onChange, conditionType }: NativeC
       {enumField && (
         <FormField
           label={t(`nodes:conditions.native.enumFieldLabels.${enumField.labelKey}`)}
-          description={t('nodes:conditions.native.enumFieldDescription')}
+          description={t(`nodes:conditions.native.enumFieldDescriptions.${enumField.labelKey}`)}
         >
           <IdList
             values={toStringArray(options[enumField.optionsKey])}
             onChange={(vals) => updateOptions({ [enumField.optionsKey]: vals })}
-            placeholder={t('nodes:conditions.native.enumFieldPlaceholder')}
+            placeholder={t(`nodes:conditions.native.enumFieldPlaceholders.${enumField.labelKey}`)}
           />
         </FormField>
+      )}
+
+      {conditionType === 'moon.is_phase' && (
+        <OptionSelectField
+          label={t('nodes:triggers.native.moonPhaseLabel')}
+          value={typeof options.phase === 'string' ? options.phase : undefined}
+          options={MOON_PHASES.map((phase) => ({
+            value: phase,
+            label: t(`nodes:triggers.native.moonPhases.${phase}`),
+          }))}
+          onChange={(phase) => updateOptions({ phase })}
+        />
+      )}
+
+      {periodField && (
+        <OptionSelectField
+          label={t('nodes:triggers.native.periodLabel')}
+          value={typeof options.period === 'string' ? options.period : periodField.default}
+          options={periodField.values.map((period) => ({
+            value: period,
+            label: t(`nodes:triggers.native.periods.${period}`),
+          }))}
+          onChange={(period) => updateOptions({ period })}
+        />
       )}
 
       {isSingleValue && (

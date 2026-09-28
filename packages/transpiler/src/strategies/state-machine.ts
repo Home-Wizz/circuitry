@@ -1,19 +1,15 @@
 import type {
-  ActionNode,
   ConditionNode,
-  DelayNode,
   FlowEdge,
   FlowGraph,
   FlowNode,
-  SetVariablesNode,
   TriggerNode,
-  WaitNode,
 } from '@circuitry/shared';
-import { isDeviceAction, isStartNode } from '@circuitry/shared';
+import { isStartNode } from '@circuitry/shared';
 import { findBackEdges, type TopologyAnalysis } from '../analyzer/topology';
 import { fanOutHash } from '../utils/fanOutHash';
-import { BaseStrategy, type HAYamlOutput } from './base';
-import { NativeStrategy, stripDottedOnlyConditionFields } from './native';
+import { BaseStrategy, bareParallelBranch, type HAYamlOutput } from './base';
+import { NativeStrategy } from './native';
 
 /**
  * State Machine strategy for complex flows with cycles, cross-links, or converging paths
@@ -35,8 +31,8 @@ export class StateMachineStrategy extends BaseStrategy {
     'Generates state machine YAML for complex flows with cycles or cross-links';
 
   // Lazily constructed, reused for the lifetime of this strategy instance.
-  // Every method called on it (findConvergencePointForBranches,
-  // buildActionsUntilNode, buildActionsFromEntryPoint) does its own
+  // Every method called on it (findConvergenceSetForBranches,
+  // buildParallelBranchesForTargets) does its own
   // prepareForTraversal() internally, so sharing one instance across many
   // generate() calls -- this strategy is itself reused across many
   // transpile() calls by FlowTranspiler, see its `strategies` array -- is
@@ -433,76 +429,33 @@ export class StateMachineStrategy extends BaseStrategy {
       const convergenceSet = nativeSubBuilder.findConvergenceSetForBranches(flow, targets);
       const convergenceBoundSet = convergenceSet.length > 0 ? new Set(convergenceSet) : null;
 
-      // Build parallel action calls for all target nodes
-      const parallelActions = targets.map((targetId) => {
-        const targetNode = flow.nodes.find((n) => n.id === targetId);
-        if (!targetNode) {
-          return { service: 'system_log.write', data: { message: `Unknown node: ${targetId}` } };
-        }
-
-        // When the branches reconverge, every branch -- action or
-        // otherwise -- must stop exactly at the convergence boundary, so
-        // its own continuation isn't duplicated inline AND skipped via the
-        // current_node jump below. buildActionsUntilNode (built on the
-        // same tree-walker as buildActionsFromEntryPoint) handles a lone
-        // action node just as well as a whole condition/delay/wait chain.
-        if (convergenceBoundSet) {
-          const branchActions = nativeSubBuilder.buildActionsUntilNode(
-            flow,
-            targetId,
-            convergenceBoundSet
-          );
-          if (branchActions.length === 0) {
-            return { service: 'system_log.write', data: { message: `Node: ${targetId}` } };
-          }
-          return branchActions.length === 1 ? branchActions[0] : { sequence: branchActions };
-        }
-
-        // No shared continuation -- these branches genuinely end
-        // independently.
-        //
-        // Item 4 (2026-09-26): an action branch used to be rendered as just
-        // its own service call ("a lone action node stays a single step"),
-        // dropping whatever followed it in the branch -- the rest of a
-        // sequence, or the loop the action opens (an until whose body
-        // starts with it). The gate refused every such automation. An
-        // action branch is inlined like every other kind below;
-        // buildActionsFromEntryPoint still renders a lone action as that
-        // one step. (buildFanOutFromTargets, the mid-flow equivalent, never
-        // had the special case.)
-
-        // Other kinds of branch (condition, delay, wait, set_variables, a
-        // whole Choose/If/Else chain, ...) used to get replaced with a throwaway
-        // `system_log.write` placeholder and an immediate jump to END —
-        // silently discarding the real branch. That's the corruption behind
-        // the "Template placeholder" reports: a trigger with 2+ direct
-        // targets is exactly what a hand-built Choose/If block looks like
-        // before its topology qualifies for the plain tree-shaped
-        // generator, and every one of those branches starts with a
-        // condition, not an action.
-        //
-        // Fix: inline this branch as its own self-contained native action
-        // sequence (NativeStrategy.buildActionsFromEntryPoint, reusing the
-        // exact tree-walker the plain-tree generator itself uses — see its
-        // doc comment) instead of stubbing it. Each parallel branch is
-        // necessarily its own independent, non-cyclic subtree here (no
-        // convergenceId was found above) — nothing downstream of it needs
-        // to interact with the shared current_node state machine, since
-        // this block jumps current_node to 'END' once every branch
-        // finishes (see below).
-        const branchActions = nativeSubBuilder.buildActionsFromEntryPoint(flow, targetId);
-        if (branchActions.length === 0) {
-          // Entry node itself didn't resolve to anything (shouldn't happen
-          // given targetNode was found above, but keep the graph from ever
-          // silently vanishing a branch without any actions at all).
-          return { service: 'system_log.write', data: { message: `Node: ${targetId}` } };
-        }
-        // A single step doesn't need an extra sequence-wrapper level inside
-        // the parallel block, matching NativeStrategy's own flattening for
-        // this exact shape (see its "flattenedBranches" trigger-fan-out
-        // case).
-        return branchActions.length === 1 ? branchActions[0] : { sequence: branchActions };
-      });
+      // Build parallel action calls for all target nodes.
+      //
+      // When the branches reconverge, every branch -- action or otherwise --
+      // must stop exactly at the convergence boundary, so its own
+      // continuation isn't duplicated inline AND skipped via the
+      // current_node jump below. With no shared continuation, the branches
+      // genuinely end independently, and each is inlined as its own
+      // self-contained native action sequence (the exact tree-walker the
+      // plain-tree generator uses): nothing downstream of it needs the
+      // shared current_node state, since this block jumps current_node to
+      // 'END' once every branch finishes.
+      //
+      // History: an action branch used to be rendered as just its own
+      // service call, dropping whatever followed it in the branch (item 4,
+      // 2026-09-26); other kinds of branch (condition, delay, wait, a whole
+      // Choose/If/Else chain, ...) used to become a throwaway
+      // `system_log.write` placeholder and an immediate jump to END -- the
+      // "Template placeholder" reports.
+      //
+      // Branches that meet again before the boundary when not all of them
+      // do are one branch, a parallel of their own followed by where they
+      // meet (#99, NativeStrategy.buildParallelBranches).
+      const parallelActions = nativeSubBuilder
+        .buildParallelBranchesForTargets(flow, targets, convergenceBoundSet)
+        .map(({ targets: branchTargets, steps }) =>
+          this.parallelBranchStep(flow, branchTargets, steps)
+        );
 
       // 2+ sibling convergence nodes (bug #12): current_node must stay a
       // single scalar dispatch value, so the second-level fan-out among
@@ -554,13 +507,7 @@ export class StateMachineStrategy extends BaseStrategy {
   private extractTriggers(flow: FlowGraph): unknown[] {
     return flow.nodes
       .filter((n): n is TriggerNode => n.type === 'trigger')
-      .map((node) => {
-        // See stripInternalFields's doc comment (base.ts) — same fix as
-        // NativeStrategy's buildTrigger.
-        const trigger: Record<string, unknown> = this.stripInternalFields(node.data);
-
-        return this.cleanTriggerFields(this.foldEventContextUserId(trigger));
-      });
+      .map((node) => this.buildTrigger(node));
   }
 
   /**
@@ -573,20 +520,18 @@ export class StateMachineStrategy extends BaseStrategy {
       case 'condition':
         return this.generateConditionBlock(flow, node, outgoingEdges);
       case 'action':
-        return this.generateActionBlock(flow, node, outgoingEdges);
+        return this.generateStepBlock(flow, node, outgoingEdges, [this.buildActionCall(node)]);
       case 'delay':
-        return this.generateDelayBlock(flow, node, outgoingEdges);
+        return this.generateStepBlock(flow, node, outgoingEdges, [this.buildDelay(node)]);
       case 'wait':
-        return this.generateWaitBlock(flow, node, outgoingEdges);
+        return this.generateStepBlock(flow, node, outgoingEdges, [this.buildWait(node)]);
       case 'set_variables':
-        return this.generateSetVariablesBlock(flow, node, outgoingEdges);
-      case 'join':
-        // Transparent convergence marker, same treatment as any other
-        // passthrough node — see the mid-flow-fan-out warning emitted in
-        // generate() for this strategy's one known limitation here.
-        return this.generatePassthroughBlock(flow, node, outgoingEdges);
+        return this.generateStepBlock(flow, node, outgoingEdges, [this.buildSetVariables(node)]);
       default:
-        return this.generatePassthroughBlock(flow, node, outgoingEdges);
+        // A join (a transparent convergence marker -- see the
+        // mid-flow-fan-out warning emitted in generate() for this
+        // strategy's one known limitation here) or any other passthrough.
+        return this.generateStepBlock(flow, node, outgoingEdges, []);
     }
   }
 
@@ -620,14 +565,13 @@ export class StateMachineStrategy extends BaseStrategy {
     node: FlowNode,
     edges: FlowEdge[]
   ): { extraSteps: unknown[]; nextNode: string } {
-    const isRealFanOut =
-      edges.length >= 2 &&
-      node.type !== 'condition' &&
-      edges.every((e) => e.sourceHandle !== 'true' && e.sourceHandle !== 'false');
-
-    if (!isRealFanOut) {
-      const nextNodeId = edges[0]?.target ?? 'END';
-      return { extraSteps: [], nextNode: nextNodeId === 'END' ? 'END' : nextNodeId };
+    // Every edge of a step counts, whatever handle it carries:
+    // a step has no true/false outcome, so an edge that carries one
+    // anyway (a hand-edited graph) is just another branch. Such a fan-out
+    // used to continue down the first edge only; native and both checkers
+    // read it as the fan-out it is. (Conditions never get here.)
+    if (edges.length < 2) {
+      return { extraSteps: [], nextNode: edges[0]?.target ?? 'END' };
     }
 
     const targets = edges.map((e) => e.target);
@@ -807,15 +751,13 @@ export class StateMachineStrategy extends BaseStrategy {
     }
     const boundSet = convergenceSet.length > 0 ? new Set(convergenceSet) : null;
 
-    const parallelActions = targetIds.map((targetId) => {
-      const branchActions = boundSet
-        ? this.nativeSubBuilder.buildActionsUntilNode(flow, targetId, boundSet)
-        : this.nativeSubBuilder.buildActionsFromEntryPoint(flow, targetId);
-      if (branchActions.length === 0) {
-        return { service: 'system_log.write', data: { message: `Node: ${targetId}` } };
-      }
-      return branchActions.length === 1 ? branchActions[0] : { sequence: branchActions };
-    });
+    // Branches that meet again before the boundary when not all of them do
+    // are one branch (#99, NativeStrategy.buildParallelBranches).
+    const parallelActions = this.nativeSubBuilder
+      .buildParallelBranchesForTargets(flow, targetIds, boundSet)
+      .map(({ targets: branchTargets, steps }) =>
+        this.parallelBranchStep(flow, branchTargets, steps)
+      );
 
     const extraSteps: unknown[] = [{ parallel: parallelActions }];
 
@@ -828,175 +770,80 @@ export class StateMachineStrategy extends BaseStrategy {
     return { extraSteps, nextNode: inner.nextNode };
   }
 
-  /**
-   * Generate block for action node
-   * Executes the service call then moves to the next node
-   */
-  private generateActionBlock(
-    flow: FlowGraph,
-    node: ActionNode,
-    edges: FlowEdge[]
-  ): Record<string, unknown> {
-    const currentNodeId = node.id;
-    const actionCall = this.buildActionCall(node);
-    const { extraSteps, nextNode } = this.buildFanOutContinuation(flow, node, edges);
-
-    return {
-      conditions: [
-        {
-          condition: 'template',
-          value_template: `{{ current_node == "${currentNodeId}" }}`,
-        },
-      ],
-      sequence: [
-        actionCall,
-        ...extraSteps,
-        {
-          variables: {
-            current_node: nextNode,
-          },
-        },
-      ],
-    };
+  /** One branch of a fan-out's `parallel:` as a step: a single step as
+   * itself (matching NativeStrategy's flattening), several as a
+   * `sequence:`, and a logged placeholder when the branch built nothing,
+   * so a branch never silently vanishes. */
+  private parallelBranchStep(flow: FlowGraph, targets: string[], steps: unknown[]): unknown {
+    if (steps.length === 0) {
+      const known = targets.every((id) => flow.nodes.some((n) => n.id === id));
+      const message = `${known ? 'Node' : 'Unknown node'}: ${targets.join(', ')}`;
+      return { service: 'system_log.write', data: { message } };
+    }
+    return bareParallelBranch(steps) ?? { sequence: steps };
   }
 
   /**
-   * Build service call action or device action
+   * Bug #63 (2026-09-26): where an until loop goes when its test can't be
+   * evaluated (an entity is missing, a numeric_state sensor unavailable).
+   * HA's `repeat: until` stops the loop then (script.py: the test `in
+   * [True, None]` ends it), while an `if:` reads the error as false; this
+   * strategy tests each until condition with an `if:`, so an error re-ran
+   * the body forever. For a condition of an until test -- the head, whose
+   * own false edge loops back, or a later member of its condition list
+   * (`until: [A, B]`, bug #27's list convention) -- returns the loop's exit
+   * (the last member's true targets); null for any other condition.
+   * The head is classified the way NativeStrategy.classifyRepeatBackEdge
+   * does: a `repeat_until` head, or a plain condition (no `_blockKey`)
+   * whose false back-edge doesn't go to a `repeat_while` head.
+   * extractStateMachineFromGraph.ts applies the same rule independently.
    */
-  private buildActionCall(node: ActionNode): Record<string, unknown> {
-    // Check if this is a device action (needs special format)
-    if (isDeviceAction(node.data.data)) {
-      const deviceData = node.data.data;
-      const action: Record<string, unknown> = {
-        device_id: deviceData.device_id,
-        domain: deviceData.domain,
-        type: deviceData.type,
-      };
-
-      if (node.data.alias) {
-        action.alias = node.data.alias;
-      }
-
-      // Add entity_id if present
-      if (deviceData.entity_id) {
-        action.entity_id = deviceData.entity_id;
-      }
-
-      // Add subtype if present
-      if (deviceData.subtype) {
-        action.subtype = deviceData.subtype;
-      }
-
-      // Add any additional parameters (like 'option' for select)
-      const knownFields = ['type', 'device_id', 'domain', 'entity_id', 'subtype'];
-      for (const [key, value] of Object.entries(deviceData)) {
-        if (!knownFields.includes(key) && value !== undefined) {
-          action[key] = value;
-        }
-      }
-
-      if (node.data.enabled === false) {
-        action.enabled = false;
-      }
-
-      return action;
-    }
-
-    // Check if this is a fallback repeat action (opaque repeat block)
-    if (node.data.repeat) {
-      const repeatData = node.data.repeat;
-      const actionCall: Record<string, unknown> = {
-        repeat: {
-          ...(repeatData.count !== undefined ? { count: repeatData.count } : {}),
-          ...(repeatData.while ? { while: repeatData.while } : {}),
-          ...(repeatData.until ? { until: repeatData.until } : {}),
-          ...(repeatData.for_each !== undefined ? { for_each: repeatData.for_each } : {}),
-          sequence: repeatData.sequence ?? [],
-        },
-      };
-      if (node.data.alias) actionCall.alias = node.data.alias;
-      if (node.data.continue_on_error) actionCall.continue_on_error = node.data.continue_on_error;
-      if (node.data.enabled === false) actionCall.enabled = false;
-      return actionCall;
-    }
-
-    // Check if this is a fire event action
-    if (typeof node.data.event === 'string' && node.data.event.trim() !== '') {
-      const actionCall: Record<string, unknown> = { event: node.data.event };
-      if (node.data.alias) actionCall.alias = node.data.alias;
-      if (node.data.event_data && Object.keys(node.data.event_data).length > 0) {
-        actionCall.event_data = node.data.event_data;
-      }
-      if (node.data.continue_on_error) actionCall.continue_on_error = node.data.continue_on_error;
-      if (node.data.enabled === false) actionCall.enabled = false;
-      return actionCall;
-    }
-
-    // Standard service call format — output as 'action:' (HA 2024.8+ preferred key)
-    // stripInternalFields (base.ts) drops every `_`-prefixed Circuitry-internal
-    // field before this spreads into the generated action — see its doc
-    // comment. This mirrors NativeStrategy's identical fix; this whole
-    // function is a near-duplicate of NativeStrategy.buildActionCall, and
-    // this exact class of bug (a real save failure — "extra keys not
-    // allowed @ ...['_ifElseBranch']") existed here too, just unreported
-    // since fewer automations reach StateMachineStrategy with a compound
-    // block attached.
-    const {
-      alias,
-      service,
-      action: _originalActionKey,
-      id,
-      target,
-      data,
-      data_template,
-      response_variable,
-      continue_on_error,
-      enabled,
-      repeat: _repeat,
-      ...extraProps
-    } = this.stripInternalFields(node.data);
-    const actionCall: Record<string, unknown> = {
-      ...extraProps,
-      alias,
-      action: service,
+  private untilErrorExitTargets(flow: FlowGraph, node: ConditionNode): string[] | null {
+    // A disabled condition is never evaluated, so it can't fail.
+    if (node.data.enabled === false) return null;
+    const backEdgeIds = findBackEdges(flow);
+    const blockKey = (n: FlowNode | undefined) =>
+      (n?.data as Record<string, unknown> | undefined)?._blockKey;
+    const edgesOf = (id: string, handle: 'true' | 'false') =>
+      flow.edges.filter((e) => e.source === id && e.sourceHandle === handle);
+    // A list member: no false edge of its own, sharing its parent's.
+    const listParent = (id: string): FlowNode | null => {
+      if (edgesOf(id, 'false').length > 0) return null;
+      if (this.andMemberFalseTargets(flow, id).length === 0) return null;
+      const incoming = flow.edges.filter((e) => e.target === id && !backEdgeIds.has(e.id));
+      return incoming.length === 1 ? (this.getNode(flow, incoming[0].source) ?? null) : null;
     };
 
-    if (id) {
-      actionCall.id = id;
+    let head: FlowNode = node;
+    const seen = new Set<string>();
+    for (;;) {
+      if (seen.has(head.id)) return null;
+      seen.add(head.id);
+      const ownFalse = edgesOf(head.id, 'false');
+      if (ownFalse.length > 0) {
+        const isUntil = ownFalse.some((e) => {
+          if (!backEdgeIds.has(e.id)) return false;
+          const key = blockKey(head);
+          if (key === 'repeat_until') return true;
+          return key === undefined && blockKey(this.getNode(flow, e.target)) !== 'repeat_while';
+        });
+        if (!isUntil) return null;
+        break;
+      }
+      const parent = listParent(head.id);
+      if (parent?.type !== 'condition') return null;
+      head = parent;
     }
 
-    if (target) {
-      actionCall.target = target;
+    let last: FlowNode = head;
+    for (;;) {
+      const trueEdges = edgesOf(last.id, 'true').filter((e) => !backEdgeIds.has(e.id));
+      if (trueEdges.length !== 1) break;
+      const next = this.getNode(flow, trueEdges[0].target);
+      if (next?.type !== 'condition' || listParent(next.id)?.id !== last.id) break;
+      last = next;
     }
-
-    // Only attach `data` when it actually has content -- an empty `data:
-    // {}` on a service-call node must be omitted the same way
-    // NativeStrategy.buildActionCall already does, rather than written
-    // verbatim. Found via the StateMachineStrategy audit (2026-09-06):
-    // this branch previously lacked the emptiness check, so every
-    // service-call node with no configured data fields round-tripped
-    // fine through NativeStrategy but grew a spurious `data: {}` here.
-    if (data && Object.keys(data as object).length > 0) {
-      actionCall.data = data;
-    }
-
-    if (data_template) {
-      actionCall.data_template = data_template;
-    }
-
-    if (response_variable) {
-      actionCall.response_variable = response_variable;
-    }
-
-    if (continue_on_error) {
-      actionCall.continue_on_error = continue_on_error;
-    }
-
-    if (enabled === false) {
-      actionCall.enabled = false;
-    }
-
-    return actionCall;
+    return edgesOf(last.id, 'true').map((e) => e.target);
   }
 
   /**
@@ -1131,6 +978,9 @@ export class StateMachineStrategy extends BaseStrategy {
     const trueTarget = trueFanOut.nextNode;
     const falseTarget = falseFanOut.nextNode;
     const currentNodeId = node.id;
+    // Bug #63: an until test that can't be evaluated ends the loop in HA.
+    const errorExit = this.untilErrorExitTargets(flow, node);
+    const errorFanOut = errorExit ? this.buildFanOutFromTargets(flow, errorExit) : null;
 
     // Always use a native HA condition inside a real if/then/else — each
     // branch assigns current_node a plain string. This used to be
@@ -1156,6 +1006,14 @@ export class StateMachineStrategy extends BaseStrategy {
     // and always reparseable since each branch's current_node is a plain
     // string.
     const condition = this.buildNativeCondition(node);
+    const falseBranch = [
+      ...falseFanOut.extraSteps,
+      {
+        variables: {
+          current_node: falseTarget,
+        },
+      },
+    ];
 
     return {
       conditions: [
@@ -1176,256 +1034,59 @@ export class StateMachineStrategy extends BaseStrategy {
               },
             },
           ],
-          else: [
-            ...falseFanOut.extraSteps,
-            {
-              variables: {
-                current_node: falseTarget,
-              },
-            },
-          ],
+          // An until test's else holds an error guard (bug #63): HA reads
+          // an error as false in `if:` but stops a `repeat: until`, so
+          // "false" is re-checked as `not` -- true: really false, run the
+          // body again; not true (the test can't be evaluated): leave the
+          // loop, as HA's until does.
+          else: errorFanOut
+            ? [
+                {
+                  if: [{ condition: 'not', conditions: [condition] }],
+                  then: falseBranch,
+                  else: [
+                    ...errorFanOut.extraSteps,
+                    {
+                      variables: {
+                        current_node: errorFanOut.nextNode,
+                      },
+                    },
+                  ],
+                },
+              ]
+            : falseBranch,
         },
       ],
     };
   }
 
   /**
-   * Build native HA condition object for use in if/then/else
-   *
-   * Rewritten (2026-09-06, StateMachineStrategy audit) to reuse
-   * NativeStrategy's own spread-based mapCondition approach (via the
-   * now-exported stripDottedOnlyConditionFields helper) instead of the
-   * hand-rolled field-by-field allowlist this function used before. That
-   * allowlist had already needed two prior patches for exactly the same
-   * failure mode -- a real HA condition field silently missing because it
-   * wasn't in the list (`target`/`options` for purpose-specific dotted
-   * conditions, both at the top level and again for nested and/or-group
-   * conditions) -- and a third instance was found via direct source
-   * comparison against NativeStrategy during this audit: `enabled` was
-   * never copied at all, at either level. HA's own docs
-   * (https://www.home-assistant.io/docs/scripts/conditions/, verified via
-   * fetch during this audit rather than assumed) confirm `enabled: false`
-   * on a condition is a real, documented, behaviorally significant field
-   * ("A disabled condition will behave as if it were removed"), not an
-   * internal-only one. Rather than patch in `enabled` as a fourth one-off
-   * fix, this now spreads `...rest` the same way
-   * NativeStrategy.buildCondition's own local mapCondition does, so any
-   * other current or future HA condition field (e.g. a `for:` duration on
-   * a state/numeric_state condition, also missing from the old allowlist
-   * and only now noticed because of this rewrite) rides along
-   * automatically and this whole bug class can't recur here.
+   * Build native HA condition object for use in if/then/else. The same
+   * builder as NativeStrategy's (buildConditionData, bug #95's class):
+   * this strategy's own field-by-field copy kept missing real HA condition
+   * fields (`target`/`options`, `enabled`, `for:`; the 2026-09-06 audit),
+   * and its later spread-based copy was a second copy to keep in step.
    */
   private buildNativeCondition(node: ConditionNode): Record<string, unknown> {
-    const stripInternal = this.stripInternalFields.bind(this);
-
-    // This function is only ever called (from generateConditionBlock,
-    // this class's sole call site) for a condition node's own top-level
-    // gate condition -- there is no state-machine equivalent of
-    // NativeStrategy's separate choose/repeat_while/repeat_until
-    // block-gate cases, since every condition node here compiles to its
-    // own dispatcher `if:` step. generateConditionBlock always attaches
-    // `node.data.alias` to that wrapping step itself (`sequence: [{
-    // alias: node.data.alias, if: [condition], ... }]`), so the top-level
-    // condition object built here must never also carry `alias` --
-    // otherwise a single user-set label would be duplicated onto both the
-    // if-step and the nested condition object (the same class of bug
-    // NativeStrategy.buildCondition's suppressGateAlias guards against for
-    // its own, differently-shaped, block-gate case). A genuinely nested
-    // condition -- inside its own `conditions: [...]` and/or group,
-    // recursed into below -- keeps its own alias untouched, matching
-    // NativeStrategy's mapCondition's identical behavior for that case
-    // (and matching this function's own prior behavior, which always
-    // copied a nested condition's alias but never the top-level one).
-    function mapCondition(data: Record<string, unknown>, isTopLevel: boolean): Record<string, unknown> {
-      if (!data || typeof data !== 'object') return data;
-      const { condition, conditions, alias, template, ...rest } = stripInternal(data);
-      const out: Record<string, unknown> = {
-        condition,
-        ...stripDottedOnlyConditionFields(condition, rest),
-        ...(alias && !isTopLevel ? { alias } : {}),
-      };
-      if (condition === 'template' && !rest.value_template && template) {
-        out.value_template = template;
-      }
-      if (Array.isArray(conditions) && conditions.length > 0) {
-        out.conditions = (conditions as Record<string, unknown>[])
-          .map((c) => mapCondition(c, false))
-          .filter((c) => c && (!Array.isArray(c.conditions) || (c.conditions as unknown[]).length > 0));
-      }
-      // Normalize id: ["x"] -> "x" -- HA API sometimes returns trigger
-      // condition ids as single-element arrays (same normalization as
-      // NativeStrategy.buildCondition's mapCondition).
-      if (Array.isArray(out.id) && (out.id as unknown[]).length === 1) {
-        out.id = (out.id as unknown[])[0];
-      }
-      return Object.fromEntries(Object.entries(out).filter(([, v]) => v !== undefined && v !== ''));
-    }
-
-    return mapCondition(node.data, true);
+    // Called only from generateConditionBlock, for a condition node's own
+    // gate condition: every condition node here compiles to its own
+    // dispatcher `if:` step, which carries `node.data.alias` itself, so the
+    // condition object doesn't carry it too (a nested condition keeps its
+    // own; see buildConditionData).
+    return this.buildConditionData(node.data, true);
   }
 
   /**
-   * Generate block for delay node
+   * The dispatch block for a node that runs its own steps (an action,
+   * delay, wait or set_variables node: one step, built by the same
+   * builders NativeStrategy uses, bug #95; a join or any other passthrough
+   * node: none) and moves on to the next node.
    */
-  private generateDelayBlock(
-    flow: FlowGraph,
-    node: DelayNode,
-    edges: FlowEdge[]
-  ): Record<string, unknown> {
-    const { extraSteps, nextNode } = this.buildFanOutContinuation(flow, node, edges);
-    const currentNodeId = node.id;
-
-    // Use spread pattern to preserve unknown properties from custom integrations.
-    // `id` is dropped -- HA's action-step schemas don't support it, only
-    // triggers do (see NativeStrategy.buildDelay's identical handling).
-    // Found via the StateMachineStrategy audit (2026-09-06): this used to
-    // re-add `id` below, producing an `id` key HA rejects on any delay
-    // node that happened to carry one.
-    const { alias, delay, id: _id, ...extraProps } = this.stripInternalFields(node.data);
-    const delayAction: Record<string, unknown> = {
-      ...extraProps, // Preserve extra properties
-      alias,
-      delay,
-    };
-
-    return {
-      conditions: [
-        {
-          condition: 'template',
-          value_template: `{{ current_node == "${currentNodeId}" }}`,
-        },
-      ],
-      sequence: [
-        delayAction,
-        ...extraSteps,
-        {
-          variables: {
-            current_node: nextNode,
-          },
-        },
-      ],
-    };
-  }
-
-  /**
-   * Generate block for wait node
-   */
-  private generateWaitBlock(
-    flow: FlowGraph,
-    node: WaitNode,
-    edges: FlowEdge[]
-  ): Record<string, unknown> {
-    const { extraSteps, nextNode } = this.buildFanOutContinuation(flow, node, edges);
-    const currentNodeId = node.id;
-
-    // Use spread pattern to preserve unknown properties from custom integrations.
-    // `id` is dropped -- HA's action-step schemas don't support it, only
-    // triggers do (see NativeStrategy.buildWait's identical handling).
-    const {
-      alias,
-      id: _id,
-      wait_template,
-      wait_for_trigger,
-      timeout,
-      continue_on_timeout,
-      ...extraProps
-    } = this.stripInternalFields(node.data);
-    const waitAction: Record<string, unknown> = {
-      ...extraProps, // Preserve extra properties
-      alias,
-    };
-
-    if (wait_template) {
-      waitAction.wait_template = wait_template;
-    } else if (wait_for_trigger) {
-      waitAction.wait_for_trigger = wait_for_trigger.map((triggerData) => {
-        const { alias: _alias, ...rest } = triggerData;
-        const trigger: Record<string, unknown> = { ...rest };
-        return this.cleanTriggerFields(this.foldEventContextUserId(trigger));
-      });
-    }
-
-    // See BaseStrategy.hasMeaningfulDuration's doc comment — a literal
-    // all-zero timeout means "give up instantly" in HA, not "no limit", so
-    // it must be omitted the same as an unset timeout rather than written
-    // verbatim.
-    if (this.hasMeaningfulDuration(timeout)) {
-      waitAction.timeout = timeout;
-    }
-
-    if (continue_on_timeout !== undefined) {
-      waitAction.continue_on_timeout = continue_on_timeout;
-    }
-
-    return {
-      conditions: [
-        {
-          condition: 'template',
-          value_template: `{{ current_node == "${currentNodeId}" }}`,
-        },
-      ],
-      sequence: [
-        waitAction,
-        ...extraSteps,
-        {
-          variables: {
-            current_node: nextNode,
-          },
-        },
-      ],
-    };
-  }
-
-  /**
-   * Generate block for set_variables node
-   */
-  private generateSetVariablesBlock(
-    flow: FlowGraph,
-    node: SetVariablesNode,
-    edges: FlowEdge[]
-  ): Record<string, unknown> {
-    const { extraSteps, nextNode } = this.buildFanOutContinuation(flow, node, edges);
-    const currentNodeId = node.id;
-
-    // Use spread pattern to preserve unknown properties from custom integrations.
-    // `id` is dropped -- HA's action-step schemas don't support it, only
-    // triggers do (see NativeStrategy.buildSetVariables's identical handling).
-    const { alias, id: _id, variables, ...extraProps } = this.stripInternalFields(node.data);
-    const setVarsAction: Record<string, unknown> = {
-      ...extraProps, // Preserve extra properties
-      variables,
-    };
-
-    if (alias) {
-      setVarsAction.alias = alias;
-    }
-
-    return {
-      conditions: [
-        {
-          condition: 'template',
-          value_template: `{{ current_node == "${currentNodeId}" }}`,
-        },
-      ],
-      sequence: [
-        setVarsAction,
-        ...extraSteps,
-        {
-          variables: {
-            current_node: nextNode,
-          },
-        },
-      ],
-    };
-  }
-
-  /**
-   * Generate passthrough block for unknown node types
-   */
-  private generatePassthroughBlock(
+  private generateStepBlock(
     flow: FlowGraph,
     node: FlowNode,
-    edges: FlowEdge[]
+    edges: FlowEdge[],
+    steps: Record<string, unknown>[]
   ): Record<string, unknown> {
     const { extraSteps, nextNode } = this.buildFanOutContinuation(flow, node, edges);
     const currentNodeId = node.id;
@@ -1438,6 +1099,7 @@ export class StateMachineStrategy extends BaseStrategy {
         },
       ],
       sequence: [
+        ...steps,
         ...extraSteps,
         {
           variables: {

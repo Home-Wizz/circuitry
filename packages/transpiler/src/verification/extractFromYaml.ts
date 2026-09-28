@@ -1,7 +1,8 @@
+import { haBoolean } from '@circuitry/shared';
 import type { BProgram, BStep } from './behaviorProgram';
 import { normalizeActionData } from './behaviorProgram';
 import { yamlStepToCompiled } from './compiledAction';
-import { parseConditionExpr } from './boolean';
+import { isConditionShorthand, parseConditionExpr } from './boolean';
 
 /**
  * Extracts a canonical BProgram directly from a parsed Home Assistant
@@ -50,14 +51,106 @@ const ACTION_TYPE_KEYS = [
   'variables',
 ];
 
+/** Steps that hold other steps. */
+const BLOCK_KEYS = ['if', 'choose', 'parallel', 'repeat', 'sequence'];
+
 function asArray<T>(value: T | T[] | undefined | null): T[] {
   if (value === undefined || value === null) return [];
   return Array.isArray(value) ? value : [value];
 }
 
 function isBareConditionGate(step: Record<string, unknown>): boolean {
+  // HA's shorthand `and:`/`or:`/`not:` as a step is a condition step too.
+  if (isConditionShorthand(step)) return true;
   if (!('condition' in step)) return false;
   return !ACTION_TYPE_KEYS.some((key) => key in step && key !== 'variables');
+}
+
+/**
+ * A `repeat: count` the canvas can't hold as a loop -- anything but a whole
+ * number of 1 or more: HA runs the body no times for 0 or less, rounds a
+ * non-integer down and renders a template. The graph keeps such a block
+ * as an opaque step (bug #73), so it's compared exactly as written, like a
+ * leaf step. The gate's own copy of the parser's rule
+ * (isUnexpandableCountRepeat), kept separate like the gate's other rules.
+ */
+function isCountKeptAsWritten(step: Record<string, unknown>): boolean {
+  const repeat = step.repeat;
+  if (!repeat || typeof repeat !== 'object' || Array.isArray(repeat)) return false;
+  const r = repeat as Record<string, unknown>;
+  if (!('count' in r) || 'while' in r || 'until' in r || 'for_each' in r) return false;
+  const count = r.count;
+  if (typeof count === 'number') return !Number.isInteger(count) || count < 1;
+  if (typeof count === 'string') return !/^\s*\d+\s*$/.test(count) || Number(count) < 1;
+  return true;
+}
+
+/**
+ * A `parallel:` with one branch that sets `wait` (a wait step anywhere in
+ * it): HA keeps `wait` to that branch, so it isn't the branch's steps in
+ * line, and the graph keeps such a block as an opaque step (bug #81). It's
+ * compared exactly as written, like a leaf step. The gate's own copy of
+ * the parser's rule (isWaitScopedParallel).
+ */
+function isParallelKeptAsWritten(step: Record<string, unknown>): boolean {
+  const branches = step.parallel;
+  return Array.isArray(branches) && branches.length === 1 && containsWaitStep(branches[0]);
+}
+
+/** Keys HA's parallel branch container takes (_SCRIPT_SEQUENCE_SCHEMA). */
+const PARALLEL_CONTAINER_KEYS = [
+  'sequence',
+  'alias',
+  'enabled',
+  'continue_on_error',
+  'note',
+  'metadata',
+];
+
+/**
+ * The steps a `parallel:` branch runs, as HA reads it (bug #94): a list is
+ * the branch; a mapping with `sequence:` (and only a container's keys) is
+ * a branch container, which runs its `sequence` unless its `enabled` is a
+ * false boolean, ignoring its `continue_on_error` and an `enabled`
+ * template (script.py, _async_prep_parallel_scripts); any other mapping is
+ * the branch's one step. The gate's own copy of the parser's rule
+ * (parallelBranchContainer). It read a container as a `sequence:` step
+ * with those keys, the same mistake the parser and both strategies made.
+ */
+function parallelBranchSteps(branch: unknown): unknown[] {
+  if (Array.isArray(branch)) return branch;
+  if (!branch || typeof branch !== 'object' || !('sequence' in branch)) return [branch];
+  const container = branch as Record<string, unknown>;
+  if (!Object.keys(container).every((key) => PARALLEL_CONTAINER_KEYS.includes(key)))
+    return [branch];
+  return haBoolean(container.enabled) === false ? [] : asArray(container.sequence);
+}
+
+/**
+ * A `choose:` with no options, or with an always-true option (`conditions:
+ * []`) followed by another option or a default: nothing after the
+ * always-true option ever runs, and the graph keeps such a block as an
+ * opaque step (bug #98), so it's compared exactly as written. The gate's
+ * own copy of the parser's rule (isStepKeptAsWritten).
+ */
+function isChooseKeptAsWritten(step: Record<string, unknown>): boolean {
+  if (!('choose' in step) || step.choose === undefined || step.choose === null) return false;
+  const options = asArray(step.choose);
+  if (options.length === 0) return true;
+  const always = options.findIndex((option) => {
+    if (!option || typeof option !== 'object' || Array.isArray(option)) return false;
+    return asArray((option as Record<string, unknown>).conditions).length === 0;
+  });
+  return always !== -1 && (always < options.length - 1 || asArray(step.default).length > 0);
+}
+
+function containsWaitStep(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(containsWaitStep);
+  if (!value || typeof value !== 'object') return false;
+  const obj = value as Record<string, unknown>;
+  return (
+    'wait_template' in obj || 'wait_for_trigger' in obj || Object.values(obj).some(containsWaitStep)
+  );
 }
 
 function normalizeCount(value: unknown): string {
@@ -86,14 +179,44 @@ export function parseActionSequence(steps: unknown[]): BProgram {
   // flag from a block passed the gate.
   if (step.enabled === false) return parseActionSequence(tail);
 
-  // "Grouping actions" -- purely a naming/UI aid, inline its body directly
-  // (see extractFromGraph.ts's identical treatment of sequence_start/end).
-  if (Array.isArray(step.sequence) && !('choose' in step) && !('if' in step) && !('repeat' in step) && !('parallel' in step)) {
-    return [...parseActionSequence(step.sequence), ...parseActionSequence(tail)];
+  // A block whose `enabled:` is a template runs or not as HA renders it
+  // when it gets there, so there's no structure to compare: it is compared
+  // exactly as written, like a leaf step (bug #70; the graph keeps such a
+  // block as an opaque step).
+  if (typeof step.enabled === 'string' && BLOCK_KEYS.some((key) => key in step)) {
+    return [leafStep(step), ...parseActionSequence(tail)];
+  }
+  // A block that catches its own steps' errors (`continue_on_error: true`)
+  // is kept as written too (bug #88; the graph can't hold it on a block),
+  // so it's compared exactly as written, like a leaf step.
+  if (step.continue_on_error === true && BLOCK_KEYS.some((key) => key in step)) {
+    return [leafStep(step), ...parseActionSequence(tail)];
+  }
+  if (isCountKeptAsWritten(step) || isParallelKeptAsWritten(step) || isChooseKeptAsWritten(step)) {
+    return [leafStep(step), ...parseActionSequence(tail)];
   }
 
-  if (Array.isArray(step.parallel)) {
-    const branches = step.parallel.map((branch) => parseActionSequence(asArray(branch)));
+  // "Grouping actions" -- purely a naming/UI aid, inline its body directly
+  // (see extractFromGraph.ts's identical treatment of sequence_start/end).
+  // One step where a list goes is a list of one (HA's ensure_list), for
+  // `sequence:`, `parallel:` and a branch alike; they used to be read only
+  // as lists, and one step became an unknown leaf (a checker gap the
+  // hard-case corpus showed, 2026-09-27).
+  if (
+    step.sequence !== undefined &&
+    step.sequence !== null &&
+    !('choose' in step) &&
+    !('if' in step) &&
+    !('repeat' in step) &&
+    !('parallel' in step)
+  ) {
+    return [...parseActionSequence(asArray(step.sequence)), ...parseActionSequence(tail)];
+  }
+
+  if (step.parallel !== undefined && step.parallel !== null) {
+    const branches = asArray(step.parallel).map((branch) =>
+      parseActionSequence(parallelBranchSteps(branch))
+    );
     const rest = parseActionSequence(tail);
     return [{ k: 'parallel', branches }, ...rest];
   }
@@ -111,7 +234,7 @@ export function parseActionSequence(steps: unknown[]): BProgram {
     return [{ k: 'repeat', mode: 'count', count: normalizeCount(repeat.count), body }, ...rest];
   }
 
-  if (Array.isArray(step.if)) {
+  if (step.if !== undefined && step.if !== null) {
     const cond = parseConditionExpr(step.if);
     const rest = parseActionSequence(tail);
     const thenProgram = [...parseActionSequence(asArray(step.then)), ...rest];
@@ -138,9 +261,20 @@ export function parseActionSequence(steps: unknown[]): BProgram {
     return [{ k: 'if', cond: parseConditionExpr(step), then: rest, else: [] }];
   }
 
-  // Leaf action step.
-  const bstep: BStep = { k: 'action', call: normalizeActionData(yamlStepToCompiled(step)) };
-  return [bstep, ...parseActionSequence(tail)];
+  return [leafStep(step), ...parseActionSequence(tail)];
+}
+
+/** A leaf action step, compared exactly as written. */
+function leafStep(step: Record<string, unknown>): BStep {
+  // One trigger where a wait takes a list is a list of one (HA's
+  // ensure_list; a checker gap the hard-case corpus showed, 2026-09-27).
+  const listed =
+    step.wait_for_trigger !== undefined &&
+    step.wait_for_trigger !== null &&
+    !Array.isArray(step.wait_for_trigger)
+      ? { ...step, wait_for_trigger: [step.wait_for_trigger] }
+      : step;
+  return { k: 'action', call: normalizeActionData(yamlStepToCompiled(listed)) };
 }
 
 function desugarChoose(
@@ -166,7 +300,7 @@ export function normalizeTrigger(trigger: Record<string, unknown>): Record<strin
   const cleaned: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(trigger)) {
     if (key.startsWith('_')) continue;
-    if (value === undefined || value === '') continue;
+    if (value === undefined) continue; // "" kept (bug #72)
     if (value === null && key !== 'from' && key !== 'to') continue;
     cleaned[key] = value;
   }
@@ -174,6 +308,10 @@ export function normalizeTrigger(trigger: Record<string, unknown>): Record<strin
     const { context_user_id, ...rest } = cleaned;
     return { ...rest, context: { user_id: context_user_id } };
   }
+  // A blank editing field (no user): not an HA key, never written (the
+  // strategies' fold drops it too). Kept apart now that "" isn't dropped
+  // wholesale (bug #72).
+  delete cleaned.context_user_id;
   return cleaned;
 }
 

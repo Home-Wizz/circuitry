@@ -158,3 +158,153 @@ function anchorOne(flow: FlowGraph): FlowGraph | null {
   }
   return null;
 }
+
+/**
+ * Bug #109 (2026-09-27, found by the canvas fuzzer's hard shapes): an
+ * until loop whose body opens with a parallel, drawn without an anchor.
+ * The test's false edges go back to every branch start, and whatever
+ * enters the loop has an edge to each of them too. Which of those edges
+ * closes the loop then depends on the order a depth-first search visits
+ * them in (findBackEdges): one false edge is the loop's back edge, the
+ * others look like forward edges, and both strategies and both gates
+ * looped back into one branch only.
+ *
+ * The YAML parser opens such a body with a pass-through Join (bug #24);
+ * this does the same for a drawn graph: a Join J that everything entering
+ * the body goes to instead, the test's false edges replaced by one to J,
+ * and J -> each branch start. J only passes control on, so the flowchart
+ * means the same. Only when the shape is unambiguous: every false target
+ * leads back to the test, and every way in (a source and its handle) goes
+ * to all of the branch starts. Otherwise the graph is left as drawn.
+ */
+export function anchorParallelUntilBodies(flow: FlowGraph): FlowGraph {
+  let current = flow;
+  for (let pass = 0; pass <= flow.edges.length; pass++) {
+    const next = anchorOneParallelUntilBody(current);
+    if (next === null) return current;
+    current = next;
+  }
+  return current;
+}
+
+function anchorOneParallelUntilBody(flow: FlowGraph): FlowGraph | null {
+  const edges = flow.edges.filter((e) => e.type !== 'hint' && e.type !== 'choose-hint');
+  const nodesById = new Map(flow.nodes.map((n) => [n.id, n]));
+  for (const test of flow.nodes) {
+    if (test.type !== 'condition' || blockKey(test) !== 'repeat_until') continue;
+    const falseEdges = edges.filter((e) => e.source === test.id && e.sourceHandle === 'false');
+    const starts = [...new Set(falseEdges.map((e) => e.target))];
+    if (starts.length < 2) continue;
+    // Every branch start leads back to the test (not counting the test's
+    // own edges): the false edges close the loop, every one of them.
+    if (!starts.every((s) => leadsTo(flow, s, test.id))) continue;
+    // The body: everything the starts reach before the test.
+    const body = new Set<string>();
+    const queue = [...starts];
+    while (queue.length > 0) {
+      const id = queue.shift()!;
+      if (body.has(id) || id === test.id) continue;
+      body.add(id);
+      for (const e of edges) if (e.source === id) queue.push(e.target);
+    }
+    // The ways in: edges into a start from outside the body, by source and
+    // handle; each must go to every start.
+    const entries = edges.filter(
+      (e) => starts.includes(e.target) && !body.has(e.source) && e.source !== test.id
+    );
+    const waysIn = new Map<string, FlowEdge[]>();
+    for (const e of entries) {
+      const key = `${e.source}\u0000${e.sourceHandle ?? ''}`;
+      waysIn.set(key, [...(waysIn.get(key) ?? []), e]);
+    }
+    if (waysIn.size === 0) continue;
+    const coversAll = [...waysIn.values()].every((group) =>
+      starts.every((s) => group.some((e) => e.target === s))
+    );
+    if (!coversAll) continue;
+    // An edge into a start from inside the body is fine when it closes a
+    // loop inside that start's own branch (a branch opening with a loop);
+    // from anywhere else it makes this something other than a plain
+    // parallel body.
+    const otherInto = edges.filter(
+      (e) =>
+        starts.includes(e.target) &&
+        body.has(e.source) &&
+        !leadsTo(flow, e.target, e.source, test.id)
+    );
+    if (otherInto.length > 0) continue;
+
+    const existingIds = new Set(flow.nodes.map((n) => n.id));
+    let anchorId = `${test.id}__body_entry`;
+    for (let i = 2; existingIds.has(anchorId); i++) anchorId = `${test.id}__body_entry_${i}`;
+    const first = nodesById.get(starts[0])!;
+    const anchor = {
+      id: anchorId,
+      type: 'join',
+      position: { x: first.position.x, y: first.position.y - 80 },
+      data: { mode: 'all' },
+    } as FlowNode;
+    const replaced = new Set([...falseEdges, ...entries].map((e) => e.id));
+    const kept = flow.edges.filter((e) => !replaced.has(e.id));
+    const added: FlowEdge[] = [
+      ...[...waysIn.values()].map((group) => ({
+        ...group[0],
+        id: `${group[0].id}__to__${anchorId}`,
+        target: anchorId,
+      })),
+      {
+        ...falseEdges[0],
+        id: `${falseEdges[0].id}__to__${anchorId}`,
+        target: anchorId,
+        type: 'loop-back',
+      },
+      ...starts.map((s) => ({ id: `${anchorId}__to__${s}`, source: anchorId, target: s })),
+    ];
+    return { ...flow, nodes: [...flow.nodes, anchor], edges: [...kept, ...added] };
+  }
+  return null;
+}
+
+/**
+ * #109: an until test whose false edges still go to several places after
+ * anchoring (anchorParallelUntilBodies left it as drawn because it isn't
+ * clearly a parallel body). Which of them closes the loop can't be told,
+ * so FlowTranspiler refuses the graph. Null when there's none.
+ */
+export function untilLoopingBackToSeveral(flow: FlowGraph): string | null {
+  for (const test of flow.nodes) {
+    if (test.type !== 'condition' || blockKey(test) !== 'repeat_until') continue;
+    const targets = new Set(
+      flow.edges
+        .filter(
+          (e) =>
+            e.source === test.id &&
+            e.sourceHandle === 'false' &&
+            e.type !== 'hint' &&
+            e.type !== 'choose-hint'
+        )
+        .map((e) => e.target)
+    );
+    if (targets.size > 1 && [...targets].every((t) => leadsTo(flow, t, test.id))) return test.id;
+  }
+  return null;
+}
+
+/** Whether `from` reaches `to` by any real edge, not going on past `to`
+ * or through `avoid`. */
+function leadsTo(flow: FlowGraph, from: string, to: string, avoid?: string): boolean {
+  if (from === to) return true;
+  const seen = new Set<string>(avoid === undefined ? [to] : [to, avoid]);
+  const queue = [from];
+  while (queue.length > 0) {
+    const id = queue.shift()!;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    for (const e of flow.edges) {
+      if (e.source !== id || e.type === 'hint' || e.type === 'choose-hint') continue;
+      if (e.target === to) return true;
+      queue.push(e.target);
+    }
+  }
+  return false;
+}

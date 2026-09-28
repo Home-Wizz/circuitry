@@ -1,5 +1,5 @@
 import type { BProgram, BStep } from './behaviorProgram';
-import { type BoolExpr, parseConditionExpr } from './boolean';
+import { type BoolExpr, boolExprEquivalent, parseConditionExpr } from './boolean';
 import { normalizeTrigger, parseActionSequence } from './extractFromYaml';
 
 /**
@@ -34,6 +34,9 @@ export interface YamlConditionState {
   trueTransition: YamlTransition;
   falseContent: BProgram;
   falseTransition: YamlTransition;
+  /** Bug #63: an until test's error guard (see parseState). */
+  errorContent?: BProgram;
+  errorTransition?: YamlTransition;
 }
 
 export type YamlStateSpec = YamlLeafState | YamlConditionState | { kind: 'malformed'; reason: string };
@@ -112,13 +115,27 @@ function extractDispatchId(caseObj: Record<string, unknown>): string | null {
   return null;
 }
 
+/** The error guard in an until test's else (bug #63), if that's what it is. */
+function errorGuard(ifStep: Extract<BStep, { k: 'if' }>): Extract<BStep, { k: 'if' }> | null {
+  if (ifStep.else.length !== 1 || ifStep.else[0].k !== 'if') return null;
+  const guard = ifStep.else[0] as Extract<BStep, { k: 'if' }>;
+  return boolExprEquivalent(guard.cond, { op: 'not', arg: ifStep.cond }).equivalent ? guard : null;
+}
+
 function parseState(sequence: unknown[]): YamlStateSpec {
   const program = parseActionSequence(sequence);
 
   if (program.length === 1 && program[0].k === 'if') {
     const ifStep = program[0] as Extract<BStep, { k: 'if' }>;
     const { content: trueContent, transition: trueTransition } = stripTrailingTransition(ifStep.then);
-    const { content: falseContent, transition: falseTransition } = stripTrailingTransition(ifStep.else);
+    // Bug #63: an until test's else may be an error guard -- only an `if:`
+    // on the test's negation, then (really false) / else (the test couldn't
+    // be evaluated). Recognized by its meaning: the guard's condition must
+    // be equivalent to NOT the state's own.
+    const guard = errorGuard(ifStep);
+    const { content: falseContent, transition: falseTransition } = stripTrailingTransition(
+      guard ? guard.then : ifStep.else
+    );
     // Re-derive the BoolExpr directly from the raw `if:` array here (rather
     // than trusting ifStep.cond, which parseActionSequence already computed
     // via the exact same parseConditionExpr this line calls) -- both are
@@ -126,10 +143,31 @@ function parseState(sequence: unknown[]): YamlStateSpec {
     // step keeps this file's condition handling legible on its own terms
     // rather than reaching back into a BStep field that was only an
     // intermediate of a different parse path.
-    const ifRaw = sequence.find(
-      (s) => s && typeof s === 'object' && Array.isArray((s as Record<string, unknown>).if)
-    ) as Record<string, unknown> | undefined;
-    const cond = ifRaw ? parseConditionExpr(ifRaw.if) : ifStep.cond;
+    // The one `if:` step that runs: a disabled one before it
+    // isn't in `program` but was the first `if:` a lookup found.
+    const ifRaws = sequence.filter(
+      (s) =>
+        s &&
+        typeof s === 'object' &&
+        Array.isArray((s as Record<string, unknown>).if) &&
+        (s as Record<string, unknown>).enabled !== false
+    ) as Record<string, unknown>[];
+    const cond = ifRaws.length === 1 ? parseConditionExpr(ifRaws[0].if) : ifStep.cond;
+    if (guard) {
+      const { content: errorContent, transition: errorTransition } = stripTrailingTransition(
+        guard.else
+      );
+      return {
+        kind: 'condition',
+        cond,
+        trueContent,
+        trueTransition,
+        falseContent,
+        falseTransition,
+        errorContent,
+        errorTransition,
+      };
+    }
     return { kind: 'condition', cond, trueContent, trueTransition, falseContent, falseTransition };
   }
 

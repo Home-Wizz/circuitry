@@ -49,11 +49,20 @@ const TRIGGER_OFFSET_FIELDS: Record<string, TriggerOffsetField> = {
   'sun.solar_midnight': { hasTwilightType: false, required: false },
   'sun.dawn': { hasTwilightType: true, required: false },
   'sun.dusk': { hasTwilightType: true, required: false },
-  // home-assistant.io/triggers/calendar.event_started/ and
-  // .../calendar.event_ended/: "offset — Required — the length of time from
-  // the start/end of the event."
-  'calendar.event_started': { hasTwilightType: false, required: true },
-  'calendar.event_ended': { hasTwilightType: false, required: true },
+  // HA 2026.9's golden hour, blue hour, midnight sun and polar night
+  // triggers take the same optional offset (#122).
+  'sun.blue_hour_started': { hasTwilightType: false, required: false },
+  'sun.blue_hour_ended': { hasTwilightType: false, required: false },
+  'sun.golden_hour_started': { hasTwilightType: false, required: false },
+  'sun.golden_hour_ended': { hasTwilightType: false, required: false },
+  'sun.midnight_sun_started': { hasTwilightType: false, required: false },
+  'sun.midnight_sun_ended': { hasTwilightType: false, required: false },
+  'sun.polar_night_started': { hasTwilightType: false, required: false },
+  'sun.polar_night_ended': { hasTwilightType: false, required: false },
+  // calendar.event_started/event_ended: HA's docs call `offset` required,
+  // but HA's validator gives it a default (#122: checked with HA 2026.9.3).
+  'calendar.event_started': { hasTwilightType: false, required: false },
+  'calendar.event_ended': { hasTwilightType: false, required: false },
 };
 
 export function getTriggerOffsetField(triggerType: string): TriggerOffsetField | undefined {

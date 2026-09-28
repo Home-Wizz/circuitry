@@ -6,6 +6,7 @@ import {
   type ThresholdShape,
   type ThresholdValue,
   type TypedThreshold,
+  thresholdNumber,
 } from '@/lib/nativeThreshold';
 
 /** True for an unset bound or one already in the wrapped `{number, ...}` shape — never for an entity-ref bound. */
@@ -20,6 +21,9 @@ interface DottedThresholdInlineEditorProps {
   onChange: (threshold: number | TypedThreshold) => void;
   /** Matches ThresholdValueField.tsx's `emitNumber`, which stamps this onto every wrapped (TYPED) bound it writes. For FLAT, purely a display suffix (e.g. "%") — the FLAT wire shape has no `unit_of_measurement` key to write it into. */
   unit?: string;
+  /** See ThresholdValueField's `units`: a bound keeps its own unit if HA
+   * takes it; the unit is picked in the panel (#119). */
+  units?: string[];
   /**
    * Bounds for the FLAT shape's bare number input — see
    * lib/nativeThreshold.ts's `getThresholdRange`. Light's brightness fields
@@ -58,6 +62,7 @@ export function DottedThresholdInlineEditor({
   threshold,
   onChange,
   unit,
+  units,
   min,
   max,
   allowAny,
@@ -112,13 +117,15 @@ export function DottedThresholdInlineEditor({
     onChange({ ...typed, type: newType as ThresholdCrossingType });
   };
 
+  // The unit the bounds are in (their own, when they have one).
+  const firstBound = isRange ? typed.value_min : typed.value;
+  const shownUnit = (isNumberThresholdValue(firstBound) && firstBound.unit_of_measurement) || unit;
+
   const setBound = (key: 'value' | 'value_min' | 'value_max', raw: string) => {
     onChange({
       ...typed,
       [key]:
-        raw === ''
-          ? undefined
-          : { number: Number(raw), ...(unit ? { unit_of_measurement: unit } : {}) },
+        raw === '' ? undefined : thresholdNumber(Number(raw), typed[key], unit, units),
     });
   };
 
@@ -170,7 +177,7 @@ export function DottedThresholdInlineEditor({
           />
         ))}
 
-      {unit && !isAny && <span className="text-muted-foreground">{unit}</span>}
+      {shownUnit && !isAny && <span className="text-muted-foreground">{shownUnit}</span>}
     </div>
   );
 }

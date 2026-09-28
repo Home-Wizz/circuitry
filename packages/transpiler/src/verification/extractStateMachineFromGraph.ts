@@ -3,7 +3,11 @@ import { isStartNode } from '@circuitry/shared';
 import { findBackEdges } from '../analyzer/topology';
 import type { BProgram, BStep } from './behaviorProgram';
 import { type BoolExpr, parseConditionExpr } from './boolean';
-import { buildTrigger, extractGraphProgramBetween, normalizeNodeAction } from './extractFromGraph';
+import {
+  buildTrigger,
+  extractGraphParallelBranches,
+  normalizeNodeAction,
+} from './extractFromGraph';
 
 /**
  * Independently derives, straight from the FlowGraph, the same per-node
@@ -63,6 +67,10 @@ export interface ConditionState {
   cond: BoolExpr;
   trueTransition: Transition;
   falseTransition: Transition;
+  /** Bug #63: for a condition of an until test, where the loop goes when
+   * the condition can't be evaluated (the loop's exit, as HA's `repeat:
+   * until` does). Absent for every other condition (an error is false). */
+  errorTransition?: Transition;
 }
 
 export type StateSpec = LeafState | ConditionState;
@@ -92,7 +100,7 @@ export interface StateMachineGraphExtraction {
    * a genuine soundness gap: removing or corrupting a trigger from the
    * candidate YAML was silently accepted as equivalent). Reuses
    * extractFromGraph.ts's own `buildTrigger` (same reasoning as reusing
-   * `extractGraphProgramBetween`/`normalizeNodeAction` from that file: it's
+   * `extractGraphParallelBranches`/`normalizeNodeAction` from that file: it's
    * the independent, strategy-agnostic "what does this trigger node mean"
    * reader, not NativeStrategy's own construction code). */
   isEmpty: boolean;
@@ -297,7 +305,9 @@ function resolveTransition(ctx: Ctx, rawTargetIds: string[], midFlow: boolean): 
     if (loopBack) convergenceSet = [loopBack];
   }
   const boundSet = convergenceSet.length > 0 ? new Set(convergenceSet) : null;
-  const branchPrograms = targetIds.map((id) => extractGraphProgramBetween(ctx.flow, id, boundSet));
+  // Branches that meet before the boundary when not all of them do are
+  // one branch (#99).
+  const branchPrograms = extractGraphParallelBranches(ctx.flow, targetIds, boundSet);
   const program: BProgram = [{ k: 'parallel', branches: branchPrograms }];
 
   if (convergenceSet.length <= 1) {
@@ -407,6 +417,57 @@ function andMemberFalseTargets(ctx: Ctx, conditionId: string, seen: Set<string>)
   return parentElse.some(reaches) ? [] : parentElse;
 }
 
+/**
+ * Bug #63: for a condition of an until test -- the head, whose own false
+ * edge loops back, or a later member of its list -- the loop's exit (the
+ * last member's true targets); null otherwise. The head is a `repeat_until`
+ * head, or a plain condition (no `_blockKey`) whose false back-edge doesn't
+ * go to a `repeat_while` head (extractFromGraph.ts's loop reading). Written
+ * separately from state-machine.ts's untilErrorExitTargets, like the rest
+ * of this file.
+ */
+function untilErrorExit(ctx: Ctx, node: ConditionNode): string[] | null {
+  // A disabled condition is never evaluated, so it can't fail.
+  if ((node.data as Record<string, unknown>).enabled === false) return null;
+  const byId = (id: string) => ctx.flow.nodes.find((n) => n.id === id);
+  const key = (id: string) => (byId(id)?.data as Record<string, unknown> | undefined)?._blockKey;
+  const handleEdges = (id: string, handle: string) =>
+    outgoingEdges(ctx, id).filter((e) => e.sourceHandle === handle);
+  const memberOf = (id: string): string | null => {
+    if (handleEdges(id, 'false').length > 0) return null;
+    if (andMemberFalseTargets(ctx, id, new Set()).length === 0) return null;
+    const incoming = ctx.flow.edges.filter((e) => e.target === id && !ctx.backEdgeIds.has(e.id));
+    return incoming.length === 1 ? incoming[0].source : null;
+  };
+
+  let head = node.id;
+  const seen = new Set<string>();
+  while (handleEdges(head, 'false').length === 0) {
+    if (seen.has(head)) return null;
+    seen.add(head);
+    const parent = memberOf(head);
+    if (parent === null || byId(parent)?.type !== 'condition') return null;
+    head = parent;
+  }
+  const loopsBackAsUntil = handleEdges(head, 'false').some(
+    (e) =>
+      ctx.backEdgeIds.has(e.id) &&
+      (key(head) === 'repeat_until' ||
+        (key(head) === undefined && key(e.target) !== 'repeat_while'))
+  );
+  if (!loopsBackAsUntil) return null;
+
+  let last = head;
+  for (;;) {
+    const forwardTrue = handleEdges(last, 'true').filter((e) => !ctx.backEdgeIds.has(e.id));
+    if (forwardTrue.length !== 1) break;
+    const next = forwardTrue[0].target;
+    if (byId(next)?.type !== 'condition' || memberOf(next) !== last) break;
+    last = next;
+  }
+  return handleEdges(last, 'true').map((e) => e.target);
+}
+
 function buildConditionState(ctx: Ctx, node: ConditionNode): ConditionState {
   const cond = parseConditionExpr(node.data as Record<string, unknown>);
   const trueTargets = outgoingEdges(ctx, node.id)
@@ -417,11 +478,13 @@ function buildConditionState(ctx: Ctx, node: ConditionNode): ConditionState {
     .map((e) => e.target);
   const falseTargets =
     ownFalse.length > 0 ? ownFalse : andMemberFalseTargets(ctx, node.id, new Set());
+  const errorExit = untilErrorExit(ctx, node);
   return {
     kind: 'condition',
     cond,
     trueTransition: resolveTransition(ctx, trueTargets, true),
     falseTransition: resolveTransition(ctx, falseTargets, true),
+    ...(errorExit ? { errorTransition: resolveTransition(ctx, errorExit, true) } : {}),
   };
 }
 

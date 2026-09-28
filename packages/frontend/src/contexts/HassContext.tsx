@@ -584,6 +584,12 @@ export const HassProvider: FC<
   return <HassContext.Provider value={value}>{children}</HassContext.Provider>;
 };
 
+/** useHass for a component that also renders outside a HassProvider (a
+ * property panel in a test, say): undefined there instead of throwing. */
+export function useOptionalHass(): HassContextProps | undefined {
+  return useContext(HassContext);
+}
+
 export function useHass() {
   const context = useContext(HassContext);
   if (context === undefined) {

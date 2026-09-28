@@ -1,5 +1,5 @@
 import type { FlowNode } from '@circuitry/shared';
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { FieldError } from '@/components/forms/FieldError';
 import { FormField } from '@/components/forms/FormField';
@@ -175,7 +175,11 @@ function StateTransitionField({
 }: StateTransitionFieldProps) {
   const { t } = useTranslation(['nodes']);
 
-  const isNegated = notValue !== undefined;
+  // "Not" mode chosen but no state picked yet is kept here, not as a
+  // `not_to: ""` placeholder: HA reads "" as the empty state, and the
+  // transpiler writes a trigger's "" as it is (bug #72).
+  const [negatedChosen, setNegatedChosen] = useState(notValue !== undefined);
+  const isNegated = notValue !== undefined || negatedChosen;
   const isAnyState = value === null;
   const listValue: string | string[] = Array.isArray(value)
     ? (value as string[])
@@ -205,10 +209,13 @@ function StateTransitionField({
       ? t('nodes:triggers.fields.fromStatePlaceholder')
       : t('nodes:triggers.fields.toStatePlaceholder');
 
-  const switchToPositive = () => onChangeNotValue(undefined);
+  const switchToPositive = () => {
+    setNegatedChosen(false);
+    onChangeNotValue(undefined);
+  };
   const switchToNegated = () => {
+    setNegatedChosen(true);
     onChangeValue(undefined);
-    onChangeNotValue('');
   };
   const toggleAnyState = (checked: boolean) => onChangeValue(checked ? null : undefined);
 

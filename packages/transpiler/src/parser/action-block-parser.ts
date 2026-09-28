@@ -20,11 +20,14 @@ import type {
   Target,
   WaitNode,
 } from '@circuitry/shared';
-import { HAConditionSchema, HATriggerSchema, isDeviceAction } from '@circuitry/shared';
+import { isDeviceAction } from '@circuitry/shared';
 import {
   isChooseAction,
+  conditionList,
+  expandConditionShorthand,
   isConditionAction,
   isConditionListAction,
+  isConditionShorthandAction,
   isDelayAction,
   isEventAction,
   isIfThenAction,
@@ -33,13 +36,26 @@ import {
   isSequenceAction,
   isServiceAction,
   isSetConversationResponseAction,
+  isStepKeptAsWritten,
   isStopAction,
+  isTemplateEnabledBlock,
+  isUnexpandableCountRepeat,
   isVariablesAction,
   isWaitAction,
+  isWaitScopedParallel,
   resolveConditionType,
+  toList,
   transformConditions,
 } from './action-type-guards';
-import { createEdge, createUnknownNode, unfoldEventContextUserId } from './parser-shared';
+import { mentionsLoopVariable } from '../analyzer/loop-variable';
+import {
+  conditionEnabledAsWritten,
+  createEdge,
+  createOpaqueStepNode,
+  importCondition,
+  importWaitTriggers,
+  stepEnabledAsWritten,
+} from './parser-shared';
 
 /**
  * Options for parsing actions and nested blocks
@@ -61,6 +77,25 @@ export interface ParseOptions {
    */
   triggerNodeMap?: Map<string, string>;
   /**
+   * The automation's own list only: nodes that end the branch of a
+   * trigger-id routing if, with the trigger ids whose run they carry on
+   * (bug #105). A later routing if for other ids lets them pass by, as it
+   * does those triggers; any other step joins them all.
+   */
+  laneIds?: Map<string, string[]>;
+  /**
+   * True for every list but the automation's own: an if's or a Choose's
+   * branch, a parallel branch, a `sequence:` group, a loop's body. HA runs
+   * each as a script of its own, and a condition step that doesn't pass
+   * ends only that script -- what comes after the block still runs, and a
+   * loop goes on to its next pass (script.py: `_ConditionFail` is caught
+   * by the sub-script's own run). So in such a list a condition step is
+   * read as an if around the rest of the list (bug #78). In the
+   * automation's own list it ends the run, as a path that just ends does
+   * on the canvas (decision D1).
+   */
+  nested?: boolean;
+  /**
    * Inherited enabled state from parent block.
    * When false, all child nodes will be created with enabled: false.
    * When undefined, nodes inherit their own enabled property.
@@ -68,11 +103,69 @@ export interface ParseOptions {
   inheritedEnabled?: boolean;
 }
 
+/** True when the step being parsed is reached straight from a trigger
+ * (the only place a trigger-id if routes triggers, bug #80). */
+function startsFromTriggers(
+  previousNodeIds: readonly string[],
+  triggerNodeMap: Map<string, string> | undefined
+): boolean {
+  return !!triggerNodeMap && previousNodeIds.some((id) => triggerNodeMap.has(id));
+}
+
+/** The trigger ids whose run a node carries at a routing if: a trigger's
+ * own id, or a routed branch's lane (bug #105); undefined for any other
+ * node (every trigger's run). */
+function laneOf(
+  id: string,
+  triggerNodeMap: Map<string, string> | undefined,
+  laneIds: Map<string, string[]> | undefined
+): string[] | undefined {
+  const triggerId = triggerNodeMap?.get(id);
+  return triggerId !== undefined ? [triggerId] : laneIds?.get(id);
+}
+
+/**
+ * The trigger ids of a trigger-id routing if, or null when the if doesn't
+ * route: a single `condition: trigger` with no else, reached straight
+ * from the triggers (or the branches earlier routing ifs gave them).
+ * Anywhere else -- after another step, inside a branch or a loop -- it is
+ * an ordinary if: when it doesn't pass, what follows it still runs (bug
+ * #80). A run that it would pass for some of its triggers and not others
+ * can't be routed either, so the if is an ordinary one then too.
+ */
+function routingTriggerIds(
+  ifAction: { else?: unknown },
+  ifConditions: unknown[],
+  previousNodeIds: readonly string[],
+  triggerNodeMap: Map<string, string> | undefined,
+  laneIds: Map<string, string[]> | undefined
+): string[] | null {
+  if (!startsFromTriggers(previousNodeIds, triggerNodeMap)) return null;
+  const elseIsEmpty =
+    !ifAction.else || (Array.isArray(ifAction.else) && ifAction.else.length === 0);
+  if (!elseIsEmpty || ifConditions.length !== 1) return null;
+  const cond = ifConditions[0] as Record<string, unknown>;
+  if (cond?.condition !== 'trigger') return null;
+  const rawId = cond?.id;
+  const ids =
+    typeof rawId === 'string'
+      ? [rawId]
+      : Array.isArray(rawId) && rawId.length > 0 && rawId.every((x) => typeof x === 'string')
+        ? (rawId as string[])
+        : null;
+  if (ids === null) return null;
+  const splits = previousNodeIds.some((id) => {
+    const lane = laneOf(id, triggerNodeMap, laneIds);
+    return lane !== undefined && lane.some((t) => ids.includes(t)) && !lane.every((t) => ids.includes(t));
+  });
+  return splits ? null : ids;
+}
+
 /**
  * Parse action sequences (including choose blocks, delays, etc.)
  */
 export function parseActions(
-  actions: (HAAction | HACondition)[],
+  actions: readonly unknown[],
   options: ParseOptions
 ): {
   nodes: FlowNode[];
@@ -108,11 +201,16 @@ export function parseActions(
     falsePathConditionIds: incomingFalsePathConditionIds = new Set(),
     triggerNodeMap,
     inheritedEnabled,
+    nested = false,
   } = options;
+  const laneIds = options.laneIds ?? new Map<string, string[]>();
 
   const nodes: FlowNode[] = [];
   const edges: FlowEdge[] = [];
   let currentNodeIds = previousNodeIds;
+  // Set once a condition step in a nested list has taken the rest of the
+  // list into its if (bug #78; see ParseOptions.nested).
+  let restTakenByConditionStep = false;
   // Create a mutable copy so we can track condition nodes created during parsing
   const localConditionNodeIds = new Set(conditionNodeIds);
   // Track condition nodes whose FALSE path should connect to next action.
@@ -132,7 +230,7 @@ export function parseActions(
   const falsePathConditionIds = new Set(incomingFalsePathConditionIds);
 
   // Helper to compute the enabled state for a node
-  const getNodeEnabled = (nodeEnabled: boolean | undefined): boolean | undefined => {
+  const getNodeEnabled = <T extends boolean | string | undefined>(nodeEnabled: T): T | false => {
     // If parent is disabled, child is always disabled
     if (inheritedEnabled === false) return false;
     // Otherwise use the node's own enabled state
@@ -154,55 +252,157 @@ export function parseActions(
     }
   };
 
+  /** Condition steps this list read as plain condition nodes. */
+  const plainConditionStepIds = new Set<string>();
+  /** Whether the list has got to the "yes" exit of a block's own condition
+   * (an until loop's test, the last of an if's conditions with an empty
+   * then) rather than of one of this list's condition steps: see bug #83
+   * below. */
+  const followsBlockYesExit = (): boolean =>
+    currentNodeIds.some(
+      (id) =>
+        localConditionNodeIds.has(id) &&
+        !falsePathConditionIds.has(id) &&
+        !plainConditionStepIds.has(id) &&
+        nodes.some((n) => n.id === id && n.type === 'condition')
+    );
+
+  /** An if/then/else step (or a nested condition step read as one, bug
+   * #78), parsed from where the list has got to. */
+  const parseIfStep = (act: Record<string, unknown>): void => {
+    const ifArr = conditionList(act.if);
+    const thenArr = Array.isArray(act.then) ? act.then : [];
+    const elseArr = Array.isArray(act.else) ? act.else : undefined;
+    // Phase 5 (2026-09-26): an if with nothing in either branch does
+    // nothing (HA conditions have no side effects). Kept as nodes it had no
+    // stable shape: its true and false paths both have to continue, and
+    // each round trip through NativeStrategy re-rendered it as a larger
+    // no-op. A trigger-id if too (bug #105: routed, the run it passed for
+    // ended there).
+    if (thenArr.length === 0 && (elseArr === undefined || elseArr.length === 0)) {
+      return;
+    }
+    const ifAction = {
+      if: ifArr,
+      then: thenArr,
+      else: elseArr,
+      alias: typeof act.alias === 'string' ? act.alias : undefined,
+      enabled: act.enabled,
+    };
+    const ifResult = parseIfBlock(ifAction, {
+      warnings,
+      previousNodeIds: currentNodeIds,
+      getNextNodeId,
+      conditionNodeIds: localConditionNodeIds,
+      falsePathConditionIds,
+      triggerNodeMap,
+      laneIds,
+      inheritedEnabled,
+    });
+    nodes.push(...ifResult.nodes);
+    edges.push(...ifResult.edges);
+    // Route condition outputs to the correct handle tracking set
+    for (const outId of ifResult.outputNodeIds) {
+      const outNode = ifResult.nodes.find((n) => n.id === outId);
+      if (outNode?.type === 'condition') {
+        if (ifResult.falsePathOutputIds.includes(outId)) {
+          // This condition's FALSE path should connect to subsequent actions
+          falsePathConditionIds.add(outId);
+        } else {
+          // This condition's TRUE path should connect to subsequent actions
+          localConditionNodeIds.add(outId);
+        }
+      }
+    }
+    // For trigger-id routing: the triggers (and routed branches) this if
+    // didn't take carry on past it, and so does the branch it routed, as
+    // a lane of its own: HA runs what follows the if for every trigger
+    // (bug #105: the routed trigger's run used to end with the branch). A
+    // later routing if for other ids lets the lane pass by; any other
+    // step joins every lane.
+    if (ifResult.routedIds !== null) {
+      for (const outId of ifResult.outputNodeIds) laneIds.set(outId, ifResult.routedIds);
+      currentNodeIds = [...new Set([...ifResult.unconsumedPreviousIds, ...ifResult.outputNodeIds])];
+    } else {
+      currentNodeIds = ifResult.outputNodeIds;
+    }
+  };
+
   // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: large dispatch switch, refactoring deferred
   actions.forEach((action, index) => {
-    if (!action || typeof action !== 'object') {
-      // Unknown action type - create unknown node
-      warnings.push(`Unknown action type (${JSON.stringify(action)}) at index ${index}`);
-      const nodeId = getNextNodeId('unknown');
-      nodes.push({
-        id: nodeId,
-        type: 'action',
-        position: { x: 0, y: 0 },
-        data: {
-          alias: 'Unknown Node',
-          service: 'unknown.unknown',
-          data: action as Record<string, unknown>,
-        },
-      });
+    if (restTakenByConditionStep) return;
+    if (!action || typeof action !== 'object' || Array.isArray(action)) {
+      // HA refuses a step that isn't a mapping ("expected a dictionary"),
+      // so the automation is already broken: say so and name the step
+      // (decision D3). It used to become an "Unknown Node" that failed
+      // the graph's own schema with a message about `data`.
+      throw new Error(
+        `Step ${index + 1} of an action list is not a step Home Assistant can run: ${JSON.stringify(action)}`
+      );
+    }
+
+    // A block whose `enabled:` is a template: kept exactly as written
+    // (bug #70; see isTemplateEnabledBlock). Inside a disabled block its
+    // template doesn't matter (HA skips the outer block), so it is read as
+    // a disabled block like any other.
+    if (inheritedEnabled !== false && isTemplateEnabledBlock(action)) {
+      const nodeId = getNextNodeId('action');
+      nodes.push(createOpaqueStepNode(nodeId, action, false));
       createEdgesFromCurrent(nodeId);
       currentNodeIds = [nodeId];
       return;
     }
 
+    // A `repeat: count` the counter loop can't express (0 or less, not a
+    // whole number, a template), a parallel of one branch that sets
+    // `wait`, or a step its node can't hold whole: kept exactly as written
+    // (bugs #73, #81, #88-#90; see isUnexpandableCountRepeat,
+    // isWaitScopedParallel, isStepKeptAsWritten).
+    if (
+      isUnexpandableCountRepeat(action) ||
+      isWaitScopedParallel(action) ||
+      isStepKeptAsWritten(action)
+    ) {
+      const nodeId = getNextNodeId('action');
+      nodes.push(createOpaqueStepNode(nodeId, action, inheritedEnabled === false));
+      createEdgesFromCurrent(nodeId);
+      currentNodeIds = [nodeId];
+      return;
+    }
+
+    const isConditionStep =
+      isConditionAction(action) ||
+      isConditionListAction(action) ||
+      isConditionShorthandAction(action);
+
     // Handle different action types
-    if (isConditionAction(action) || isConditionListAction(action)) {
+    if (isConditionStep && (nested || followsBlockYesExit())) {
+      // A condition step in a nested list ends only that list when it
+      // doesn't pass, so it is an if around the rest of the list, with no
+      // else (bug #78; see ParseOptions.nested). Its own alias and
+      // `enabled` stay on the condition.
+      // In the automation's own list it ends the run, and so does an if
+      // around the rest of the list (nothing comes after it). That's how
+      // it's read right after a block whose way out is one of its own
+      // conditions' "yes" -- an until loop's test, an if with an empty
+      // then: a plain condition there would read as a member of that
+      // condition's list (the until loop ran until both passed; bug #83).
+      restTakenByConditionStep = true;
+      parseIfStep({
+        if: [expandConditionShorthand(action)],
+        then: actions.slice(index + 1) as (HACondition | HAAction)[],
+      });
+    } else if (isConditionStep) {
       // Inline condition guard in action sequence — either a single condition
       // object (condition acts as the type discriminator) or the "list of
       // conditions" shorthand (implicit AND), which we normalize to an
       // explicit `and` condition object before parsing so both forms share
       // one code path.
       const nodeId = getNextNodeId('condition');
-      const rawAct = action as Record<string, unknown>;
-      const act = isConditionListAction(action)
-        ? { condition: 'and', conditions: rawAct.condition, alias: rawAct.alias }
-        : rawAct;
-      const validatedType = resolveConditionType(act.condition as string, 'template');
-
-      // Use Zod schema for parsing and type safety
-      let parsedData: ConditionNode['data'];
-      try {
-        parsedData = HAConditionSchema.parse(act);
-      } catch (e) {
-        warnings.push(
-          `Inline condition at index ${index} failed schema validation: ${e instanceof Error ? e.message : JSON.stringify(e)}`
-        );
-        parsedData = {
-          condition: validatedType,
-          alias: typeof act.alias === 'string' ? act.alias : undefined,
-          value_template: JSON.stringify(act),
-        };
-      }
+      // Shorthands (`condition: [...]`, `and:`/`or:`/`not:`) expanded the
+      // way HA expands them (bug #59).
+      const act = expandConditionShorthand(action);
+      const parsedData: ConditionNode['data'] = importCondition(act, `Condition step ${index}`);
       // Apply inherited enabled state
       parsedData.enabled = getNodeEnabled(parsedData.enabled);
       const conditionNode: ConditionNode = {
@@ -214,6 +414,7 @@ export function parseActions(
 
       nodes.push(conditionNode);
       createEdgesFromCurrent(nodeId);
+      plainConditionStepIds.add(nodeId);
       // Track this condition node so subsequent edges use 'true' handle
       localConditionNodeIds.add(nodeId);
       currentNodeIds = [nodeId];
@@ -228,7 +429,7 @@ export function parseActions(
         data: {
           alias: typeof act.alias === 'string' ? act.alias : undefined,
           variables: (act.variables as Record<string, unknown>) || {},
-          enabled: getNodeEnabled(typeof act.enabled === 'boolean' ? act.enabled : undefined),
+          enabled: getNodeEnabled(stepEnabledAsWritten(act.enabled)),
         },
       };
       nodes.push(setVariablesNode);
@@ -246,8 +447,10 @@ export function parseActions(
         data: {
           ...extraProps, // Preserve extra properties
           alias: typeof alias === 'string' ? alias : undefined,
+          // A number is seconds (`delay: 5`), kept as written; it used to
+          // become `delay: ""` (bug #60).
           delay:
-            typeof delayValue === 'string'
+            typeof delayValue === 'string' || typeof delayValue === 'number'
               ? delayValue
               : typeof delayValue === 'object' && delayValue !== null
                 ? (delayValue as {
@@ -257,7 +460,7 @@ export function parseActions(
                     milliseconds?: number;
                   })
                 : '',
-          enabled: getNodeEnabled(typeof enabled === 'boolean' ? enabled : undefined),
+          enabled: getNodeEnabled(stepEnabledAsWritten(enabled)),
         },
       };
       nodes.push(delayNode);
@@ -277,9 +480,10 @@ export function parseActions(
         ...extraProps
       } = act;
 
-      // Handle timeout as either string or object format
+      // Handle timeout as a string, a number of seconds (`timeout: 30`,
+      // kept as written; it used to be dropped, bug #61) or an object
       let timeout: WaitNode['data']['timeout'];
-      if (typeof timeoutValue === 'string') {
+      if (typeof timeoutValue === 'string' || typeof timeoutValue === 'number') {
         timeout = timeoutValue;
       } else if (typeof timeoutValue === 'object' && timeoutValue !== null) {
         timeout = timeoutValue as {
@@ -296,24 +500,15 @@ export function parseActions(
         timeout,
         continue_on_timeout:
           typeof continueOnTimeoutValue === 'boolean' ? continueOnTimeoutValue : undefined,
-        enabled: getNodeEnabled(typeof enabled === 'boolean' ? enabled : undefined),
+        enabled: getNodeEnabled(stepEnabledAsWritten(enabled)),
       };
 
       if (typeof waitTemplate === 'string') {
         waitData.wait_template = waitTemplate;
       } else if (Array.isArray(waitForTrigger)) {
-        const parsedTriggers = [];
-        for (const trigger of waitForTrigger) {
-          const result = HATriggerSchema.safeParse(trigger);
-          if (result.success) {
-            parsedTriggers.push(unfoldEventContextUserId(result.data));
-          } else {
-            warnings.push(
-              `Failed to parse a trigger inside wait_for_trigger: ${result.error.message}`
-            );
-          }
-        }
-        waitData.wait_for_trigger = parsedTriggers;
+        // One trigger instead of a list is already a list here
+        // (normalizeActionLists, bug #62).
+        waitData.wait_for_trigger = importWaitTriggers(waitForTrigger);
       }
 
       const waitNode: WaitNode = {
@@ -356,64 +551,7 @@ export function parseActions(
       currentNodeIds = chooseResult.outputNodeIds;
     } else if (isIfThenAction(action)) {
       // Handle if/then/else blocks
-      const act = action as Record<string, unknown>;
-      const ifArr = Array.isArray(act.if) ? act.if : [];
-      const thenArr = Array.isArray(act.then) ? act.then : [];
-      const elseArr = Array.isArray(act.else) ? act.else : undefined;
-      // Phase 5 (2026-09-26): an if with nothing in either branch does
-      // nothing (HA conditions have no side effects). Kept as nodes it had no
-      // stable shape: its true and false paths both have to continue, and
-      // each round trip through NativeStrategy re-rendered it as a larger
-      // no-op. Trigger-id routing ifs are left to parseIfBlock.
-      const isTriggerRouting = ifArr.some(
-        (c) => c && typeof c === 'object' && (c as Record<string, unknown>).condition === 'trigger'
-      );
-      if (
-        thenArr.length === 0 &&
-        (elseArr === undefined || elseArr.length === 0) &&
-        !isTriggerRouting
-      ) {
-        return;
-      }
-      const ifAction = {
-        if: ifArr,
-        then: thenArr,
-        else: elseArr,
-        alias: typeof act.alias === 'string' ? act.alias : undefined,
-        enabled: act.enabled,
-      };
-      const ifResult = parseIfBlock(ifAction, {
-        warnings,
-        previousNodeIds: currentNodeIds,
-        getNextNodeId,
-        conditionNodeIds: localConditionNodeIds,
-        falsePathConditionIds,
-        triggerNodeMap,
-        inheritedEnabled,
-      });
-      nodes.push(...ifResult.nodes);
-      edges.push(...ifResult.edges);
-      // Route condition outputs to the correct handle tracking set
-      for (const outId of ifResult.outputNodeIds) {
-        const outNode = ifResult.nodes.find((n) => n.id === outId);
-        if (outNode?.type === 'condition') {
-          if (ifResult.falsePathOutputIds.includes(outId)) {
-            // This condition's FALSE path should connect to subsequent actions
-            falsePathConditionIds.add(outId);
-          } else {
-            // This condition's TRUE path should connect to subsequent actions
-            localConditionNodeIds.add(outId);
-          }
-        }
-      }
-      // For trigger-id routing: merge unconsumed trigger nodes (those that didn't match
-      // this if block's trigger id) back into currentNodeIds so they are available
-      // as entry points for the next if block.
-      if (ifResult.unconsumedPreviousIds.length > 0) {
-        currentNodeIds = ifResult.unconsumedPreviousIds;
-      } else {
-        currentNodeIds = ifResult.outputNodeIds;
-      }
+      parseIfStep(action as Record<string, unknown>);
     } else if (isDeviceAction(action)) {
       // Device action (type + device_id + domain)
       const nodeId = getNextNodeId('action');
@@ -457,7 +595,7 @@ export function parseActions(
             subtype: act.subtype,
             ...additionalParams,
           } as Record<string, unknown>,
-          enabled: getNodeEnabled(typeof act.enabled === 'boolean' ? act.enabled : undefined),
+          enabled: getNodeEnabled(stepEnabledAsWritten(act.enabled)),
         },
       };
       nodes.push(actionNode);
@@ -539,6 +677,7 @@ export function parseActions(
             // untested construct combination.
             falsePathConditionIds,
             inheritedEnabled: parallelEnabled,
+            nested: true,
           });
           if (seqResult.nodes.length > 0) {
             nodes.push(...seqResult.nodes);
@@ -570,6 +709,7 @@ export function parseActions(
             // see bug #17's comment there for the full explanation.
             falsePathConditionIds,
             inheritedEnabled: parallelEnabled,
+            nested: true,
           });
           if (singleResult.nodes.length > 0) {
             nodes.push(...singleResult.nodes);
@@ -604,7 +744,7 @@ export function parseActions(
               : undefined,
           continue_on_error:
             typeof act.continue_on_error === 'boolean' ? act.continue_on_error : undefined,
-          enabled: getNodeEnabled(typeof act.enabled === 'boolean' ? act.enabled : undefined),
+          enabled: getNodeEnabled(stepEnabledAsWritten(act.enabled)),
         },
       };
       nodes.push(actionNode);
@@ -620,14 +760,10 @@ export function parseActions(
         typeof act.enabled === 'boolean' ? act.enabled : undefined
       );
 
-      if (blockEnabled === false) {
-        // Bug #33 (2026-09-26, found by the Phase 5 disabled-steps fuzz): a
-        // disabled loop (its own `enabled: false`, or inside a disabled
-        // block) is skipped by HA. Decomposed, the only way to carry that
-        // was to disable its nodes -- and a disabled condition counts as
-        // REMOVED, i.e. true, so a disabled `while`/`count` loop became an
-        // endless one. Keep it whole as one opaque repeat node instead,
-        // rendered back verbatim with `enabled: false`.
+      // A loop kept whole, as one repeat node written back verbatim (both
+      // strategies write it as a real `repeat:`, and the gate reads its
+      // structure from the node).
+      const keepRepeatWhole = (): void => {
         const nodeId = getNextNodeId('action');
         const actionNode: ActionNode = {
           id: nodeId,
@@ -638,38 +774,56 @@ export function parseActions(
             repeat: repeat as ActionNode['data']['repeat'],
             continue_on_error:
               typeof act.continue_on_error === 'boolean' ? act.continue_on_error : undefined,
-            enabled: false,
+            enabled: blockEnabled,
           },
         };
         nodes.push(actionNode);
         createEdgesFromCurrent(nodeId);
         currentNodeIds = [nodeId];
-      } else if (Array.isArray(repeat.while) && repeat.while.length > 0) {
+      };
+
+      if (
+        blockEnabled === false ||
+        repeatSequence.length === 0 ||
+        mentionsLoopVariable(repeat)
+      ) {
+        // Kept whole:
+        // - a disabled loop (its own `enabled: false`, or inside a disabled
+        //   block), which HA skips. Decomposed, the only way to carry that
+        //   was to disable its nodes -- and a disabled condition counts as
+        //   REMOVED, i.e. true, so a disabled `while`/`count` loop became
+        //   an endless one (bug #33, found by the Phase 5 disabled-steps
+        //   fuzz);
+        // - a loop with nothing in its body, which the canvas can't draw:
+        //   decomposed, its test was left with no loop to belong to (an
+        //   until loop's test became a condition on the whole automation;
+        //   bug #84);
+        // - a loop whose test or body reads HA's loop variable
+        //   (`repeat.index`, ...): the state machine writes a decomposed
+        //   loop as states of its own dispatch loop, whose `repeat` that
+        //   would then read (bug #79).
+        keepRepeatWhole();
+      } else if (conditionList(repeat.while).length > 0) {
         // ── repeat.while ──
         // condition_node →(true)→ body... →(back-edge)→ condition_node
         // condition_node →(false)→ [continues]
-        const whileConditions = repeat.while as HACondition[];
+        // One condition, a list or a template string, shorthands expanded (bug #59).
+        const whileConditions = conditionList(repeat.while);
 
         // Create condition nodes (chain them like if-block conditions)
         const conditionNodes: ConditionNode[] = [];
         for (let ci = 0; ci < whileConditions.length; ci++) {
           const condId = getNextNodeId('condition');
-          let parsedData: ConditionNode['data'];
-          try {
-            parsedData = HAConditionSchema.parse(whileConditions[ci]);
-          } catch {
-            parsedData = {
-              condition: 'template',
-              value_template: JSON.stringify(whileConditions[ci]),
-            };
-          }
+          const parsedData: ConditionNode['data'] = importCondition(
+            whileConditions[ci],
+            'repeat while'
+          );
           if (ci === 0 && blockAlias) {
             parsedData.alias = blockAlias;
           }
           // Bug #32: keep the condition's own `enabled: false`.
           // (A disabled loop never gets here -- it's kept whole, bug #33.)
-          parsedData.enabled =
-            (whileConditions[ci] as Record<string, unknown>)?.enabled === false ? false : undefined;
+          parsedData.enabled = conditionEnabledAsWritten(whileConditions[ci], false);
           // Stamp _blockKey on the while-condition (i === 0 only, matching
           // the single-condition-node native shape from block-factories.ts's
           // createRepeatWhileBlock) so it opens the AND miller and gets the
@@ -721,18 +875,15 @@ export function parseActions(
           conditionNodeIds: localConditionNodeIds,
           falsePathConditionIds,
           inheritedEnabled: blockEnabled,
+          nested: true,
         });
         nodes.push(...bodyResult.nodes);
         edges.push(...bodyResult.edges);
 
-        // Fix the first edge from last condition to body to use 'true' handle
-        if (bodyResult.nodes.length > 0) {
-          const firstBodyId = bodyResult.nodes[0].id;
-          const trueEdge = edges.find((e) => e.source === lastCondId && e.target === firstBodyId);
-          if (trueEdge) {
-            trueEdge.sourceHandle = 'true';
-          }
-        }
+        // Every edge from the last condition into the body is its 'true'
+        // edge (all of them, not the one to the first node
+        // made -- a body opening with a parallel has several).
+        markEntryEdges(bodyResult.edges, lastCondId, { sourceHandle: 'true' });
 
         // Create back-edge(s) from the body's own tracked terminal nodes
         // back to the loop's first condition (bug found 2026-09-07,
@@ -783,10 +934,7 @@ export function parseActions(
         // Output continues from first condition's FALSE path
         currentNodeIds = [conditionNodes[0].id];
         falsePathConditionIds.add(conditionNodes[0].id);
-      } else if (
-        (Array.isArray(repeat.until) && repeat.until.length > 0) ||
-        typeof repeat.until === 'string'
-      ) {
+      } else if (conditionList(repeat.until).length > 0) {
         // ── repeat.until ──
         // body... → condition_node →(true)→ [continues]
         // condition_node →(false, back-edge)→ first body node
@@ -840,6 +988,7 @@ export function parseActions(
           conditionNodeIds: localConditionNodeIds,
           falsePathConditionIds,
           inheritedEnabled: blockEnabled,
+          nested: true,
         });
         nodes.push(...bodyResult.nodes);
         edges.push(...bodyResult.edges);
@@ -860,30 +1009,22 @@ export function parseActions(
           loopAnchorId ?? (bodyResult.nodes.length > 0 ? bodyResult.nodes[0].id : null);
 
         // Create condition nodes from until conditions
-        const untilConditions: HACondition[] =
-          typeof repeat.until === 'string'
-            ? [{ condition: 'template', value_template: repeat.until }]
-            : (repeat.until as HACondition[]);
+        // One condition, a list or a template string, shorthands expanded (bug #59).
+        const untilConditions = conditionList(repeat.until);
 
         const conditionNodes: ConditionNode[] = [];
         for (let ci = 0; ci < untilConditions.length; ci++) {
           const condId = getNextNodeId('condition');
-          let parsedData: ConditionNode['data'];
-          try {
-            parsedData = HAConditionSchema.parse(untilConditions[ci]);
-          } catch {
-            parsedData = {
-              condition: 'template',
-              value_template: JSON.stringify(untilConditions[ci]),
-            };
-          }
+          const parsedData: ConditionNode['data'] = importCondition(
+            untilConditions[ci],
+            'repeat until'
+          );
           if (ci === 0 && blockAlias && bodyResult.nodes.length === 0) {
             parsedData.alias = blockAlias;
           }
           // Bug #32: keep the condition's own `enabled: false`.
           // (A disabled loop never gets here -- it's kept whole, bug #33.)
-          parsedData.enabled =
-            (untilConditions[ci] as Record<string, unknown>)?.enabled === false ? false : undefined;
+          parsedData.enabled = conditionEnabledAsWritten(untilConditions[ci], false);
           // Stamp _blockKey on the until-condition — same reasoning as
           // repeat.while's condition node above.
           if (ci === 0) {
@@ -982,6 +1123,7 @@ export function parseActions(
           conditionNodeIds: localConditionNodeIds,
           falsePathConditionIds,
           inheritedEnabled: blockEnabled,
+          nested: true,
         });
         nodes.push(...bodyResult.nodes);
         edges.push(...bodyResult.edges);
@@ -1070,23 +1212,8 @@ export function parseActions(
         currentNodeIds = [condId];
         falsePathConditionIds.add(condId);
       } else {
-        // Unknown repeat type - create opaque action node as fallback
-        const nodeId = getNextNodeId('action');
-        const actionNode: ActionNode = {
-          id: nodeId,
-          type: 'action',
-          position: { x: 0, y: 0 },
-          data: {
-            alias: blockAlias,
-            repeat: repeat as ActionNode['data']['repeat'],
-            continue_on_error:
-              typeof act.continue_on_error === 'boolean' ? act.continue_on_error : undefined,
-            enabled: blockEnabled,
-          },
-        };
-        nodes.push(actionNode);
-        createEdgesFromCurrent(nodeId);
-        currentNodeIds = [nodeId];
+        // Unknown repeat type (`for_each`) - kept whole
+        keepRepeatWhole();
       }
     } else if (isServiceAction(action)) {
       // Regular service call action (support both 'service' and 'action' fields)
@@ -1132,15 +1259,25 @@ export function parseActions(
               typeof response_variable === 'string' ? response_variable : undefined,
             continue_on_error:
               typeof continue_on_error === 'boolean' ? continue_on_error : undefined,
-            enabled: getNodeEnabled(typeof enabled === 'boolean' ? enabled : undefined),
+            enabled: getNodeEnabled(stepEnabledAsWritten(enabled)),
           },
         };
         nodes.push(actionNode);
         createEdgesFromCurrent(nodeId);
         currentNodeIds = [nodeId];
       } catch (error) {
+        // Kept exactly as written rather than rewritten (bug #57); it used
+        // to become a detached `unknown.unknown` node.
         warnings.push(`Failed to parse action ${index}: ${error}`);
-        nodes.push(createUnknownNode(nodeId, action));
+        nodes.push(
+          createOpaqueStepNode(
+            nodeId,
+            action as Record<string, unknown>,
+            inheritedEnabled === false
+          )
+        );
+        createEdgesFromCurrent(nodeId);
+        currentNodeIds = [nodeId];
       }
     } else if (isSetConversationResponseAction(action)) {
       // set_conversation_response action - convert to service call format
@@ -1157,7 +1294,7 @@ export function parseActions(
             typeof act.set_conversation_response === 'string'
               ? act.set_conversation_response
               : undefined,
-          enabled: getNodeEnabled(typeof act.enabled === 'boolean' ? act.enabled : undefined),
+          enabled: getNodeEnabled(stepEnabledAsWritten(act.enabled)),
         },
       };
       nodes.push(actionNode);
@@ -1181,7 +1318,7 @@ export function parseActions(
           ...(typeof act.continue_on_error === 'boolean'
             ? { continue_on_error: act.continue_on_error }
             : {}),
-          enabled: getNodeEnabled(typeof act.enabled === 'boolean' ? act.enabled : undefined),
+          enabled: getNodeEnabled(stepEnabledAsWritten(act.enabled)),
         },
       };
       nodes.push(actionNode);
@@ -1217,6 +1354,7 @@ export function parseActions(
         getNextNodeId,
         conditionNodeIds: localConditionNodeIds,
         inheritedEnabled: blockEnabled,
+        nested: true,
       });
       nodes.push(...nestedResult.nodes);
       edges.push(...nestedResult.edges);
@@ -1241,19 +1379,13 @@ export function parseActions(
       createEdgesFromCurrent(endId);
       currentNodeIds = [endId];
     } else {
-      // Unknown action type - create unknown node
-      warnings.push(`Unknown action type (${JSON.stringify(action)}) at index ${index}`);
-      const nodeId = getNextNodeId('unknown');
-      nodes.push({
-        id: nodeId,
-        type: 'action',
-        position: { x: 0, y: 0 },
-        data: {
-          alias: 'Unknown Node',
-          service: 'unknown.unknown',
-          data: action as Record<string, unknown>,
-        },
-      });
+      // A step this parser doesn't know (`scene:`, the legacy
+      // `service_template:`, a step type HA adds later): kept exactly as
+      // written and written back unchanged (bug #57, decision D3).
+      const nodeId = getNextNodeId('action');
+      nodes.push(
+        createOpaqueStepNode(nodeId, action as Record<string, unknown>, inheritedEnabled === false)
+      );
       createEdgesFromCurrent(nodeId);
       currentNodeIds = [nodeId];
     }
@@ -1303,17 +1435,18 @@ export function parseChooseBlock(
   const falsePathOutputIds: string[] = [];
   const localConditionIds = new Set(conditionNodeIds);
 
-  // Build reverse map: trigger-id-value → trigger-node-id (for hint edges)
-  // triggerNodeMap is: triggerNodeId → triggerIdValue
-  const triggerIdToNodeId = new Map<string, string>();
+  // Build reverse map: trigger-id-value → trigger-node-ids (for hint edges)
+  // triggerNodeMap is: triggerNodeId → triggerIdValue. Several triggers
+  // can share an id (a map to one node kept only the last).
+  const triggerIdToNodeIds = new Map<string, string[]>();
   if (triggerNodeMap) {
     for (const [nodeId, triggerId] of triggerNodeMap.entries()) {
-      triggerIdToNodeId.set(triggerId, nodeId);
+      triggerIdToNodeIds.set(triggerId, [...(triggerIdToNodeIds.get(triggerId) ?? []), nodeId]);
     }
   }
   // Set of trigger node IDs — used to skip plain flow edges from triggers to case1.
   // Hint edges already show the matching trigger→condition connection visually.
-  const triggerNodeIds = new Set(triggerIdToNodeId.values());
+  const triggerNodeIds = new Set(triggerNodeMap?.keys() ?? []);
 
   // Compute effective enabled state: if parent is disabled or this block is disabled
   const blockEnabled = chooseAction.enabled;
@@ -1324,8 +1457,8 @@ export function parseChooseBlock(
   // condition's OWN `enabled: false` (HA: that condition counts as removed)
   // was overwritten by the block's enabled state, so a condition disabled
   // in HA came back active.
-  const conditionEnabled = (condition: Record<string, unknown> | undefined): false | undefined =>
-    effectiveEnabled === false || condition?.enabled === false ? false : undefined;
+  const conditionEnabled = (condition: Record<string, unknown> | undefined) =>
+    conditionEnabledAsWritten(condition, effectiveEnabled === false);
 
   const choices = Array.isArray(chooseAction.choose) ? chooseAction.choose : [chooseAction.choose];
 
@@ -1347,7 +1480,7 @@ export function parseChooseBlock(
     if (typeof choice !== 'object' || choice === null || validChoices.includes(choice)) continue;
     const choiceSequence = (choice as Record<string, unknown>).sequence;
     if (!choiceSequence) continue;
-    if (chooseAction.default || syntheticDefaultSequence) {
+    if (toList(chooseAction.default).length > 0 || syntheticDefaultSequence) {
       warnings.push(
         'Choose block has a choice with empty conditions whose actions could not be preserved (would clash with the default branch).'
       );
@@ -1360,10 +1493,8 @@ export function parseChooseBlock(
   let currentPreviousIds = [...previousNodeIds];
 
   validChoices.forEach((choice, choiceIndex) => {
-    // choice.conditions can be an array of conditions or a single condition object
-    const conditionsArray = Array.isArray(choice.conditions)
-      ? choice.conditions
-      : [choice.conditions];
+    // One condition, a list or a template string, shorthands expanded (bug #59).
+    const conditionsArray = conditionList(choice.conditions);
 
     // Create separate condition nodes for each condition in the choice (explode AND conditions)
     const choiceConditionNodes: ConditionNode[] = [];
@@ -1376,7 +1507,7 @@ export function parseChooseBlock(
 
       if (condition && Array.isArray(condition.conditions)) {
         // Condition with nested conditions (or/and/not) - preserve structure
-        const conditionType = resolveConditionType(condition.condition as string, 'and');
+        const conditionType = resolveConditionType(condition.condition);
 
         conditionNode = {
           id: conditionId,
@@ -1411,7 +1542,7 @@ export function parseChooseBlock(
         };
       } else {
         // Simple condition - use Zod schema for parsing and type safety
-        const conditionType = resolveConditionType(condition?.condition as string, 'template');
+        const conditionType = resolveConditionType(condition?.condition);
 
         // Build object with alias override for first condition
         const looseObj = {
@@ -1421,19 +1552,7 @@ export function parseChooseBlock(
           enabled: conditionEnabled(condition),
         };
 
-        // Validate and normalize with HAConditionSchema
-        let data: HACondition;
-        try {
-          data = HAConditionSchema.parse(looseObj);
-        } catch {
-          // Fallback: minimal valid template
-          data = {
-            alias: i === 0 ? choice.alias : undefined,
-            condition: 'template',
-            value_template: JSON.stringify(condition),
-            enabled: conditionEnabled(condition),
-          };
-        }
+        let data: HACondition = importCondition(looseObj, `choose case ${choiceIndex + 1}`);
 
         // Normalize id: single-element array → string (HA API returns arrays)
         if (Array.isArray(data.id) && (data.id as string[]).length === 1) {
@@ -1489,20 +1608,23 @@ export function parseChooseBlock(
     // through the visible Vorlage→case path and adding a hint edge would create a
     // misleading bypass line that skips the gate.
     const triggersAreDirectPredecessors = previousNodeIds.some((id) => triggerNodeIds.has(id));
-    if (triggerIdToNodeId.size > 0 && triggersAreDirectPredecessors) {
+    if (triggerIdToNodeIds.size > 0 && triggersAreDirectPredecessors) {
       for (const condNode of choiceConditionNodes) {
         const condData = condNode.data as Record<string, unknown>;
         if (condData.condition === 'trigger' && condData.id) {
-          const rawId = condData.id;
-          const lookupId = Array.isArray(rawId) ? String(rawId[0]) : String(rawId);
-          const matchingTriggerNodeId = triggerIdToNodeId.get(lookupId);
-          if (matchingTriggerNodeId) {
-            edges.push({
-              id: `hint-${matchingTriggerNodeId}-${condNode.id}`,
-              source: matchingTriggerNodeId,
-              target: condNode.id,
-              type: 'hint',
-            });
+          // Every id in a list, and every trigger with it:
+          // `id: [a, b]` passes for either, and the hint showed only the
+          // first id's last trigger.
+          const triggerIds = new Set(toList(condData.id).map(String));
+          for (const lookupId of triggerIds) {
+            for (const matchingTriggerNodeId of triggerIdToNodeIds.get(lookupId) ?? []) {
+              edges.push({
+                id: `hint-${matchingTriggerNodeId}-${condNode.id}`,
+                source: matchingTriggerNodeId,
+                target: condNode.id,
+                type: 'hint',
+              });
+            }
           }
         }
       }
@@ -1556,19 +1678,14 @@ export function parseChooseBlock(
         getNextNodeId,
         conditionNodeIds: localConditionIds,
         inheritedEnabled: effectiveEnabled,
+        nested: true,
       });
       nodes.push(...sequenceResult.nodes);
       edges.push(...sequenceResult.edges);
 
-      // Connect last condition node to first action in sequence via 'true' handle
+      // Connect last condition node to the sequence via its 'true' handle
       if (sequenceResult.nodes.length > 0) {
-        const firstActionId = sequenceResult.nodes[0].id;
-        const trueEdge = edges.find(
-          (e) => e.source === lastConditionId && e.target === firstActionId
-        );
-        if (trueEdge) {
-          trueEdge.sourceHandle = 'true';
-        }
+        markEntryEdges(sequenceResult.edges, lastConditionId, { sourceHandle: 'true' });
         // Every actual terminal node of the sequence is an output — NOT
         // just `nodes[nodes.length - 1]` (the last node CREATED, in
         // insertion order). Found via empirical stress-test audit,
@@ -1644,9 +1761,13 @@ export function parseChooseBlock(
   // inside the default sequence, all get correct handles automatically
   // instead of relying on a single-level find-and-patch that a real user
   // automation proved doesn't reach nested structures.
-  if (chooseAction.default || syntheticDefaultSequence) {
-    const rawDefault = chooseAction.default ?? syntheticDefaultSequence;
-    const defaultSequence = Array.isArray(rawDefault) ? rawDefault : [rawDefault];
+  // An empty `default: []` is no default at all (HA runs nothing there):
+  // the last case's false path carries on after the choose. It used to
+  // count as a default, so that path ended the automation (bug #84).
+  const defaultSequence = toList(
+    toList(chooseAction.default).length > 0 ? chooseAction.default : syntheticDefaultSequence
+  );
+  if (defaultSequence.length > 0) {
     const lastConditionId = currentPreviousIds[0];
     const defaultResult = parseActions(defaultSequence, {
       warnings,
@@ -1658,19 +1779,14 @@ export function parseChooseBlock(
           ? new Set([lastConditionId])
           : new Set(),
       inheritedEnabled: effectiveEnabled,
+      nested: true,
     });
     nodes.push(...defaultResult.nodes);
     edges.push(...defaultResult.edges);
-    // Tag the first edge as a visual 'choose-default' type, matching what
-    // the previous find-and-patch used to mark.
+    // Tag the edges into the default as the visual 'choose-default' type
+    // (all of them: a default opening with a parallel has several).
     if (currentPreviousIds.length > 0 && defaultResult.nodes.length > 0) {
-      const firstDefaultId = defaultResult.nodes[0].id;
-      const defaultEdge = edges.find(
-        (e) => e.source === lastConditionId && e.target === firstDefaultId
-      );
-      if (defaultEdge) {
-        (defaultEdge as Record<string, unknown>).type = 'choose-default';
-      }
+      markEntryEdges(defaultResult.edges, lastConditionId, { type: 'choose-default' });
       // Every actual terminal node of the default sequence is an
       // output -- same class of bug as bug #2/#11 above (nodes[length-1]
       // is "last node CREATED", not necessarily the real exit point,
@@ -1695,11 +1811,31 @@ export function parseChooseBlock(
 }
 
 /**
+ * Marks every plain edge from `from` among a branch's own edges: the
+ * branch's ways in, several when it opens with a parallel (only
+ * the edge to the first node made used to be marked). Visual hint
+ * edges are left as they are; the old lookup could find a choose's fan
+ * hint first and retype it into a real edge.
+ */
+function markEntryEdges(
+  branchEdges: FlowEdge[],
+  from: string,
+  mark: { sourceHandle?: 'true'; type?: 'choose-default' }
+): void {
+  for (const edge of branchEdges) {
+    if (edge.source !== from || edge.type !== undefined) continue;
+    if (mark.sourceHandle) edge.sourceHandle = mark.sourceHandle;
+    if (mark.type) (edge as Record<string, unknown>).type = mark.type;
+  }
+}
+
+/**
  * Parse if/then/else block
  */
 export function parseIfBlock(
   ifAction: {
-    if: HACondition[];
+    /** One condition, a list or a template string, as HA accepts (bug #59). */
+    if: unknown;
     then: (HACondition | HAAction)[];
     else?: (HACondition | HAAction)[];
     alias?: string;
@@ -1712,6 +1848,9 @@ export function parseIfBlock(
   outputNodeIds: string[];
   falsePathOutputIds: string[];
   unconsumedPreviousIds: string[];
+  /** A routing if's trigger ids, carried by its branch's ends as their
+   * lane; null for any other if (or when a lane-less run joins it). */
+  routedIds: string[] | null;
 } {
   const {
     warnings,
@@ -1720,6 +1859,7 @@ export function parseIfBlock(
     conditionNodeIds = new Set(),
     falsePathConditionIds: incomingFalsePathIds = new Set(),
     triggerNodeMap,
+    laneIds,
     inheritedEnabled,
   } = options;
 
@@ -1737,10 +1877,11 @@ export function parseIfBlock(
   // condition's OWN `enabled: false` (HA: that condition counts as removed)
   // was overwritten by the block's enabled state, so a condition disabled
   // in HA came back active.
-  const conditionEnabled = (condition: Record<string, unknown> | undefined): false | undefined =>
-    effectiveEnabled === false || condition?.enabled === false ? false : undefined;
+  const conditionEnabled = (condition: Record<string, unknown> | undefined) =>
+    conditionEnabledAsWritten(condition, effectiveEnabled === false);
 
-  const ifConditions = Array.isArray(ifAction.if) ? ifAction.if : [ifAction.if];
+  // One condition, a list or a template string, shorthands expanded (bug #59).
+  const ifConditions = conditionList(ifAction.if);
 
   // Create separate condition nodes for each condition in the if: array
   // This "explodes" combined conditions into separate linked nodes
@@ -1754,7 +1895,7 @@ export function parseIfBlock(
 
     if (condition && Array.isArray(condition.conditions)) {
       // Condition with nested conditions (or/and/not) - preserve structure
-      const conditionType = resolveConditionType(condition.condition as string, 'and');
+      const conditionType = resolveConditionType(condition.condition);
 
       conditionNode = {
         id: conditionId,
@@ -1779,7 +1920,7 @@ export function parseIfBlock(
       };
     } else {
       // Simple condition - use its properties directly
-      const conditionType = resolveConditionType(condition?.condition as string, 'numeric_state');
+      const conditionType = resolveConditionType(condition?.condition);
 
       // Use Zod looseObject for normalization and type safety
       const looseObj = {
@@ -1790,19 +1931,7 @@ export function parseIfBlock(
         enabled: conditionEnabled(condition),
       };
 
-      // Validate and normalize with HAConditionSchema
-      let data: HACondition;
-      try {
-        data = HAConditionSchema.parse(looseObj);
-      } catch {
-        // Fallback: minimal valid template
-        data = {
-          alias: i === 0 ? ifAction.alias : undefined,
-          condition: 'template',
-          value_template: JSON.stringify(condition),
-          enabled: conditionEnabled(condition),
-        };
-      }
+      let data: HACondition = importCondition(looseObj, 'if');
 
       // Normalize id: single-element array → string (HA API returns arrays)
       if (Array.isArray(data.id) && (data.id as string[]).length === 1) {
@@ -1835,27 +1964,27 @@ export function parseIfBlock(
   // of a single chained sequence when multiple if-trigger blocks exist.
   const firstConditionId = conditionNodes[0].id;
 
-  // Detect trigger-id routing: a single `condition: trigger` with no else.
+  // Detect trigger-id routing: a single `condition: trigger` with no else,
+  // reached straight from the triggers. Anywhere else -- after another
+  // step, inside a branch or a loop -- it is an ordinary if: when it
+  // doesn't pass, what follows it still runs (bug #80; it used to end the
+  // run there).
   // The `id` field can be a string or an array of strings in HA YAML.
-  const triggerConditionIds: string[] | null = (() => {
-    const elseIsEmpty = !ifAction.else || (Array.isArray(ifAction.else) && ifAction.else.length === 0);
-    if (!elseIsEmpty || ifConditions.length !== 1) return null;
-    const cond = ifConditions[0] as Record<string, unknown>;
-    if (cond?.condition !== 'trigger') return null;
-    const rawId = cond?.id;
-    if (typeof rawId === 'string') return [rawId];
-    if (Array.isArray(rawId) && rawId.length > 0 && rawId.every((x) => typeof x === 'string'))
-      return rawId as string[];
-    return null;
-  })();
+  const triggerConditionIds = routingTriggerIds(
+    ifAction,
+    ifConditions,
+    previousNodeIds,
+    triggerNodeMap,
+    laneIds
+  );
 
   for (const prevId of previousNodeIds) {
     // If this is a trigger-id condition and we have trigger routing info,
     // only connect triggers whose id is listed in this condition's id array.
-    if (triggerConditionIds !== null && triggerNodeMap) {
-      const triggerIdForNode = triggerNodeMap.get(prevId);
-      if (triggerIdForNode !== undefined && !triggerConditionIds.includes(triggerIdForNode)) {
-        // This trigger's id doesn't match — don't connect it here
+    if (triggerConditionIds !== null) {
+      const lane = laneOf(prevId, triggerNodeMap, laneIds);
+      if (lane !== undefined && !lane.some((t) => triggerConditionIds.includes(t))) {
+        // Not this if's trigger(s) -- don't connect it here
         continue;
       }
     }
@@ -1895,20 +2024,13 @@ export function parseIfBlock(
       getNextNodeId,
       conditionNodeIds: localConditionIds,
       inheritedEnabled: effectiveEnabled,
+      nested: true,
     });
     nodes.push(...thenResult.nodes);
     edges.push(...thenResult.edges);
 
-    // The edges from last condition to first action should use 'true' handle
-    if (thenResult.nodes.length > 0) {
-      const firstActionId = thenResult.nodes[0].id;
-      const trueEdge = edges.find(
-        (e) => e.source === lastConditionId && e.target === firstActionId
-      );
-      if (trueEdge) {
-        trueEdge.sourceHandle = 'true';
-      }
-    }
+    // The edges from the last condition into then use its 'true' handle
+    markEntryEdges(thenResult.edges, lastConditionId, { sourceHandle: 'true' });
 
     // Track all terminal nodes from then branch (not just the last created node,
     // as the last action in the sequence may itself be an if/then/else with multiple exits)
@@ -1957,6 +2079,7 @@ export function parseIfBlock(
       conditionNodeIds: new Set(),
       falsePathConditionIds: new Set([firstConditionId]),
       inheritedEnabled: effectiveEnabled,
+      nested: true,
     });
     nodes.push(...elseResult.nodes);
     edges.push(...elseResult.edges);
@@ -2006,14 +2129,19 @@ export function parseIfBlock(
 
   // For trigger-id routing: the trigger nodes that were NOT consumed by this if block
   // must remain available for subsequent if blocks.
+  const passesBy = (id: string): boolean => {
+    const lane = laneOf(id, triggerNodeMap, laneIds);
+    return lane !== undefined && !lane.some((t) => triggerConditionIds?.includes(t));
+  };
   const unconsumedPreviousIds =
-    triggerConditionIds !== null && triggerNodeMap
-      ? previousNodeIds.filter((id) => {
-          const triggerId = triggerNodeMap.get(id);
-          // Keep: trigger nodes whose id is not in this condition's id list, OR non-trigger nodes
-          return triggerId === undefined || !triggerConditionIds.includes(triggerId);
-        })
-      : [];
+    triggerConditionIds !== null ? previousNodeIds.filter(passesBy) : [];
+  // The routed branch carries the if's ids on, unless a run with no lane
+  // (every trigger's) came in too.
+  const routedIds =
+    triggerConditionIds !== null &&
+    previousNodeIds.every((id) => passesBy(id) || laneOf(id, triggerNodeMap, laneIds) !== undefined)
+      ? triggerConditionIds
+      : null;
 
-  return { nodes, edges, outputNodeIds, falsePathOutputIds, unconsumedPreviousIds };
+  return { nodes, edges, outputNodeIds, falsePathOutputIds, unconsumedPreviousIds, routedIds };
 }

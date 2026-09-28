@@ -31,13 +31,30 @@ export type ActionSelection =
  * actual `data` fields an action node needs — mirrors
  * lib/triggerNodeData.ts/lib/conditionNodeData.ts.
  */
+// Services HA describes with no target and no entity_id field (HA
+// 2026.9.3's services.yaml): they act on no entity (#123).
+const NO_ENTITY_SERVICES = new Set<string>([
+  'conversation.process',
+  'conversation.reload',
+  'group.reload',
+  'group.remove',
+  'group.set',
+]);
+
+/** Whether picking this recipe asks for entities first: not for a service
+ * that acts on no entity (#123 -- there are no conversation.* entities, so
+ * those actions couldn't be added at all). */
+export function actionRecipeTakesEntities(recipe: ActionRecipe): boolean {
+  return !NO_ENTITY_SERVICES.has(recipe.service);
+}
+
 export function buildActionNodeData(selection: ActionSelection): Record<string, unknown> {
   switch (selection.kind) {
     case 'recipe': {
       const { entityIds, recipe } = selection;
       return {
         service: recipe.service,
-        target: { entity_id: entityIds },
+        ...(actionRecipeTakesEntities(recipe) ? { target: { entity_id: entityIds } } : {}),
       };
     }
     case 'deviceAction': {

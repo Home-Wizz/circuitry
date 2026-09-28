@@ -112,6 +112,7 @@ export type FlowGraph = z.infer<typeof FlowGraphSchema>;
  * - All edge sources/targets must reference existing nodes
  * - Trigger nodes should have no incoming edges
  * - Graph must have at least one trigger node
+ * - Graph has at most one start node
  */
 export function validateGraphStructure(graph: FlowGraph): { valid: boolean; errors: string[] } {
   const errors: string[] = [];
@@ -136,6 +137,12 @@ export function validateGraphStructure(graph: FlowGraph): { valid: boolean; erro
   const triggerNodes = graph.nodes.filter((n) => n.type === 'trigger');
   if (triggerNodes.length === 0) {
     errors.push('Graph must have at least one trigger node');
+  }
+
+  // At most one start node: it holds a script's `fields:`, and with
+  // several every reader took the first and dropped the others' fields.
+  if (graph.nodes.filter((n) => n.type === 'start').length > 1) {
+    errors.push('Graph must have at most one start node');
   }
 
   // Check that trigger nodes have no incoming edges

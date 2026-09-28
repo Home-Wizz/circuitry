@@ -1,5 +1,7 @@
 // Main transpiler
 
+export type { ConventionMarkers } from './analyzer/convention-markers';
+export { conventionMarkers } from './analyzer/convention-markers';
 export type { TopologyAnalysis } from './analyzer/topology';
 // Analyzer
 export { analyzeTopology, getNodeDepths } from './analyzer/topology';
@@ -11,6 +13,8 @@ export { applyHeuristicLayout } from './parser/layout';
 export type { ParseResult } from './parser/YamlParser';
 // Parser
 export * from './parser/YamlParser';
+export type { GraphWalkHooks } from './simulation/graph-walk';
+export { walkGraph } from './simulation/graph-walk';
 export type { HAYamlOutput, TranspilerStrategy } from './strategies/base';
 // Strategies
 export { BaseStrategy } from './strategies/base';

@@ -14,13 +14,12 @@ import type {
   FlowNode,
   WaitNode,
 } from '@circuitry/shared';
-import { HAConditionSchema, HATriggerSchema } from '@circuitry/shared';
 import { findBackEdges } from '../analyzer/topology';
 import { fanOutHash } from '../utils/fanOutHash';
 import { generateNodeId } from '../utils/generateIds';
 import { parseActions } from './action-block-parser';
-import { resolveConditionType } from './action-type-guards';
-import { createEdge, parseTriggers, unfoldEventContextUserId } from './parser-shared';
+import { expandConditionShorthand, normalizeActionLists } from './action-type-guards';
+import { createEdge, importCondition, importWaitTriggers, parseTriggers } from './parser-shared';
 
 /**
  * Detect if automation is in state-machine format
@@ -85,14 +84,37 @@ export function parseStateMachineStructure(
   const nodes: FlowNode[] = [];
   const edges: FlowEdge[] = [];
 
-  // Find the entry node and parse the state machine
-  const actions = (content.actions || content.action) as unknown[];
+  // Find the entry node and parse the state machine. Every nested action
+  // list in list form, as HA reads it (bugs #62, #67).
+  const rawActions = content.actions || content.action;
+  const actions = Array.isArray(rawActions) ? normalizeActionLists(rawActions) : rawActions;
   if (!Array.isArray(actions)) {
     warnings.push('No actions found in automation');
     return { nodes, edges };
   }
 
   const { entryNodeId, nodeInfoMap } = collectStates(actions);
+
+  // A leaf state's first step being a `parallel:` reads as an inline
+  // fan-out (a node leading to several), unless the decompile hints say
+  // otherwise: a parallel the state holds as its own step -- a block kept
+  // exactly as written (a template `enabled:`, `continue_on_error: true`,
+  // a one-branch parallel setting `wait`) -- has no fan-out record, or the
+  // record matches only the steps after it. It used to become a Join
+  // leading to a copy of the block (bug #93). Without hints (an older
+  // Circuitry, which never kept such a block) it stays a fan-out.
+  // (`markers` is always written with state-machine output, `fan_outs` only
+  // when there is one.)
+  if (fanOuts || markers) {
+    for (const [nodeId, info] of nodeInfoMap) {
+      if (info.nodeType === 'condition' || info.ownStep || info.extras.length === 0) continue;
+      const record = fanOuts?.[nodeId];
+      if (record && record.hash === fanOutHash(info.extras)) continue;
+      if (record && record.hash !== fanOutHash(info.extras.slice(1))) continue;
+      info.ownStep = info.extras[0] as Record<string, unknown>;
+      info.extras = info.extras.slice(1);
+    }
+  }
 
   // In state-machine strategy, action/condition/delay/wait node IDs are extracted
   // directly from the Jinja2 templates in the YAML choose blocks. Only trigger
@@ -624,9 +646,22 @@ function restoreConstructMarkers(
   // head, not an until loop of its own (an until whose body opens with a
   // loop starts with a Join anchor instead -- bugs #24/#28). Item 4,
   // 2026-09-26.
+  // Bug #87 (2026-09-27): the body's last step can also be a block whose
+  // way out loops back -- a count loop (its test's "no"), an until loop or
+  // an if with an empty then (a condition's "yes"). A condition's true edge
+  // never is an until test's own loop-back, and a count test's false edge
+  // is its loop's exit, so both mark a while head too. Only a non-condition
+  // counted before, so `while W: [if C then [repeat: count ...]]` read C
+  // as an until test and was refused after reopening.
   const whileHeadsByStep = new Set<string>();
   for (const e of edges) {
-    if (backEdgeIds.has(e.id) && byId.get(e.source)?.type !== 'condition') {
+    if (!backEdgeIds.has(e.id)) continue;
+    const source = byId.get(e.source);
+    if (
+      source?.type !== 'condition' ||
+      e.sourceHandle === 'true' ||
+      (e.sourceHandle === 'false' && isCountTest(source))
+    ) {
       whileHeadsByStep.add(e.target);
     }
   }
@@ -645,9 +680,14 @@ function restoreConstructMarkers(
   // single true edge of another until test (or member) looping back to the
   // same node. Unmarked, dropInheritedAndMemberElse then removes its false
   // edge, restoring the list convention.
-  const loopBackTarget = (id: string): string | undefined =>
-    edges.find((e) => e.source === id && e.sourceHandle === 'false' && backEdgeIds.has(e.id))
-      ?.target;
+  // Every false edge that loops back, as one key: compared
+  // whole, never by the first of several.
+  const loopBackTargets = (id: string): string[] =>
+    edges
+      .filter((e) => e.source === id && e.sourceHandle === 'false' && backEdgeIds.has(e.id))
+      .map((e) => e.target)
+      .sort();
+  const loopBackKey = (id: string): string => loopBackTargets(id).join('\n');
   const untilMembers = new Set<string>();
   for (let changed = true; changed; ) {
     changed = false;
@@ -659,7 +699,7 @@ function restoreConstructMarkers(
       if (!untilTests.has(parentId)) continue;
       if (edges.filter((e) => e.source === parentId && e.sourceHandle === 'true').length !== 1)
         continue;
-      if (loopBackTarget(parentId) !== loopBackTarget(id)) continue;
+      if (loopBackKey(parentId) !== loopBackKey(id)) continue;
       untilMembers.add(id);
       changed = true;
     }
@@ -698,7 +738,8 @@ function restoreConstructMarkers(
     // edge and has no forward false edge). The rest of that if's own
     // condition list loops back to the same head from a single true edge
     // and stays unmarked (a member). Item 4, 2026-09-26.
-    const exitTarget = loopBackTarget(n.id);
+    const exits = loopBackTargets(n.id);
+    const exitTarget = exits.length === 1 ? exits[0] : undefined;
     if (exitTarget !== undefined && whileHeadsByStep.has(exitTarget)) {
       const incoming = edges.filter((e) => e.target === n.id && !backEdgeIds.has(e.id));
       const parentId = incoming.length === 1 ? incoming[0].source : undefined;
@@ -708,7 +749,7 @@ function restoreConstructMarkers(
         parentId !== undefined &&
         parentId !== exitTarget &&
         byId.get(parentId)?.type === 'condition' &&
-        loopBackTarget(parentId) === exitTarget &&
+        loopBackKey(parentId) === exitTarget &&
         edges.filter((e) => e.source === parentId && e.sourceHandle === 'true').length === 1;
       if (!isMember) data._blockKey = 'if_else';
       continue;
@@ -721,7 +762,18 @@ function restoreConstructMarkers(
     // list (e.g. a `while: [A, B]`). Mark it as an if head only then.
     if (falseTargets(n.id).length > 0) continue;
     const incoming = edges.filter((e) => e.target === n.id && !backEdgeIds.has(e.id));
-    if (incoming.length !== 1 || incoming[0].sourceHandle !== 'true') continue;
+    const fromConditionYes = incoming.some(
+      (e) => e.sourceHandle === 'true' && byId.get(e.source)?.type === 'condition'
+    );
+    if (!fromConditionYes) continue;
+    // Bug #86 (2026-09-27): one with other ways in as well -- where a
+    // parallel's branches meet again, one of them ending in an until loop
+    // -- is never a list member, but read as one it joined that
+    // condition's list (the until loop ran until both passed).
+    if (incoming.length > 1) {
+      data._blockKey = 'if_else';
+      continue;
+    }
     const parent = byId.get(incoming[0].source);
     if (parent?.type !== 'condition') continue;
     if (falseTargets(parent.id).length > 0) data._blockKey = 'if_else';
@@ -787,6 +839,25 @@ export interface ParsedStateBlock {
   elseExtras: unknown[];
 }
 
+/**
+ * Bug #63: StateMachineStrategy writes an until test's else as an error
+ * guard -- only `if: [{condition: not, conditions: <the test>}]`, whose
+ * then is the real false branch and whose else leaves the loop when the
+ * test can't be evaluated (derived from the graph, so not read back). The
+ * false branch is what the state's else means; anything else is returned
+ * as it is.
+ */
+function unwrapErrorGuard(branch: unknown, test: unknown): unknown {
+  if (!Array.isArray(branch) || branch.length !== 1 || !Array.isArray(test)) return branch;
+  const guard = branch[0] as Record<string, unknown> | null;
+  if (!guard || typeof guard !== 'object' || !Array.isArray(guard.if) || guard.if.length !== 1)
+    return branch;
+  const negation = guard.if[0] as Record<string, unknown> | null;
+  if (!negation || negation.condition !== 'not') return branch;
+  if (JSON.stringify(negation.conditions) !== JSON.stringify(test)) return branch;
+  return guard.then;
+}
+
 /** `{ variables: { current_node: X } }` and nothing else. */
 function isTransitionStep(step: unknown): boolean {
   if (!step || typeof step !== 'object' || Array.isArray(step)) return false;
@@ -824,6 +895,14 @@ export function parseStateMachineChooseBlock(
   let trueTarget: string | null = null;
   let falseTarget: string | null = null;
 
+  // A condition state is the one `if:` whose branches each end in a
+  // transition; a leaf state always ends in a transition of its own. So an
+  // `if:` in a state that has its own transition is that state's own step
+  // -- a block kept exactly as written (a template `enabled:`,
+  // `continue_on_error: true`) -- not the state machine's branch. Read as
+  // the branch it lost its own `enabled:` and ran (bug #93).
+  const isConditionState = !sequence.some(isTransitionStep);
+
   for (const item of sequence) {
     const seqItem = item as Record<string, unknown>;
 
@@ -836,18 +915,24 @@ export function parseStateMachineChooseBlock(
     // {current_node: "{% if %}...{% endif %}"}` entry with the branch
     // baked into a Jinja ternary — handled by the `seqItem.variables`
     // case below for backward compatibility with already-saved YAML.)
-    if (Array.isArray(seqItem.if) && seqItem.if.length > 0) {
+    if (isConditionState && Array.isArray(seqItem.if) && seqItem.if.length > 0) {
       nodeType = 'condition';
 
-      const rawCondition = seqItem.if[0] as Record<string, unknown>;
-      const conditionType = resolveConditionType(rawCondition?.condition as string, 'template');
-      try {
-        const parsed = HAConditionSchema.parse({ ...rawCondition, condition: conditionType });
-        Object.assign(data, parsed);
-      } catch {
-        data.condition = 'template';
-        data.value_template = JSON.stringify(rawCondition);
-      }
+      // Read exactly as written, shorthands expanded the way HA expands them
+      // (bugs #58, #59): never rewritten into a template of its JSON text.
+      // A list is every condition in it (only the first was
+      // read, so reopening a state edited to `if: [A, B]` dropped B). HA
+      // ANDs the list; the node holds one condition, so an `and` group.
+      const ifConditions = seqItem.if.map(expandConditionShorthand);
+      Object.assign(
+        data,
+        importCondition(
+          ifConditions.length === 1
+            ? ifConditions[0]
+            : { condition: 'and', conditions: ifConditions },
+          'state-machine condition'
+        )
+      );
       if (seqItem.alias) data.alias = seqItem.alias;
 
       // Each branch's sequence contains exactly one `variables: {current_node: "id"}`
@@ -864,7 +949,7 @@ export function parseStateMachineChooseBlock(
         return null;
       };
       trueTarget = extractTransitionTarget(seqItem.then);
-      falseTarget = extractTransitionTarget(seqItem.else);
+      falseTarget = extractTransitionTarget(unwrapErrorGuard(seqItem.else, seqItem.if));
     }
     // Check for variables action (sets next node / edge)
     else if (seqItem.variables) {
@@ -915,14 +1000,10 @@ export function parseStateMachineChooseBlock(
         // Validate/normalize each trigger the same way the native-strategy
         // wait parser does (isWaitAction branch above), rather than
         // trusting the raw YAML shape.
-        const parsedTriggers = [];
-        for (const trigger of seqItem.wait_for_trigger) {
-          const result = HATriggerSchema.safeParse(trigger);
-          if (result.success) parsedTriggers.push(unfoldEventContextUserId(result.data));
-        }
-        data.wait_for_trigger = parsedTriggers;
+        data.wait_for_trigger = importWaitTriggers(seqItem.wait_for_trigger);
       }
-      if (seqItem.timeout) data.timeout = seqItem.timeout;
+      // Zero included: it means "give up at once" (bug #66).
+      if (seqItem.timeout !== undefined && seqItem.timeout !== null) data.timeout = seqItem.timeout;
       if (seqItem.continue_on_timeout !== undefined) {
         data.continue_on_timeout = seqItem.continue_on_timeout;
       }
@@ -955,7 +1036,7 @@ export function parseStateMachineChooseBlock(
   );
   if (nodeType === 'condition' && ifItem) {
     thenExtras = branchExtras(ifItem.then);
-    elseExtras = branchExtras(ifItem.else);
+    elseExtras = branchExtras(unwrapErrorGuard(ifItem.else, ifItem.if));
   } else if (nodeType !== 'condition') {
     const items = (sequence as unknown[]).filter((item) => !isTransitionStep(item));
     const first = items[0] as Record<string, unknown> | undefined;

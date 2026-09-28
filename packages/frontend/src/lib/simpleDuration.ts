@@ -1,6 +1,7 @@
 import {
   type DurationObject,
-  parseDurationString,
+  type DurationValue,
+  durationToObject,
 } from '@/components/panels/node-fields/DurationField';
 
 export type SimpleDurationUnit = 'seconds' | 'minutes';
@@ -17,16 +18,20 @@ export interface SimpleDuration {
  * inline canvas-card editor (matching a reference flow editor's own delay
  * card: one number, one Sec/Min toggle, no hour/millisecond fields).
  *
- * Returns `null` when the value doesn't cleanly fit that shape — hours or
- * milliseconds set, or both minutes and seconds set at once — rather than
- * silently discarding part of a duration someone set via the full property
- * panel editor. The card falls back to its previous plain-text display in
- * that case; editing still works via the property panel as before.
+ * Returns `null` when the value doesn't cleanly fit that shape — a
+ * template, hours or milliseconds set, or both minutes and seconds set at
+ * once — rather than silently discarding part of a duration someone set
+ * via the full property panel editor. The card falls back to its previous
+ * plain-text display in that case; editing still works via the property
+ * panel as before.
  */
-export function parseSimpleDuration(value: string | DurationObject | undefined): SimpleDuration | null {
+export function parseSimpleDuration(value: DurationValue | undefined): SimpleDuration | null {
   if (value === undefined) return { amount: 0, unit: 'seconds' };
 
-  const obj: DurationObject = typeof value === 'string' ? parseDurationString(value) : value;
+  // A template (or anything else the picker can't show) keeps its
+  // plain-text display: offering a "0 sec" editor for it would overwrite it.
+  const obj = durationToObject(value);
+  if (obj === null) return null;
 
   const hours = Number(obj.hours) || 0;
   const minutes = Number(obj.minutes) || 0;

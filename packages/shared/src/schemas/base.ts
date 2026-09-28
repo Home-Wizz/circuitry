@@ -52,3 +52,18 @@ export type AutomationMode = z.infer<typeof AutomationModeSchema>;
  */
 export const MaxExceededSchema = z.enum(['silent', 'critical', 'error', 'warning', 'info', 'debug']);
 export type MaxExceeded = z.infer<typeof MaxExceededSchema>;
+
+/**
+ * Home Assistant's `cv.boolean`: the value as a boolean, or `undefined`
+ * when HA wouldn't take it as one (it's a template there, then, where HA
+ * accepts either).
+ */
+export function haBoolean(value: unknown): boolean | undefined {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value !== 'string') return undefined;
+  const text = value.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on', 'enable'].includes(text)) return true;
+  if (['0', 'false', 'no', 'off', 'disable'].includes(text)) return false;
+  return undefined;
+}

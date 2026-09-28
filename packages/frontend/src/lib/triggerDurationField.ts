@@ -5,8 +5,8 @@
  * `options.remaining` (HH:MM:SS), documented as the one field this trigger
  * needs beyond target — and, unlike every other threshold/enum-bearing
  * dotted trigger, this one carries NO `behavior`/`for` at all (see
- * nativeThreshold.ts's `getTriggerBehaviorVariant`/`triggerHasFor`, both of
- * which special-case 'timer.remaining_time_reached' directly).
+ * nativeThreshold.ts's `triggerOptionFields`, which
+ * lists 'timer.remaining_time_reached' in NO_BEHAVIOR_NO_FOR_TRIGGER_TYPES).
  *
  * Before this classifier existed, nothing in nativeThreshold.ts's threshold
  * shape system or triggerEnumField.ts's mode-string system fit this field —

@@ -11,9 +11,8 @@
  * documentation across multiple audit passes, the latest a full
  * "Device types" trigger-catalog re-audit (parallel research passes per
  * domain cluster, each independently cross-checked, plus adversarial
- * re-verification of every "no behavior/for" and "any/first/last" claim
- * against raw home-assistant.io markdown source rather than rendered-page
- * summaries).
+ * re-verification against raw home-assistant.io markdown source rather
+ * than rendered-page summaries).
  *
  * Three `options.threshold` wire shapes exist:
  * - FLAT: bare `{number}` / `{entity}` value, no `type` wrapper. **No
@@ -61,33 +60,9 @@
  * FLAT_THRESHOLD_* sets are kept (empty) rather than deleted, in case a
  * genuinely FLAT type is found in the future.
  *
- * Separately, `options.behavior` and `options.for` turned out to be the
- * RULE across most of the catalog — present on plain boolean triggers/
- * conditions (`lock.locked`, `motion.detected`, `fan.is_on`, ...) exactly
- * as much as on threshold-bearing ones — not a threshold-only feature as
- * originally assumed. See getTriggerBehaviorVariant/triggerHasFor/
- * getConditionBehaviorVariant/conditionHasFor below, which default to
- * "present" with small, individually-confirmed exception lists, rather
- * than requiring an opt-in entry per catalog type.
- *
- * CORRECTION #2 (trigger side only, this pass): `options.behavior` and
- * `options.for` are ALSO absent — universally, not just for
- * `light.brightness_changed` — from every CHANGED-mode TYPED trigger
- * (`*.changed`/`*_changed`, as opposed to their `crossed_threshold`
- * siblings). A prior pass treated `light.brightness_changed` as a lone,
- * domain-specific exception; re-verified this pass against raw
- * home-assistant.io markdown source (not rendered-page summaries, which
- * had — ironically — shown a phantom `behavior: first` example for
- * `climate.target_temperature_changed` that its own "Options in YAML"
- * reference table directly contradicts) for illuminance/humidity/power/
- * water_heater/climate's `.changed` triggers: none document `behavior` or
- * `for` in their authoritative options table, only `threshold`. This is a
- * schema-level rule (`NUMERICAL_ATTRIBUTE_CHANGED_TRIGGER_SCHEMA` in
- * `helpers/trigger.py` extends the bare `ENTITY_STATE_TRIGGER_SCHEMA`, not
- * the `_WITH_BEHAVIOR` variant crossed_threshold triggers use), not a
- * per-domain exception — see `CHANGED_MODE_TRIGGER_TYPES` below, which
- * replaces the old single-entry `NO_BEHAVIOR_TRIGGER_TYPES`/
- * `NO_FOR_TRIGGER_TYPES` sets now that they're always the same set.
+ * Which of them take `options.behavior` and `options.for` is read from
+ * HA's own validators, not its docs (#117): see triggerOptionFields/
+ * conditionOptionFields below.
  */
 
 export interface ThresholdNumberValue {
@@ -152,11 +127,11 @@ const FLAT_THRESHOLD_TRIGGER_TYPES = new Set<string>([]);
 
 const FLAT_THRESHOLD_CONDITION_TYPES = new Set<string>([]);
 
-// FLAT-SIMPLE: confirmed unique to this one condition (adversarially
-// re-verified against its sibling climate.is_target_humidity, which uses
-// the full TYPED shape instead — a real asymmetry in HA's own docs, not a
-// fetch error).
-const FLAT_SIMPLE_THRESHOLD_CONDITION_TYPES = new Set<string>(['humidifier.is_target_humidity']);
+// FLAT-SIMPLE (`{above, below}`): no type in HA 2026.9 has it. It was given
+// to humidifier.is_target_humidity from HA's docs, but HA's validator reads
+// that condition's threshold as TYPED like every other and refused the
+// bare shape (#122). Kept (empty) with the other shapes in case one turns up.
+const FLAT_SIMPLE_THRESHOLD_CONDITION_TYPES = new Set<string>([]);
 
 // TYPED, individually fetched and confirmed from home-assistant.io. Every
 // `*.changed`/`*_changed` trigger here uses the SAME typed
@@ -169,7 +144,7 @@ const VERIFIED_TYPED_TRIGGER_TYPES = new Set<string>([
   'illuminance.changed',
   'illuminance.crossed_threshold',
   'battery.level_changed',
-  'battery.level_crossed',
+  'battery.level_crossed_threshold',
   'humidity.changed',
   'humidity.crossed_threshold',
   'temperature.changed',
@@ -228,7 +203,7 @@ const VERIFIED_TYPED_TRIGGER_TYPES = new Set<string>([
   // "Unlike the generic numerical triggers there is no behavior option: a
   // behavior (each/first/all) is only meaningful across multiple targeted
   // entities" (sun is always exactly one entity). See
-  // `NO_BEHAVIOR_KEEPS_FOR_TRIGGER_TYPES` below.
+  // `FOR_ONLY_TRIGGER_TYPES` below.
   'sun.elevation_changed',
   'sun.elevation_crossed_threshold',
   // air_quality — all 13 `*_changed`/`*_crossed_threshold` pairs, confirmed
@@ -287,6 +262,7 @@ export function getTriggerThresholdShape(triggerType: string): ThresholdShape {
 const VERIFIED_TYPED_CONDITION_TYPES = new Set<string>([
   'humidity.is_value',
   'climate.is_target_humidity',
+  'humidifier.is_target_humidity',
   'climate.is_target_temperature',
   'battery.is_level',
   'media_player.is_volume',
@@ -357,8 +333,8 @@ export function getConditionThresholdShape(conditionType: string): ThresholdShap
 
 /**
  * Adds `type: 'any'` (fires on any change, no value fields) to a TYPED
- * trigger's crossing-type options — every CHANGED-mode trigger (see
- * `CHANGED_MODE_TRIGGER_TYPES` below) EXCEPT `light.brightness_changed`,
+ * trigger's crossing-type options — every CHANGED-mode trigger (the
+ * `changed` ones in `NO_BEHAVIOR_NO_FOR_TRIGGER_TYPES` below) EXCEPT `light.brightness_changed`,
  * the one confirmed exception (HA's own UI doesn't expose a `type: 'any'`
  * toggle for it despite it otherwise being a CHANGED-mode trigger like
  * every type below).
@@ -408,70 +384,43 @@ export function triggerAllowsAnyThreshold(triggerType: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// `behavior` variant + `for` presence — universal defaults with exceptions
+// `options.behavior` and `options.for`
 // ---------------------------------------------------------------------------
 //
-// A catalog-wide audit (parallel research passes covering every domain in
-// triggerRecipes.ts/conditionRecipes.ts, each cross-checked with a second,
-// adversarial "try to refute this" pass) found `options.behavior` and
-// `options.for` are the RULE across virtually every purpose-specific
-// trigger/condition — including plain boolean ones (`lock.locked`,
-// `motion.detected`, `fan.is_on`, `alarm_control_panel.is_armed`, ...), not
-// just threshold-bearing types as originally assumed. So the functions
-// below default to "present" and carry small, individually-confirmed
-// exception lists, rather than the inverse (which would need an entry for
-// every one of the ~150+ catalog types). The one systematic, large-scale
-// exception is CHANGED-mode triggers — see `CHANGED_MODE_TRIGGER_TYPES`
-// below.
+// Read from HA 2026.9.3's own validators rather than its docs (#117):
+// the tables below hold what each purpose-specific trigger and condition
+// accepts there. Since HA 2026.5 a trigger's `behavior` is
+// each/first/all (default each; the older `any`/`last` still load but raise
+// a repair issue) and a condition's is any/all (default any), and both take
+// `for`. Most of them take both; the sets below are the ones that don't.
+//
+// A new node never gets a `behavior` written for it: HA's own default then
+// applies, which is valid in every HA version (#117 -- `behavior: each` was
+// written on every new trigger, which HA refuses on the triggers below and
+// which HA before 2026.5 refused on every trigger).
 
-export type ThresholdBehaviorVariant = 'each-first-all' | 'any-first-last' | 'any-all' | 'none';
+/** HA's behavior values since 2026.5 (its `automation_behavior` selector). */
+export const TRIGGER_BEHAVIORS = ['each', 'first', 'all'];
+const TRIGGER_DEFAULT_BEHAVIOR = 'each';
+export const CONDITION_BEHAVIORS = ['any', 'all'];
+const CONDITION_DEFAULT_BEHAVIOR = 'any';
 
-// Triggers confirmed to have NO options block at all (bare target only) —
-// home-assistant.io explicitly states "This trigger has no additional YAML
-// options" for each of these.
-const NO_OPTIONS_TRIGGER_TYPES = new Set<string>([
+// Triggers with no `behavior` and no `for`, whatever else they take.
+const NO_BEHAVIOR_NO_FOR_TRIGGER_TYPES = new Set<string>([
+  // No options at all.
+  'button.pressed',
   'counter.decremented',
   'counter.incremented',
+  'doorbell.rang',
   'scene.activated',
   'select.selection_changed',
   'text.changed',
   'todo.item_added',
   'todo.item_completed',
   'todo.item_removed',
-  // Confirmed via home-assistant.io/triggers/button.pressed/: "This trigger
-  // has no additional YAML options beyond the target."
-  'button.pressed',
-]);
-
-/** True for a trigger with genuinely zero `options` fields — not even `behavior`/`for` — so callers can skip rendering an (empty) options section entirely. */
-export function triggerHasNoOptions(triggerType: string): boolean {
-  return NO_OPTIONS_TRIGGER_TYPES.has(triggerType);
-}
-
-/**
- * Every CHANGED-mode TYPED trigger (`*.changed`/`*_changed`, as opposed to
- * its `crossed_threshold` sibling) — confirmed to universally lack BOTH
- * `behavior` and `for`, not just `light.brightness_changed` as a prior pass
- * assumed. Source: `helpers/trigger.py`'s
- * `NUMERICAL_ATTRIBUTE_CHANGED_TRIGGER_SCHEMA` extends the bare
- * `ENTITY_STATE_TRIGGER_SCHEMA` (target + empty options), never the
- * `_WITH_BEHAVIOR` variant its `crossed_threshold` sibling schema
- * (`NUMERICAL_ATTRIBUTE_CROSSED_THRESHOLD_SCHEMA`) uses — a mode-level rule
- * in the schema, not a per-domain exception. Adversarially re-verified
- * against raw home-assistant.io markdown source (not rendered-page
- * summaries) for illuminance.changed, humidity.changed, power.changed,
- * water_heater.target_temperature_changed, and both climate `*_changed`
- * triggers: every one of these "Options in YAML" reference tables lists
- * `threshold` ONLY — no `behavior`, no `for` — even where a stray
- * inline YAML *example* elsewhere on the same page shows `behavior: first`
- * (confirmed to be a documentation artifact/copy-paste leftover from the
- * crossed_threshold sibling's example, not a real option; the authoritative
- * reference table is what's trusted here). Replaces the old single-entry
- * `NO_BEHAVIOR_TRIGGER_TYPES`/`NO_FOR_TRIGGER_TYPES` sets, which were
- * always identical in content and are now provably always identical in
- * principle too.
- */
-const CHANGED_MODE_TRIGGER_TYPES = new Set<string>([
+  // Every `changed` trigger of a number (its `crossed_threshold` sibling
+  // takes both): helpers/trigger.py's NUMERICAL_ATTRIBUTE_CHANGED_TRIGGER_SCHEMA
+  // extends ENTITY_STATE_TRIGGER_SCHEMA, not the _WITH_BEHAVIOR one.
   'light.brightness_changed',
   'illuminance.changed',
   'battery.level_changed',
@@ -497,61 +446,7 @@ const CHANGED_MODE_TRIGGER_TYPES = new Set<string>([
   'air_quality.so2_changed',
   'air_quality.voc_ratio_changed',
   'air_quality.voc_changed',
-]);
-
-// Triggers with `for` but NO `behavior` — HA's own sun/trigger.py source
-// comments this explicitly for `sun.elevation_crossed_threshold`: "Unlike
-// the generic numerical triggers there is no behavior option: a behavior
-// (each/first/all) is only meaningful across multiple targeted entities."
-// `zone.occupancy_detected`/`occupancy_cleared` share the same combination
-// for a different reason — confirmed via raw home-assistant.io markdown
-// source: no target at all (`behavior` has nothing to combine results
-// across), but `for` IS documented ("How long the zone must stay occupied
-// before the trigger fires"). Kept as one set (rather than folded into
-// CHANGED_MODE_TRIGGER_TYPES/NO_BEHAVIOR_NO_FOR_TRIGGER_TYPES, both of which
-// also strip `for`) since these are the only catalog entries with this
-// specific behavior/for combination.
-const NO_BEHAVIOR_KEEPS_FOR_TRIGGER_TYPES = new Set<string>([
-  'sun.elevation_crossed_threshold',
-  'zone.occupancy_detected',
-  'zone.occupancy_cleared',
-]);
-
-// `timer.remaining_time_reached` — confirmed via home-assistant.io/triggers/
-// timer.remaining_time_reached/: its only documented option is a required
-// `remaining` duration; no `behavior`, no `for`. Kept as its own set (like
-// NO_BEHAVIOR_KEEPS_FOR_TRIGGER_TYPES above) rather than folded into
-// NO_OPTIONS_TRIGGER_TYPES, since this trigger DOES have an options field
-// (`remaining` — see lib/triggerDurationField.ts) and NO_OPTIONS_TRIGGER_TYPES
-// asserts zero options fields exist at all.
-//
-// The 6 non-numeric `sun.*` event triggers (dawn/dusk/solar_midnight/
-// solar_noon/sunrise/sunset) are also here — confirmed via home-assistant/
-// core's sun/trigger.py (`_EVENT_TRIGGER_SCHEMA`/`_DAWN_DUSK_TRIGGER_SCHEMA`)
-// and raw home-assistant.io markdown source (sun.sunrise, sun.dawn): their
-// only options are `offset`/`offset_type` (dawn/dusk additionally get
-// `type`: civil/nautical/astronomical) — no `behavior`, no `for`, same as
-// `timer.remaining_time_reached`. See lib/triggerOffsetField.ts for the new
-// field type this needed. All 6 are singleton triggers (hardcode `sun.sun`,
-// no target) — see NativeTriggerFields.tsx's `isSunSingleton` branch.
-// `calendar.event_started`/`calendar.event_ended` — confirmed via raw
-// home-assistant.io markdown source: "Target: Yes ... Behavior/For option:
-// Not present on this trigger." Unlike the sun event triggers above,
-// calendar KEEPS a normal target (which calendar(s) to watch) — only
-// behavior/for are absent, alongside sun's offset/offset_type shape (see
-// lib/triggerOffsetField.ts).
-//
-// `moon.phase_changed` — confirmed via home-assistant.io/triggers/
-// moon.phase_changed/: no `behavior`, no `for`, and (like the sun event
-// triggers) no target at all — "This trigger does not use a target. It
-// follows the moon phase, which is the same everywhere on Earth." See
-// TARGETLESS_TRIGGER_TYPES below.
-//
-// `event.received` — confirmed via home-assistant.io/triggers/
-// event.received/: only documented option is a required `event_type`
-// string/list (see lib/triggerEnumField.ts); no `behavior`, no `for`. Unlike
-// moon/sun, this one KEEPS a normal target (a specific `event.*` entity).
-const NO_BEHAVIOR_NO_FOR_TRIGGER_TYPES = new Set<string>([
+  // Their own options only: `remaining`, an offset, a phase, an event type.
   'timer.remaining_time_reached',
   'sun.dawn',
   'sun.dusk',
@@ -559,11 +454,61 @@ const NO_BEHAVIOR_NO_FOR_TRIGGER_TYPES = new Set<string>([
   'sun.solar_noon',
   'sun.sunrise',
   'sun.sunset',
+  'sun.blue_hour_started',
+  'sun.blue_hour_ended',
+  'sun.golden_hour_started',
+  'sun.golden_hour_ended',
+  'sun.midnight_sun_started',
+  'sun.midnight_sun_ended',
+  'sun.polar_night_started',
+  'sun.polar_night_ended',
   'calendar.event_started',
   'calendar.event_ended',
   'moon.phase_changed',
   'event.received',
 ]);
+
+// Triggers with `for` but no `behavior`: they have no targets to combine
+// (sun/trigger.py: "a behavior (each/first/all) is only meaningful across
+// multiple targeted entities").
+const FOR_ONLY_TRIGGER_TYPES = new Set<string>([
+  'sun.elevation_crossed_threshold',
+  'zone.occupancy_detected',
+  'zone.occupancy_cleared',
+]);
+
+// Conditions with no `behavior` and no `for`: the sun and the moon are
+// singletons.
+function conditionHasNeither(conditionType: string): boolean {
+  return conditionType.startsWith('sun.') || conditionType.startsWith('moon.');
+}
+
+// Conditions with `for` but no `behavior`: a zone's occupancy is the
+// zone's own, with no targets to combine.
+const FOR_ONLY_CONDITION_TYPES = new Set<string>([
+  'zone.occupancy_is_detected',
+  'zone.occupancy_is_not_detected',
+]);
+
+/** What the property panel offers for a purpose-specific trigger's or
+ * condition's `options.behavior` (its values, and the one HA uses when none
+ * is written, which the panel shows then) and `options.for`. */
+export interface NativeOptionFields {
+  behavior?: { values: string[]; default: string };
+  hasFor: boolean;
+}
+
+export function triggerOptionFields(triggerType: string): NativeOptionFields {
+  if (NO_BEHAVIOR_NO_FOR_TRIGGER_TYPES.has(triggerType)) return { hasFor: false };
+  if (FOR_ONLY_TRIGGER_TYPES.has(triggerType)) return { hasFor: true };
+  return { behavior: { values: TRIGGER_BEHAVIORS, default: TRIGGER_DEFAULT_BEHAVIOR }, hasFor: true };
+}
+
+export function conditionOptionFields(conditionType: string): NativeOptionFields {
+  if (conditionHasNeither(conditionType)) return { hasFor: false };
+  if (FOR_ONLY_CONDITION_TYPES.has(conditionType)) return { hasFor: true };
+  return { behavior: { values: CONDITION_BEHAVIORS, default: CONDITION_DEFAULT_BEHAVIOR }, hasFor: true };
+}
 
 // Triggers confirmed to have NO target at all — beyond every `sun.*`
 // trigger (handled separately via a `startsWith('sun.')` check, since it's
@@ -579,144 +524,110 @@ const TARGETLESS_TRIGGER_TYPES = new Set<string>([
   'zone.occupancy_cleared',
 ]);
 
+// Conditions with no target (#118): the sun and the moon are singletons,
+// and a zone's occupancy is the zone's own (its `zone` option says which).
+const TARGETLESS_CONDITION_TYPES = new Set<string>(['zone.occupancy_is_detected', 'zone.occupancy_is_not_detected']);
+
+/** True for a condition with no target at all -- see NativeConditionFields.tsx's target field, and buildConditionNodeData. */
+export function conditionIsTargetless(conditionType: string): boolean {
+  return (
+    conditionType.startsWith('sun.') ||
+    conditionType.startsWith('moon.') ||
+    TARGETLESS_CONDITION_TYPES.has(conditionType)
+  );
+}
+
 /** True for a trigger with no user-selectable target at all (every `sun.*` trigger, plus the few individually confirmed types in TARGETLESS_TRIGGER_TYPES) — see NativeTriggerFields.tsx's target-suppression branch. */
 export function triggerIsTargetless(triggerType: string): boolean {
   return triggerType.startsWith('sun.') || TARGETLESS_TRIGGER_TYPES.has(triggerType);
 }
 
-// Triggers individually confirmed (then adversarially re-verified against
-// raw GitHub doc source) to use the OLDER `any`/`first`/`last` literal
-// wire values instead of the far more common `each`/`first`/`all` — a
-// genuine, HA-acknowledged split (home-assistant/frontend#29731: the UI
-// now shows "Each/First/All" everywhere as of this feature's most recent
-// rework, but not every domain's YAML literal has been migrated off the
-// old any/first/last wording yet). water_heater hasn't been migrated;
-// humidity/temperature's `crossed_threshold` triggers likewise still use
-// the old wording. `lock.opened` was ALSO suspected of this anomaly by an
-// early research pass but was disproven on adversarial re-check (a fetch
-// hallucination) — it uses each/first/all like every other lock trigger.
-//
-// media_player's entire behavior-bearing catalog (muted/unmuted/
-// paused_playing/started_playing/stopped_playing/turned_on/turned_off/
-// volume_crossed_threshold) is ALSO confirmed on this list — verified
-// directly against raw home-assistant.io markdown source (not a rendered
-// summary) for media_player.muted and media_player.turned_on, both showing
-// `behavior: {default: any, ...any/first/last...}` verbatim in the
-// documented schema, unlike the generic `helpers/trigger.py` schema which
-// treats `any`/`last` as deprecated aliases for `each`/`all` — media_player
-// simply hasn't been migrated to the modern wording yet, same as
-// water_heater.
-const ANY_FIRST_LAST_TRIGGER_TYPES = new Set<string>([
-  'humidity.crossed_threshold',
-  'temperature.crossed_threshold',
-  'water_heater.turned_on',
-  'water_heater.turned_off',
-  'water_heater.operation_mode_changed',
-  'water_heater.target_temperature_changed',
-  'water_heater.target_temperature_crossed_threshold',
-  'media_player.muted',
-  'media_player.unmuted',
-  'media_player.paused_playing',
-  'media_player.started_playing',
-  'media_player.stopped_playing',
-  'media_player.turned_on',
-  'media_player.turned_off',
-  'media_player.volume_crossed_threshold',
-]);
+/** The units HA takes for a threshold's number where it takes several (#119,
+ * from HA 2026.9.3's numeric_threshold selectors): a number must name one
+ * of them, or HA refuses the automation. Undefined where HA has one unit,
+ * which is only shown. */
+export function getThresholdUnits(dottedType: string): string[] | undefined {
+  if (dottedType.includes('temperature')) return TEMPERATURE_UNITS;
+  if (dottedType.startsWith('power.')) return POWER_UNITS;
+  const gas = airQualityGas(dottedType);
+  return gas ? AIR_QUALITY_UNITS[gas]?.units : undefined;
+}
 
-export function getTriggerBehaviorVariant(triggerType: string): ThresholdBehaviorVariant {
-  if (
-    NO_OPTIONS_TRIGGER_TYPES.has(triggerType) ||
-    CHANGED_MODE_TRIGGER_TYPES.has(triggerType) ||
-    NO_BEHAVIOR_KEEPS_FOR_TRIGGER_TYPES.has(triggerType) ||
-    NO_BEHAVIOR_NO_FOR_TRIGGER_TYPES.has(triggerType)
-  ) {
-    return 'none';
-  }
-  if (ANY_FIRST_LAST_TRIGGER_TYPES.has(triggerType)) return 'any-first-last';
-  return 'each-first-all';
+/** A threshold number as HA takes it (#119): with the unit it already has,
+ * if HA takes that one, else `unit` (the type's default). */
+export function thresholdNumber(
+  number: number,
+  previous: ThresholdValue | undefined,
+  unit: string | undefined,
+  units: string[] | undefined
+): ThresholdNumberValue {
+  const kept = isNumberThresholdValue(previous) ? previous.unit_of_measurement : undefined;
+  const chosen = kept !== undefined && (units === undefined || units.includes(kept)) ? kept : unit;
+  return { number, ...(chosen ? { unit_of_measurement: chosen } : {}) };
 }
 
 /**
- * Conditions always use `any`/`all` — confirmed uniformly across every
- * domain audited (alarm_control_panel, lock, valve, climate, media_player,
- * vacuum, air_quality, counter, timer, ...; ~70 condition pages checked, no
- * exceptions found). Only `sun.*` conditions omit `behavior` entirely (the
- * sun is a singleton) — handled separately by NativeConditionFields.tsx's
- * `isSunSingleton` branch rather than here. Kept as a function (not a bare
- * constant) for API symmetry with getTriggerBehaviorVariant and in case a
- * future HA release introduces an exception.
+ * The threshold a new node gets (#124): what the panel shows for one not
+ * set -- "Any change" where the type offers it, else "Above 0" -- so the
+ * node holds what the panel shows (a node created with none showed that
+ * while HA refused the automation for having no threshold). Undefined for
+ * a type with no threshold.
  */
-export function getConditionBehaviorVariant(_conditionType: string): ThresholdBehaviorVariant {
-  return 'any-all';
+export function defaultThreshold(
+  kind: 'trigger' | 'condition',
+  type: string
+): number | TypedThreshold | undefined {
+  const shape = kind === 'trigger' ? getTriggerThresholdShape(type) : getConditionThresholdShape(type);
+  if (shape === 'none') return undefined;
+  const zero = thresholdNumber(0, undefined, getThresholdUnit(type), getThresholdUnits(type));
+  if (shape === 'flat') return 0;
+  if (kind === 'trigger' && triggerAllowsAnyThreshold(type)) return { type: 'any' };
+  return { type: 'above', value: zero };
 }
 
-export function triggerHasFor(triggerType: string): boolean {
-  if (NO_OPTIONS_TRIGGER_TYPES.has(triggerType) || NO_BEHAVIOR_NO_FOR_TRIGGER_TYPES.has(triggerType)) {
-    return false;
-  }
-  // Every CHANGED-mode trigger lacks `for` too — see CHANGED_MODE_TRIGGER_TYPES's
-  // doc comment. `sun.elevation_crossed_threshold` is the one entry that
-  // lacks `behavior` but KEEPS `for` — handled by getTriggerBehaviorVariant
-  // separately, not excluded here.
-  return !CHANGED_MODE_TRIGGER_TYPES.has(triggerType);
-}
-
-/**
- * `sun.*` conditions are excluded by NativeConditionFields.tsx's
- * `isSunSingleton` branch before this is even consulted — not repeated here.
- * No condition-side exceptions remain.
- */
-export function conditionHasFor(_conditionType: string): boolean {
-  return true;
-}
-
-/** Temperature-based domains are the only ones documented with an explicit `unit_of_measurement` key (illuminance/humidity examples show a plain `{number}`). */
+/** The unit a new threshold number gets (and, where HA has one unit, the
+ * one shown) -- one of getThresholdUnits' where there are several. */
 export function getThresholdUnit(dottedType: string): string | undefined {
-  if (dottedType.startsWith('water_heater.') || dottedType.includes('temperature')) return '°';
-  // HA's power fields let the user pick per-value unit_of_measurement from
-  // mW/W/kW/MW/GW/TW/BTU-h; Circuitry simplifies to a single fixed unit
-  // rather than building a full unit picker for this one field.
-  if (dottedType === 'power.is_value' || dottedType.startsWith('power.')) return 'W';
+  if (dottedType.includes('temperature')) return '°C';
+  if (dottedType.startsWith('power.')) return 'W';
   // Light's brightness fields (trigger `brightness_changed`/
-  // `brightness_crossed_threshold`, condition `is_brightness`) are all
-  // percentages — TYPED shape as of the CORRECTION at the top of this file
-  // (not FLAT, as a prior pass had them), but still worth returning '%'
-  // explicitly here since ThresholdTypeField/SimpleThresholdField display
-  // this alongside the value input regardless of shape.
+  // `brightness_crossed_threshold`, condition `is_brightness`) and media
+  // player volume are percentages.
   if (dottedType.startsWith('light.brightness') || dottedType === 'light.is_brightness') return '%';
-  // Media player volume is normalized to a 0-100% value (see
-  // VERIFIED_TYPED_TRIGGER_TYPES's media_player.volume_* comment) —
-  // separate branch from PERCENT_RANGE_TYPES since media_player.is_volume
-  // (condition) already implicitly returns undefined here and relies on
-  // PERCENT_RANGE_TYPES alone; kept explicit for the trigger pair so the
-  // unit label actually renders.
   if (dottedType.startsWith('media_player.volume')) return '%';
-  // sun.elevation/elevation_changed/elevation_crossed_threshold — degrees,
-  // same unit as temperature but semantically distinct (can go negative,
-  // no natural upper/lower bound tied to a physical scale).
+  // sun.elevation/elevation_changed/elevation_crossed_threshold: degrees.
   if (dottedType === 'sun.elevation' || dottedType.startsWith('sun.elevation_')) return '°';
-  // air_quality — units per home-assistant/core's air_quality/trigger.py
-  // unit converters: co2 is ppm (no converter, raw sensor unit), voc_ratio
-  // is ppb, every other gas/particulate concentration is µg/m³.
-  if (dottedType.startsWith('air_quality.co2_')) return 'ppm';
-  if (dottedType.startsWith('air_quality.voc_ratio_')) return 'ppb';
-  if (
-    dottedType.startsWith('air_quality.co_') ||
-    dottedType.startsWith('air_quality.n2o_') ||
-    dottedType.startsWith('air_quality.no2_') ||
-    dottedType.startsWith('air_quality.no_') ||
-    dottedType.startsWith('air_quality.ozone_') ||
-    dottedType.startsWith('air_quality.pm10_') ||
-    dottedType.startsWith('air_quality.pm1_') ||
-    dottedType.startsWith('air_quality.pm25_') ||
-    dottedType.startsWith('air_quality.pm4_') ||
-    dottedType.startsWith('air_quality.so2_') ||
-    dottedType.startsWith('air_quality.voc_')
-  ) {
-    return 'µg/m³';
-  }
-  return undefined;
+  const gas = airQualityGas(dottedType);
+  return gas ? AIR_QUALITY_UNITS[gas]?.unit : undefined;
+}
+
+const TEMPERATURE_UNITS = ['°C', '°F'];
+const POWER_UNITS = ['mW', 'W', 'kW', 'MW', 'GW', 'TW', 'BTU/h'];
+// A Greek mu (U+03BC), as HA writes it: not the micro sign (U+00B5), which
+// HA refuses.
+const MICROGRAMS = '\u03bcg/m\u00b3';
+
+// Per air_quality gas, HA's units (air_quality/trigger.py and condition.py).
+const AIR_QUALITY_UNITS: Record<string, { units?: string[]; unit: string }> = {
+  co2: { unit: 'ppm' },
+  co: { units: ['ppb', 'ppm', 'mg/m\u00b3', MICROGRAMS], unit: MICROGRAMS },
+  n2o: { unit: MICROGRAMS },
+  no2: { units: ['ppb', 'ppm', MICROGRAMS], unit: MICROGRAMS },
+  no: { units: ['ppb', MICROGRAMS], unit: MICROGRAMS },
+  ozone: { units: ['ppb', 'ppm', MICROGRAMS], unit: MICROGRAMS },
+  pm1: { unit: MICROGRAMS },
+  pm10: { unit: MICROGRAMS },
+  pm25: { unit: MICROGRAMS },
+  pm4: { unit: MICROGRAMS },
+  so2: { units: ['ppb', MICROGRAMS], unit: MICROGRAMS },
+  voc: { units: [MICROGRAMS, 'mg/m\u00b3'], unit: MICROGRAMS },
+  voc_ratio: { units: ['ppb', 'ppm'], unit: 'ppb' },
+};
+
+/** The gas an air_quality threshold type is about: `co` for
+ * `air_quality.co_changed` and `air_quality.is_co_value` alike. */
+function airQualityGas(dottedType: string): string | undefined {
+  return /^air_quality\.(?:is_)?([a-z0-9_]+?)_(?:value|changed|crossed_threshold)$/.exec(dottedType)?.[1];
 }
 
 export interface ThresholdRange {
@@ -743,12 +654,11 @@ const PERCENT_RANGE_TYPES = new Set<string>([
   // sensor/entity — the one non-negotiable percentage domain in HA itself.
   'battery.is_level',
   'battery.level_changed',
-  'battery.level_crossed',
-  // Humidity targets (climate) are set as a percentage the same way
-  // current humidity readings are. humidifier.is_target_humidity is
-  // FLAT-SIMPLE (see above) and hardcodes its own 0-100 range at the call
-  // site rather than going through this table.
+  'battery.level_crossed_threshold',
+  // Humidity targets (climate, humidifier) are set as a percentage the same
+  // way current humidity readings are.
   'climate.is_target_humidity',
+  'humidifier.is_target_humidity',
   'climate.target_humidity_changed',
   'climate.target_humidity_crossed_threshold',
   // Moisture level (leak/soil sensors reporting a moisture percentage) —

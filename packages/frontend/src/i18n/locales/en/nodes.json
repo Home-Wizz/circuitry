@@ -97,6 +97,7 @@
       "thresholdDescription": "Brightness percentage the trigger watches for.",
       "thresholdModeNumber": "Number",
       "thresholdModeEntity": "Entity",
+      "thresholdUnitLabel": "Unit",
       "thresholdTypeLabel": "Threshold type",
       "thresholdTypes": {
         "any": "Any change",
@@ -118,8 +119,20 @@
         "zone": "Zone",
         "eventType": "Event type(s)"
       },
-      "enumFieldDescription": "Mode string(s) to watch for — only the modes available on the targeted device are valid; check your device for exact values. Leave empty to fire on any mode change.",
-      "enumFieldPlaceholder": "Add mode...",
+      "enumFieldDescriptions": {
+        "hvacMode": "HVAC mode(s) to watch for — only the modes the targeted device supports are valid; check your device for exact values.",
+        "mode": "Mode(s) to watch for — only the modes the targeted device supports are valid; check your device for exact values. Leave empty to fire on any mode change.",
+        "operationMode": "Operation mode(s) to watch for — only the modes the targeted water heater supports are valid; check your device for exact values.",
+        "zone": "The zone to watch, e.g. zone.home.",
+        "eventType": "Event type(s) to watch for — the targeted event entity lists the types it can fire."
+      },
+      "enumFieldPlaceholders": {
+        "hvacMode": "Add mode...",
+        "mode": "Add mode...",
+        "operationMode": "Add mode...",
+        "zone": "zone.home",
+        "eventType": "Add event type..."
+      },
       "durationFieldLabels": {
         "remaining": "Remaining time"
       },
@@ -138,6 +151,12 @@
       "offsetTypeBefore": "Before",
       "offsetTypeAfter": "After",
       "moonPhaseLabel": "Moon phase",
+      "periodLabel": "Period",
+      "periods": {
+        "any": "Any",
+        "morning": "Morning",
+        "evening": "Evening"
+      },
       "moonPhases": {
         "any": "Any",
         "new_moon": "New moon",
@@ -315,10 +334,23 @@
         "hvacMode": "HVAC mode(s)",
         "mode": "Mode(s)",
         "operationMode": "Operation mode(s)",
-        "option": "Option(s)"
+        "option": "Option(s)",
+        "zone": "Zone(s)"
       },
-      "enumFieldDescription": "Mode/option string(s) to match — only the modes available on the targeted device are valid; check your device for exact values.",
-      "enumFieldPlaceholder": "Add mode or option...",
+      "enumFieldDescriptions": {
+        "hvacMode": "HVAC mode(s) to match — only the modes the targeted device supports are valid; check your device for exact values.",
+        "mode": "Mode(s) to match — only the modes the targeted device supports are valid; check your device for exact values.",
+        "operationMode": "Operation mode(s) to match — only the modes the targeted water heater supports are valid; check your device for exact values.",
+        "option": "Option(s) to match — the targeted select's own options.",
+        "zone": "The zone(s) to test, e.g. zone.home."
+      },
+      "enumFieldPlaceholders": {
+        "hvacMode": "Add mode...",
+        "mode": "Add mode...",
+        "operationMode": "Add mode...",
+        "option": "Add option...",
+        "zone": "zone.home"
+      },
       "singleValueLabel": "Value",
       "singleValueDescription": "The exact text value to match.",
       "bareBooleanNotice": "\"{{conditionType}}\" is a simple yes/no check with nothing else to configure — it passes or fails entirely on its own, so this panel is expected to be empty below."
@@ -481,7 +513,10 @@
     "repeatForEachModeList": "List",
     "repeatForEachModeTemplate": "Template",
     "continueOnError": "Continue on error",
-    "continueOnErrorDescription": "If this step fails, keep running the rest of the sequence instead of halting the automation or script."
+    "continueOnErrorDescription": "If this step fails, keep running the rest of the sequence instead of halting the automation or script.",
+    "opaqueStepTitle": "YAML step",
+    "opaqueStepKept": "Kept exactly as written",
+    "opaqueStepPanelDescription": "Circuitry can't edit this kind of step, so it is saved exactly as written. Change it in Home Assistant's YAML editor, or delete it here."
   },
   "variables": {
     "variableCount_one": "{{count}} variable",
@@ -602,7 +637,7 @@
   "wait": {
     "nMoreTriggers_one": "+{{count}} more trigger",
     "nMoreTriggers_other": "+{{count}} more triggers",
-    "timeoutLabel": "Timeout:",
+    "timeoutLabel": "Timeout",
     "waitType": "Wait Type",
     "waitTypeDescription": "Choose what to wait for.",
     "types": {
@@ -614,9 +649,11 @@
     "triggersHeading": "Triggers",
     "noTriggers": "No triggers added yet.",
     "addTrigger": "Add Trigger",
-    "timeoutDescription": "Maximum time to wait before continuing. Leave empty to wait indefinitely.",
+    "timeoutDescription": "Off: wait as long as it takes. On: give up after the time below.",
     "continueOnTimeout": "Continue on Timeout",
-    "continueOnTimeoutDescription": "If enabled, the automation continues when timeout expires. If disabled, the automation stops."
+    "continueOnTimeoutDescription": "If enabled, the automation continues when timeout expires. If disabled, the automation stops.",
+    "timeoutDurationLabel": "Give up after",
+    "timeoutDurationDescription": "0 gives up at once."
   },
   "deviceCondition": {
     "domainLabel": "Domain",
@@ -976,5 +1013,11 @@
     "eco": "Eco",
     "performance": "Performance",
     "high_demand": "High demand"
+  },
+  "conventions": {
+    "and": "AND",
+    "andHint": "Chained to the condition before it: if this one fails, that condition's else runs.",
+    "stopsHere": "Stops here",
+    "stopsHereHint": "Nothing is connected here, so the automation stops at this point."
   }
 }

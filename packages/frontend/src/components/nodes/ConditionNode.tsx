@@ -1,14 +1,16 @@
 import { Handle, type NodeProps, Position, useEdges } from '@xyflow/react';
-import { AlertCircle, Ban } from 'lucide-react';
+import { Ban } from 'lucide-react';
 import { memo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { DOMAIN_GROUP_LABELS } from '@/components/panels/node-fields/TriggerTypePicker';
 import { BlockRoleBadge } from '@/components/nodes/BlockRoleBadge';
+import { AndChip, StopsHereBadge } from '@/components/nodes/ConventionMarkers';
 import { DottedThresholdInlineEditor } from '@/components/nodes/DottedThresholdInlineEditor';
 import { NumericStateInlineEditor } from '@/components/nodes/NumericStateInlineEditor';
 import { TruncatedTooltip } from '@/components/ui/truncated-tooltip';
 import { compoundTypes, nodeTypes } from '@/config/nodeTypeCatalog';
 import { getDomainIcon } from '@/lib/domain-icons';
+import { useConventionMarkers } from '@/hooks/useConventionMarkers';
 import { useMoreInfo } from '@/hooks/useMoreInfo';
 import { type EntityTargetDisplay, useNodeCardDisplay } from '@/hooks/useNodeCardDisplay';
 import { useNodeErrors } from '@/hooks/useNodeErrors';
@@ -19,12 +21,14 @@ import {
   getConditionThresholdShape,
   getThresholdRange,
   getThresholdUnit,
+  getThresholdUnits,
   type TypedThreshold,
 } from '@/lib/nativeThreshold';
 import { BINARY_SENSOR_CLASSES } from '@/lib/triggerRecipes';
 import { cn, prettify, singleEntityIdFrom } from '@/lib/utils';
 import type { ConditionNodeData } from '@/store/flow-store';
 import { useFlowStore } from '@/store/flow-store';
+import { NodeStatusBadge } from './NodeStatusBadge';
 
 const COLORS = NODE_COLORS.condition;
 
@@ -164,10 +168,11 @@ export const ConditionNode = memo(function ConditionNode({
   const getExecutionStepNumber = useFlowStore((s) => s.getExecutionStepNumber);
   const requestNodeEdit = useFlowStore((s) => s.requestNodeEdit);
   const updateNodeData = useFlowStore((s) => s.updateNodeData);
-  const { hasErrors, errorMessages } = useNodeErrors(id);
+  const { hasErrors, errorMessages, warningMessages } = useNodeErrors(id);
   const openMoreInfo = useMoreInfo();
   const { resolveEntityTarget } = useNodeCardDisplay();
   const traceState = useTraceNodeState(id);
+  const markers = useConventionMarkers(id);
   const isActive = activeNodeId === id;
   const stepNumber = getExecutionStepNumber(id);
   const isDisabled = data.enabled === false;
@@ -411,27 +416,12 @@ export const ConditionNode = memo(function ConditionNode({
       )}
     >
       {roleLabel && <BlockRoleBadge label={roleLabel} />}
-      {hasErrors && (
-        <div
-          className={cn(
-            'absolute -top-2 -right-2 flex h-5 w-5 items-center justify-center rounded-full shadow-sm',
-            NODE_STATE_CLASSES.errorBadge
-          )}
-          title={errorMessages.join('\n')}
-        >
-          <AlertCircle className="h-3 w-3" />
-        </div>
-      )}
-      {isDisabled && !hasErrors && (
-        <div
-          className={cn(
-            'absolute -top-2 -right-2 flex h-5 w-5 items-center justify-center rounded-full shadow-sm',
-            NODE_STATE_CLASSES.disabledBadge
-          )}
-        >
-          <Ban className="h-3 w-3" />
-        </div>
-      )}
+      {markers.listHead && <AndChip />}
+      <NodeStatusBadge
+        errorMessages={errorMessages}
+        warningMessages={warningMessages}
+        isDisabled={isDisabled}
+      />
 
       <Handle type="target" position={Position.Left} className={cn('w-3! h-3!', COLORS.handle)} />
 
@@ -546,6 +536,7 @@ export const ConditionNode = memo(function ConditionNode({
                 conditionOptions.threshold as number | string | TypedThreshold | undefined
               }
               unit={getThresholdUnit(data.condition)}
+              units={getThresholdUnits(data.condition)}
               min={getThresholdRange(data.condition)?.min}
               max={getThresholdRange(data.condition)?.max}
               onChange={setConditionThreshold}
@@ -683,6 +674,11 @@ export const ConditionNode = memo(function ConditionNode({
           className="w-3! h-3! bg-destructive! border-destructive!"
         />
       )}
+
+      {markers.stopsAt.includes('true') && (
+        <StopsHereBadge top={showFalseHandle ? '30%' : '50%'} />
+      )}
+      {markers.stopsAt.includes('false') && <StopsHereBadge top="70%" />}
 
       {/* If/Else deliberately shows no edge labels at all — unlike every
           other hasFalseEdge case (a plain condition someone manually wired a

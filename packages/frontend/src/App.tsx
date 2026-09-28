@@ -71,6 +71,7 @@ import { ThemeToggle } from '@/components/ui/ThemeToggle';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { logger } from '@/lib/logger';
+import { requiredServiceFields } from '@/lib/serviceRequired';
 import { cn } from '@/lib/utils';
 import { version } from '../../../custom_components/circuitry/manifest.json';
 import { useAppRoot } from './contexts/AppRootContext';
@@ -88,6 +89,19 @@ function PanelLoading() {
       <Loader2 className="h-5 w-5 animate-spin" />
     </div>
   );
+}
+
+/**
+ * Keeps the store's required service fields (#125: an action step leaving
+ * one empty gets a warning) in step with the connected HA's services.
+ */
+function ServiceRequiredFieldsSync() {
+  const { hass } = useHass();
+  const services = hass?.services;
+  useEffect(() => {
+    if (services) useFlowStore.getState().setServiceRequiredFields(requiredServiceFields(services));
+  }, [services]);
+  return null;
 }
 
 /**
@@ -351,6 +365,7 @@ function App() {
     >
       <ReactFlowProvider>
         <DeepLinkHandler />
+        <ServiceRequiredFieldsSync />
         <div className="flex h-screen flex-col bg-background">
           {/* Header */}
           <header className="flex h-14 items-center justify-between gap-4 border-border border-b bg-card px-4 shadow-sm">

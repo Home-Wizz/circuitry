@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { MaxExceededSchema } from './base';
+import { HADurationSchema } from './duration';
 import { OptionalTargetSchema } from './ha-entities';
 
 /**
@@ -10,6 +11,18 @@ export const VALID_WEEKDAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'] 
 export type Weekday = (typeof VALID_WEEKDAYS)[number];
 
 /**
+ * `enabled:` as Home Assistant takes it on every condition, trigger and
+ * step: a boolean, or a template HA renders when it gets there (bugs #64,
+ * #69, #70: our schemas took only a boolean, so a template was dropped or
+ * the import failed).
+ */
+const EnabledSchema = z.union([z.boolean(), z.string()]);
+
+/** A state a `state` condition compares with: any scalar once `attribute` is set. */
+const ConditionStateValueSchema = z.union([z.string(), z.number(), z.boolean()]);
+type ConditionStateValue = z.infer<typeof ConditionStateValueSchema>;
+
+/**
  * Zod schema for Home Assistant condition objects.
  * Supports recursive conditions for and/or/not groups.
  */
@@ -18,13 +31,13 @@ export const HAConditionSchema: z.ZodType<
     [x: string]: unknown;
     condition?: string;
     alias?: string;
-    enabled?: boolean;
+    enabled?: boolean | string;
     entity_id?: string | string[];
-    state?: string | string[];
+    state?: ConditionStateValue | ConditionStateValue[] | null;
     value_template?: string;
     after?: string;
     before?: string;
-    weekday?: Weekday[];
+    weekday?: Weekday | Weekday[];
     after_offset?: string;
     before_offset?: string;
     zone?: string;
@@ -32,21 +45,29 @@ export const HAConditionSchema: z.ZodType<
     above?: string | number;
     below?: string | number;
     attribute?: string;
-    id?: string | string[];
+    id?: string | number | (string | number)[];
     target?: { entity_id?: string | string[] };
     options?: Record<string, unknown>;
   },
   Record<string, unknown>
 > = z.looseObject({
+  // Every field accepts at least what Home Assistant accepts (decision D3,
+  // bug #58: a condition our schema was stricter about than HA used to be
+  // rewritten into one that never passes). Checked against HA 2026.9.3's
+  // config_validation: `enabled` may be a template; `state` is any value
+  // when `attribute` is set; `weekday` is one day or a list; a trigger
+  // condition's `id` is coerced to a string, so a number is fine.
   alias: z.string().optional(),
   condition: z.string().optional(),
-  enabled: z.boolean().optional(),
+  enabled: EnabledSchema.optional(),
   entity_id: z.union([z.string(), z.array(z.string())]).optional(),
-  state: z.union([z.string(), z.array(z.string())]).optional(),
+  state: z
+    .union([ConditionStateValueSchema, z.array(ConditionStateValueSchema), z.null()])
+    .optional(),
   value_template: z.string().optional(),
   after: z.string().optional(),
   before: z.string().optional(),
-  weekday: z.array(z.enum(VALID_WEEKDAYS)).optional(),
+  weekday: z.union([z.enum(VALID_WEEKDAYS), z.array(z.enum(VALID_WEEKDAYS))]).optional(),
   after_offset: z.string().optional(),
   before_offset: z.string().optional(),
   zone: z.string().optional(),
@@ -54,8 +75,9 @@ export const HAConditionSchema: z.ZodType<
   above: z.union([z.string(), z.number()]).optional(),
   below: z.union([z.string(), z.number()]).optional(),
   attribute: z.string().optional(),
-  // Support both string and array for trigger conditions
-  id: z.union([z.string(), z.array(z.string())]).optional(),
+  // Support both string and array for trigger conditions (numbers too: HA
+  // coerces them to strings)
+  id: z.union([z.string(), z.number(), z.array(z.union([z.string(), z.number()]))]).optional(),
   // Purpose-specific conditions (HA 2025.12+ era, e.g. `condition:
   // light.is_on`) target the same entity/device/area/floor/label shape as
   // action targets and trigger targets — reusing OptionalTargetSchema rather
@@ -124,7 +146,7 @@ export const HATriggerSchema = z
     // `variables` (a map) to set values available as `trigger.*` when it
     // fires.
     id: z.string().optional(),
-    enabled: z.boolean().optional(),
+    enabled: EnabledSchema.optional(),
     variables: z.record(z.string(), z.unknown()).optional(),
     // Purpose-specific triggers (HA 2025.12+, e.g. `trigger: light.turned_on`)
     // target the same entity/device/area/floor/label shape as action targets
@@ -133,9 +155,7 @@ export const HATriggerSchema = z
     // `behavior` (each/first/all) controls multi-target firing for
     // purpose-specific triggers; loose otherwise so unrecognized option keys
     // from newer/less-common trigger platforms still round-trip untouched.
-    options: z
-      .looseObject({ behavior: z.enum(['each', 'first', 'all']).optional() })
-      .optional(),
+    options: z.looseObject({ behavior: z.enum(['each', 'first', 'all']).optional() }).optional(),
     entity_id: z.union([z.string(), z.array(z.string())]).optional(),
     // Home Assistant supports both string, array, and null for from/to fields
     // — `null` means "any state, including the very first state ever
@@ -178,7 +198,13 @@ export const HATriggerSchema = z
     // Webhook trigger: which HTTP methods may invoke it (HA supports POST,
     // PUT, HEAD, GET — GET/HEAD aren't enabled by default), and whether it's
     // reachable from outside the local network (default true, i.e. local-only).
-    allowed_methods: z.array(z.enum(['GET', 'POST', 'PUT', 'HEAD'])).optional(),
+    // One method or a list (HA's ensure_list; bug #92: one failed the import).
+    allowed_methods: z
+      .union([
+        z.enum(['GET', 'POST', 'PUT', 'HEAD']),
+        z.array(z.enum(['GET', 'POST', 'PUT', 'HEAD'])),
+      ])
+      .optional(),
     local_only: z.boolean().optional(),
     zone: z.string().optional(),
     topic: z.string().optional(),
@@ -198,7 +224,13 @@ export const HATriggerSchema = z
     source: z.string().optional(),
     // Persistent notification trigger
     notification_id: z.string().optional(),
-    update_type: z.array(z.enum(['added', 'removed', 'updated', 'current'])).optional(),
+    // One update type or a list (HA's ensure_list; bug #92).
+    update_type: z
+      .union([
+        z.enum(['added', 'removed', 'updated', 'current']),
+        z.array(z.enum(['added', 'removed', 'updated', 'current'])),
+      ])
+      .optional(),
   })
   .transform((input) => {
     // Normalize to modern 'trigger' property (HA 2024.1+)
@@ -221,7 +253,7 @@ export interface HATriggerInput {
   platform?: string;
   trigger?: string;
   id?: string;
-  enabled?: boolean;
+  enabled?: boolean | string;
   variables?: Record<string, unknown>;
   target?: { entity_id?: string | string[] };
   options?: Record<string, unknown>;
@@ -245,7 +277,7 @@ export interface HATriggerInput {
   value_template?: string;
   template?: string;
   webhook_id?: string;
-  allowed_methods?: Array<'GET' | 'POST' | 'PUT' | 'HEAD'>;
+  allowed_methods?: 'GET' | 'POST' | 'PUT' | 'HEAD' | Array<'GET' | 'POST' | 'PUT' | 'HEAD'>;
   local_only?: boolean;
   zone?: string;
   topic?: string;
@@ -256,7 +288,12 @@ export interface HATriggerInput {
   device_id?: string | string[];
   source?: string;
   notification_id?: string;
-  update_type?: Array<'added' | 'removed' | 'updated' | 'current'>;
+  update_type?:
+    | 'added'
+    | 'removed'
+    | 'updated'
+    | 'current'
+    | Array<'added' | 'removed' | 'updated' | 'current'>;
 }
 
 /**
@@ -274,7 +311,7 @@ export interface HAAction {
   data_template?: Record<string, unknown>;
   response_variable?: string;
   continue_on_error?: boolean;
-  enabled?: boolean;
+  enabled?: boolean | string;
   delay?: string | number | { hours?: number; minutes?: number; seconds?: number };
   wait_template?: string | Record<string, unknown>;
   timeout?: string | number | Record<string, number>;
@@ -294,14 +331,12 @@ export interface HAAction {
     sequence: HAAction[];
   };
   /**
-   * Inline "Test a condition" action step's array shorthand — a bare list of
-   * conditions (implicit AND), stopping the sequence if any evaluate false.
-   * The single-condition-object form (`condition: 'state', entity_id: ..., ...`)
-   * doesn't need a field here — its `condition` value is a string type
-   * discriminator on the action step itself, already covered by this
-   * interface's `[key: string]: unknown` index signature.
+   * Inline "Test a condition" action step: the condition's type (`condition:
+   * 'state'`, with its fields beside it on the step) or HA's shorthand, a
+   * bare list of conditions (implicit AND). It stops the list it's in if it
+   * doesn't pass.
    */
-  condition?: HACondition[];
+  condition?: string | HACondition[];
   /** "Grouping actions" building block — a nested sequence run as one unit (e.g. as a single parallel branch). */
   sequence?: HAAction[];
   [key: string]: unknown;
@@ -485,34 +520,40 @@ export const HAActionSchema: z.ZodType<HAAction> = z.lazy(() =>
     data_template: z.record(z.string(), z.unknown()).optional(),
     response_variable: z.string().optional(),
     continue_on_error: z.boolean().optional(),
-    enabled: z.boolean().optional(),
+    enabled: EnabledSchema.optional(),
     delay: z.union([z.string(), z.number(), z.record(z.string(), z.number())]).optional(),
     wait_template: z.union([z.string(), z.record(z.string(), z.unknown())]).optional(),
     timeout: z.union([z.string(), z.number(), z.record(z.string(), z.number())]).optional(),
     continue_on_timeout: z.boolean().optional(),
     wait_for_trigger: z.union([HATriggerSchema, z.array(HATriggerSchema)]).optional(),
-    choose: z.union([HAChooseOptionSchema, z.array(HAChooseOptionSchema)]).optional(),
-    default: z.array(HAActionSchema).optional(),
-    if: z.array(HAConditionSchema).optional(),
-    then: z.array(HAActionSchema).optional(),
-    else: z.array(HAActionSchema).optional(),
+    // Bug #85 (2026-09-27): the steps and conditions inside a block are
+    // not checked here. An action node only holds a block when the block is
+    // kept exactly as written (an opaque step, a loop kept whole), and HA
+    // accepts more there than these schemas did (a condition step's
+    // `condition: state`, a template string as `while:` or `if:`, HA's
+    // shorthands), so such an automation couldn't be opened (decision D3:
+    // never stricter than HA).
+    choose: z.custom<HAChooseOption | HAChooseOption[]>().optional(),
+    default: z.custom<HAAction[]>().optional(),
+    if: z.custom<HACondition[]>().optional(),
+    then: z.custom<HAAction[]>().optional(),
+    else: z.custom<HAAction[]>().optional(),
     variables: z.record(z.string(), z.unknown()).optional(),
     repeat: z
-      .object({
-        count: z.union([z.string(), z.number()]).optional(),
-        while: z.array(HAConditionSchema).optional(),
-        until: z.union([z.string(), z.array(z.string()), z.array(HAConditionSchema)]).optional(),
-        for_each: z.union([z.string(), z.array(z.unknown())]).optional(),
-        sequence: z.array(HAActionSchema),
+      .looseObject({
+        count: z.custom<string | number>().optional(),
+        while: z.custom<HACondition[]>().optional(),
+        until: z.custom<string | string[] | HACondition[]>().optional(),
+        for_each: z.custom<string | unknown[]>().optional(),
+        sequence: z.custom<HAAction[]>(),
       })
       .optional(),
-    // Inline "Test a condition" action step — single condition object form is handled by
-    // the looseObject's passthrough (condition acts as the type discriminator alongside
-    // sibling fields like entity_id/state); this field only needs to type the array
-    // shorthand ("a list of conditions" = implicit AND, per HA's action-step schema).
-    condition: z.array(HAConditionSchema).optional(),
+    // Inline "Test a condition" action step: `condition:` is the condition's
+    // type (`condition: state`, with its fields beside it) or a list of
+    // conditions (implicit AND, HA's shorthand).
+    condition: z.union([z.string(), z.array(HAConditionSchema)]).optional(),
     // "Grouping actions" building block — a nested sequence run as one unit.
-    sequence: z.array(HAActionSchema).optional(),
+    sequence: z.custom<HAAction[]>().optional(),
   })
 );
 
@@ -571,15 +612,7 @@ export type HAScript = z.infer<typeof HAScriptSchema>;
 export const HADelaySchema = z.looseObject({
   id: z.string().optional(),
   alias: z.string().optional(),
-  delay: z.union([
-    z.string(),
-    z.looseObject({
-      hours: z.union([z.number(), z.string()]).optional(),
-      minutes: z.union([z.number(), z.string()]).optional(),
-      seconds: z.union([z.number(), z.string()]).optional(),
-      milliseconds: z.union([z.number(), z.string()]).optional(),
-    }),
-  ]),
+  delay: HADurationSchema,
 });
 export type HADelay = z.infer<typeof HADelaySchema>;
 
@@ -592,17 +625,7 @@ export const HAWaitSchema = z
     alias: z.string().optional(),
     wait_template: z.string().optional(),
     wait_for_trigger: z.array(HATriggerSchema).optional(),
-    timeout: z
-      .union([
-        z.string(),
-        z.looseObject({
-          hours: z.union([z.number(), z.string()]).optional(),
-          minutes: z.union([z.number(), z.string()]).optional(),
-          seconds: z.union([z.number(), z.string()]).optional(),
-          milliseconds: z.union([z.number(), z.string()]).optional(),
-        }),
-      ])
-      .optional(),
+    timeout: HADurationSchema.optional(),
     continue_on_timeout: z.boolean().optional(),
   })
   .refine(

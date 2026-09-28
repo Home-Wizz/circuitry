@@ -29,7 +29,7 @@
  * a literal union (rather than `string`) so `t(\`...enumFieldLabels.${labelKey}\`)`
  * type-checks against i18next's generated key set at the call site.
  */
-export type ConditionEnumFieldLabelKey = 'hvacMode' | 'mode' | 'operationMode' | 'option';
+export type ConditionEnumFieldLabelKey = 'hvacMode' | 'mode' | 'operationMode' | 'option' | 'zone';
 
 export interface ConditionEnumField {
   /** The key inside `options` this condition's mode/option value lives at. */
@@ -43,8 +43,8 @@ export interface ConditionEnumField {
    * (mirrors lib/triggerEnumField.ts's identical `required` flag). A
    * required field with no sensible default (e.g. `select.is_option_selected`
    * without an option) would otherwise commit a condition that always
-   * evaluates false — unlike `humidifier.is_mode`, which HA documents as
-   * optional (omitted = matches any mode).
+   * evaluates false. (`humidifier.is_mode` was treated as optional, as
+   * HA's docs have it; HA's validator requires it -- #122.)
    */
   required: boolean;
 }
@@ -52,8 +52,9 @@ export interface ConditionEnumField {
 const CONDITION_ENUM_FIELDS: Record<string, ConditionEnumField> = {
   // home-assistant.io/conditions/climate.is_hvac_mode/: "hvac_mode string | list Required"
   'climate.is_hvac_mode': { optionsKey: 'hvac_mode', labelKey: 'hvacMode', required: true },
-  // home-assistant.io/conditions/humidifier.is_mode/: "mode string | list" (not marked Required)
-  'humidifier.is_mode': { optionsKey: 'mode', labelKey: 'mode', required: false },
+  // humidifier.is_mode: HA's docs don't mark `mode` required, but HA
+  // 2026.9.3's validator refuses the condition without it (#122).
+  'humidifier.is_mode': { optionsKey: 'mode', labelKey: 'mode', required: true },
   // home-assistant.io/conditions/water_heater.is_operation_mode/: "operation_mode string | list Required"
   'water_heater.is_operation_mode': {
     optionsKey: 'operation_mode',
@@ -62,6 +63,12 @@ const CONDITION_ENUM_FIELDS: Record<string, ConditionEnumField> = {
   },
   // home-assistant.io/conditions/select.is_option_selected/: "option string | list Required"
   'select.is_option_selected': { optionsKey: 'option', labelKey: 'option', required: true },
+  // zone/condition.py (HA 2026.9): each takes the zone(s) to test, a
+  // required `zone` list of zone entities (#122: the panel had no field).
+  'zone.in_zone': { optionsKey: 'zone', labelKey: 'zone', required: true },
+  'zone.not_in_zone': { optionsKey: 'zone', labelKey: 'zone', required: true },
+  'zone.occupancy_is_detected': { optionsKey: 'zone', labelKey: 'zone', required: true },
+  'zone.occupancy_is_not_detected': { optionsKey: 'zone', labelKey: 'zone', required: true },
 };
 
 export function getConditionEnumField(conditionType: string): ConditionEnumField | undefined {

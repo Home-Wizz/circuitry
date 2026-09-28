@@ -18,6 +18,7 @@ import {
 } from '@/config/conditionFields';
 import { HaSelect } from '@/ha';
 import { useNodeErrors } from '@/hooks/useNodeErrors';
+import { clearedToUnset } from '@/lib/utils';
 import type { ConditionNodeData } from '@/store/flow-store';
 import type { HassEntity } from '@/types/hass';
 import { getNodeDataString } from '@/utils/nodeData';
@@ -57,6 +58,8 @@ export function ConditionFields({ node, onChange, entities }: ConditionFieldsPro
   const nodeData = node.data as Record<string, unknown>;
   const hasNestedConditions = Array.isArray(nodeData.conditions) && nodeData.conditions.length > 0;
   const isGroupType = isLogicalGroupType(conditionType);
+  // Every field edit below: a cleared field is stored unset, not "" (bug #65).
+  const setField = (key: string, value: unknown) => onChange(key, clearedToUnset(value));
 
   const handleConditionTypeChange = (newType: string) => {
     // Clear every field any condition editor can write — not just the
@@ -82,12 +85,12 @@ export function ConditionFields({ node, onChange, entities }: ConditionFieldsPro
   const renderConditionFields = () => {
     // State condition: entity-aware state dropdown + attribute + duration
     if (conditionType === 'state') {
-      return <StateConditionFields node={node} onChange={onChange} entities={entities} />;
+      return <StateConditionFields node={node} onChange={setField} entities={entities} />;
     }
 
     // Device conditions use a special component with DeviceSelector
     if (conditionType === 'device') {
-      return <DeviceConditionFields node={node} onChange={onChange} entities={entities} />;
+      return <DeviceConditionFields node={node} onChange={setField} entities={entities} />;
     }
 
     // Purpose-specific conditions (dotted domain.verb type, e.g.
@@ -96,7 +99,7 @@ export function ConditionFields({ node, onChange, entities }: ConditionFieldsPro
     // static list — see NativeConditionFields.tsx.
     if (conditionType.includes('.')) {
       return (
-        <NativeConditionFields node={node} onChange={onChange} conditionType={conditionType} />
+        <NativeConditionFields node={node} onChange={setField} conditionType={conditionType} />
       );
     }
 
@@ -117,7 +120,7 @@ export function ConditionFields({ node, onChange, entities }: ConditionFieldsPro
         key={field.name}
         field={field}
         value={nodeData[field.name]}
-        onChange={(value) => onChange(field.name, value)}
+        onChange={(value) => setField(field.name, value)}
         entities={entities}
         error={getFieldError(field.name)}
         entityIdContext={entityIdContext}

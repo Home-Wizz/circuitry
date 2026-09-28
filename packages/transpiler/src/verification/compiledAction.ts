@@ -35,27 +35,11 @@ function stripInternal<T extends Record<string, unknown>>(data: T): T {
   return Object.fromEntries(Object.entries(data).filter(([k]) => !k.startsWith('_'))) as T;
 }
 
-/** Mirrors BaseStrategy.hasMeaningfulDuration exactly (see base.ts's doc
- * comment for the full HA-issue-backed rationale) -- a literal all-zero
- * timeout is "give up instantly," not "no timeout," so it's only kept when
- * at least one field is a positive number. */
-function hasMeaningfulDuration(value: unknown): boolean {
-  if (value === undefined || value === null) return false;
-  if (typeof value === 'string') return /[1-9]/.test(value);
-  if (typeof value === 'object') {
-    return Object.values(value as Record<string, unknown>).some((v) => {
-      const n = typeof v === 'string' ? Number(v) : v;
-      return typeof n === 'number' && !Number.isNaN(n) && n > 0;
-    });
-  }
-  return false;
-}
-
 /** Mirrors BaseStrategy.cleanTriggerFields + foldEventContextUserId. */
 function cleanTrigger(trigger: Record<string, unknown>): Record<string, unknown> {
   const cleaned = Object.fromEntries(
     Object.entries(trigger).filter(([key, v]) => {
-      if (v === undefined || v === '') return false;
+      if (v === undefined) return false; // "" kept (bug #72)
       if (v === null) return key === 'from' || key === 'to';
       return true;
     })
@@ -64,7 +48,17 @@ function cleanTrigger(trigger: Record<string, unknown>): Record<string, unknown>
     const { context_user_id, ...rest } = cleaned;
     return { ...rest, context: { user_id: context_user_id } };
   }
+  // A blank editing field (no user): not an HA key, never written (the
+  // strategies' fold drops it too). Kept apart now that "" isn't dropped
+  // wholesale (bug #72).
+  delete cleaned.context_user_id;
   return cleaned;
+}
+
+/** Mirrors BaseStrategy.writeEnabled: a step's `enabled` is written when
+ * it is `false` or a template (bug #70); enabled writes nothing. */
+function isEnabledToWrite(enabled: unknown): boolean {
+  return enabled === false || typeof enabled === 'string';
 }
 
 function isDeviceActionData(data: unknown): data is Record<string, unknown> {
@@ -98,12 +92,13 @@ export function graphActionToCompiled(node: FlowNode): Record<string, unknown> {
       ...extra
     } = stripInternal(node.data as Record<string, unknown>);
     const out: Record<string, unknown> = { ...extra };
-    if (wait_template) {
+    if (wait_template !== undefined && wait_template !== null) { // "" kept (bug #72)
       out.wait_template = wait_template;
     } else if (Array.isArray(wait_for_trigger)) {
       out.wait_for_trigger = wait_for_trigger.map((t) => cleanTrigger(t as Record<string, unknown>));
     }
-    if (hasMeaningfulDuration(timeout)) out.timeout = timeout;
+    // Written as held, zero included (bug #66; mirrors both strategies).
+    if (timeout !== undefined && timeout !== null) out.timeout = timeout;
     if (continue_on_timeout !== undefined) out.continue_on_timeout = continue_on_timeout;
     return out;
   }
@@ -113,9 +108,19 @@ export function graphActionToCompiled(node: FlowNode): Record<string, unknown> {
     return { ...extra, variables };
   }
 
-  // 'action' node -- one of: device action, opaque fallback repeat, fire
-  // event, stop, or a standard service call.
-  const data = stripInternal(node.data as Record<string, unknown>);
+  // 'action' node -- one of: an opaque step, device action, opaque
+  // fallback repeat, fire event, stop, or a standard service call.
+  const raw = node.data as Record<string, unknown>;
+  if (raw._opaque === true) {
+    // A step Circuitry doesn't know (bug #57; OPAQUE_STEP_KEY in
+    // @circuitry/shared): compiled exactly as written, minus internal keys
+    // and keys the editor cleared (mirrors BaseStrategy.buildOpaqueStep,
+    // written separately like the rest of this file).
+    return Object.fromEntries(
+      Object.entries(stripInternal(raw)).filter(([, v]) => v !== undefined)
+    );
+  }
+  const data = stripInternal(raw);
 
   if (isDeviceActionData(data.data)) {
     const deviceData = data.data as Record<string, unknown>;
@@ -129,7 +134,7 @@ export function graphActionToCompiled(node: FlowNode): Record<string, unknown> {
     for (const [key, value] of Object.entries(deviceData)) {
       if (!KNOWN_DEVICE_FIELDS.includes(key) && value !== undefined) out[key] = value;
     }
-    if (data.enabled === false) out.enabled = false;
+    if (isEnabledToWrite(data.enabled)) out.enabled = data.enabled;
     return out;
   }
 
@@ -150,7 +155,7 @@ export function graphActionToCompiled(node: FlowNode): Record<string, unknown> {
       out.event_data = data.event_data;
     }
     if (data.continue_on_error) out.continue_on_error = data.continue_on_error;
-    if (data.enabled === false) out.enabled = false;
+    if (isEnabledToWrite(data.enabled)) out.enabled = data.enabled;
     return out;
   }
 
@@ -159,7 +164,7 @@ export function graphActionToCompiled(node: FlowNode): Record<string, unknown> {
     if (data.error === true) out.error = true;
     if (data.response_variable) out.response_variable = data.response_variable;
     if (data.continue_on_error) out.continue_on_error = data.continue_on_error;
-    if (data.enabled === false) out.enabled = false;
+    if (isEnabledToWrite(data.enabled)) out.enabled = data.enabled;
     return out;
   }
 
@@ -183,7 +188,7 @@ export function graphActionToCompiled(node: FlowNode): Record<string, unknown> {
   if (data_template) out.data_template = data_template;
   if (response_variable) out.response_variable = response_variable;
   if (continue_on_error) out.continue_on_error = continue_on_error;
-  if (enabled === false) out.enabled = false;
+  if (isEnabledToWrite(enabled)) out.enabled = enabled;
   return out;
 }
 
@@ -201,5 +206,8 @@ export function yamlStepToCompiled(step: Record<string, unknown>): Record<string
  * repeat block rather than a real leaf action (see graphActionToCompiled's
  * 'repeat' branch above). */
 export function isFallbackRepeatNodeData(data: Record<string, unknown>): boolean {
+  // An opaque step holding a whole `repeat:` block (a template `enabled:`,
+  // bug #70) is a leaf, compared as written (graphActionToCompiled).
+  if (data._opaque === true) return false;
   return Boolean(data.repeat && typeof data.repeat === 'object');
 }

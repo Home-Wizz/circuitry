@@ -32,6 +32,8 @@ interface ThresholdTypeFieldProps {
   max?: number;
   step?: number;
   unit?: string;
+  /** See ThresholdValueField's `units`. */
+  units?: string[];
   /**
    * Adds an `any` crossing type — used by HA's `.changed` (not
    * `crossed_threshold`) purpose-specific triggers (illuminance.changed,
@@ -59,6 +61,7 @@ export function ThresholdTypeField({
   max,
   step,
   unit,
+  units,
   allowAny,
 }: ThresholdTypeFieldProps) {
   const { t } = useTranslation(['nodes']);
@@ -110,6 +113,7 @@ export function ThresholdTypeField({
               max={max}
               step={step}
               unit={unit}
+              units={units}
             />
           </FormField>
           <FormField label={t('nodes:triggers.native.thresholdMaxLabel')}>
@@ -120,6 +124,7 @@ export function ThresholdTypeField({
               max={max}
               step={step}
               unit={unit}
+              units={units}
             />
           </FormField>
         </>
@@ -132,6 +137,7 @@ export function ThresholdTypeField({
             max={max}
             step={step}
             unit={unit}
+            units={units}
           />
         </FormField>
       )}

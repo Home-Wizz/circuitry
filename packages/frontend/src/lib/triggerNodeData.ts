@@ -1,6 +1,8 @@
 import type { TriggerPlatform } from '@circuitry/shared';
 import { getTriggerDefaults } from '@/config/triggerFields';
 import type { DeviceTrigger } from '@/hooks/useDeviceAutomation';
+import { defaultThreshold, triggerIsTargetless } from '@/lib/nativeThreshold';
+import { getTriggerEnumField } from '@/lib/triggerEnumField';
 import type { TriggerRecipe } from '@/lib/triggerRecipes';
 
 /**
@@ -24,6 +26,19 @@ export type TriggerSelection =
  * shot from the "+Add > When" Miller-column modal) call this instead of
  * each re-deriving the platform/entity_id/to/from/attribute mapping.
  */
+/** The entities picked for a zone trigger are zones: its `zone` option,
+ * not its target (#118 -- HA's target there is the people and device
+ * trackers, and zone occupancy has none). */
+const picksZone = (trigger: string): boolean => getTriggerEnumField(trigger)?.optionsKey === 'zone';
+
+/** Whether picking this recipe asks for entities first: not for a
+ * trigger with no target in HA and nothing else to pick (sun, moon; #118 --
+ * the moon has no entities, so its trigger couldn't be added at all). */
+export function triggerRecipeTakesEntities(recipe: TriggerRecipe): boolean {
+  const { trigger } = recipe.fields;
+  return !triggerIsTargetless(trigger) || picksZone(trigger);
+}
+
 export function buildTriggerNodeData(selection: TriggerSelection): Record<string, unknown> {
   switch (selection.kind) {
     case 'platform':
@@ -54,17 +69,28 @@ export function buildTriggerNodeData(selection: TriggerSelection): Record<string
       // Purpose-specific triggers (HA 2025.12+, e.g. `light.turned_on` —
       // always dotted domain.event, never a bare legacy platform) commit a
       // `target`/`options` shape instead of the old entity_id/to/from/
-      // attribute one. `behavior: 'each'` is every purpose-specific
-      // trigger's own default when multiple entities end up targeted (a
-      // recipe picked for several same-domain entities at once, e.g.
-      // selecting a whole area of lights) — set explicitly so the property
-      // panel's behavior field always has a real value to show/edit rather
-      // than an empty one.
+      // attribute one. No `behavior` is written: HA's own default applies,
+      // and the panel shows it (#117 -- `behavior: 'each'` was written here,
+      // which HA refuses on the triggers that have no behavior, and which
+      // HA before 2026.5 refused on every trigger).
+      // A trigger with no target in HA (every `sun.*`, `moon.phase_changed`,
+      // zone occupancy) gets none, whatever was picked (#118: HA refuses a
+      // target there), and a zone trigger's picked zones are its zone.
       if (trigger.includes('.')) {
+        const zone = picksZone(trigger);
+        // zone.entered/left still need a target (the people and device
+        // trackers), which HA requires: an empty one, filled in the panel.
+        const target = triggerIsTargetless(trigger) ? undefined : { entity_id: zone ? [] : entityIds };
+        // A threshold type starts with the threshold the panel shows (#124).
+        const threshold = recipe.fields.options?.threshold ?? defaultThreshold('trigger', trigger);
         return {
           trigger,
-          target: { entity_id: entityIds },
-          options: { behavior: 'each', ...recipe.fields.options },
+          ...(target ? { target } : {}),
+          options: {
+            ...recipe.fields.options,
+            ...(threshold !== undefined ? { threshold } : {}),
+            ...(zone && entityIds.length > 0 ? { zone: entityIds } : {}),
+          },
         };
       }
 

@@ -20,10 +20,14 @@ import { HaSelect, HaSelector, HaSwitch } from '@/ha';
 import { useNodeErrors } from '@/hooks/useNodeErrors';
 import { useResolvedEntities } from '@/hooks/useResolvedEntities';
 import { getDomainIcon } from '@/lib/domain-icons';
+import { clearedToUnset } from '@/lib/utils';
 import type { TriggerNodeData } from '@/store/flow-store';
 import { getNodeData, getNodeDataString } from '@/utils/nodeData';
 import { ContinueOnErrorField } from './ContinueOnErrorField';
-import { DurationField, hasMeaningfulDuration } from './DurationField';
+import { DurationField } from './DurationField';
+
+/** What the Timeout switch sets when turned on: one minute, the same as a new Wait node. */
+const DEFAULT_TIMEOUT = '00:01:00';
 
 interface WaitFieldsProps {
   node: WaitNode;
@@ -37,14 +41,19 @@ export function WaitFields({ node, onChange }: WaitFieldsProps) {
   const [addTriggerOpen, setAddTriggerOpen] = useState(false);
   const waitTemplate = getNodeDataString(node, 'wait_template');
   const waitForTrigger = getNodeData<TriggerNodeData[]>(node, 'wait_for_trigger');
+  // A timeout the node holds, zero included, means the switch is on.
+  const hasTimeout = node.data.timeout !== undefined && node.data.timeout !== null;
 
   const waitType = waitForTrigger !== undefined ? 'trigger' : 'template';
   const rootError = getRootError();
 
   const handleWaitTypeChange = (type: 'template' | 'trigger') => {
     if (type === 'template') {
+      // The template starts unset (not ""): HA accepts an empty template
+      // and would wait until the timeout, so it's written as it is (bug
+      // #72); an unfilled one has to stay an error.
       onChange('wait_for_trigger', undefined);
-      onChange('wait_template', '');
+      onChange('wait_template', undefined);
     } else {
       onChange('wait_template', undefined);
       onChange('wait_for_trigger', []);
@@ -94,12 +103,14 @@ export function WaitFields({ node, onChange }: WaitFieldsProps) {
           <HaSelector
             selector={{ template: {} }}
             value={waitTemplate || ''}
-            onChange={(v) => onChange('wait_template', typeof v === 'string' ? v : '')}
+            onChange={(v) =>
+              onChange('wait_template', typeof v === 'string' ? clearedToUnset(v) : undefined)
+            }
             required
             fallback={
               <Textarea
                 value={waitTemplate || ''}
-                onChange={(e) => onChange('wait_template', e.target.value)}
+                onChange={(e) => onChange('wait_template', clearedToUnset(e.target.value))}
                 className="font-mono"
                 rows={3}
                 placeholder={t('nodes:placeholders.waitTemplate')}
@@ -173,24 +184,41 @@ export function WaitFields({ node, onChange }: WaitFieldsProps) {
         </div>
       )}
 
-      <DurationField
+      {/* Timeout switch (bug #66). Off: no `timeout`, so the wait lasts as
+          long as it takes. On: the duration below is written as it is,
+          zero included -- zero means "give up at once" in HA. The switch
+          replaced a rule that dropped every zero timeout (the duration
+          picker reports its untouched state as zeros), which also dropped
+          a zero written on purpose, so such a wait waited forever. */}
+      <FormField
         label={t('nodes:wait.timeoutLabel')}
         description={t('nodes:wait.timeoutDescription')}
-        value={node.data.timeout ?? ''}
-        // hasMeaningfulDuration, not a bare truthy check — HA's native
-        // duration picker widget reports its untouched/default state as an
-        // all-zero object (e.g. {hours:0,minutes:0,seconds:0,
-        // milliseconds:0}), which is truthy in JS, so a plain `val ||
-        // undefined` was persisting a real "0-second timeout" onto the node
-        // even when the user never touched this field at all. HA treats an
-        // explicit zero timeout as "give up instantly," not "no limit" (see
-        // DurationField.tsx's hasMeaningfulDuration doc comment) — so this
-        // was silently turning every Wait-for-trigger step that left
-        // Timeout unset into one that never actually waited.
-        onChange={(val) => onChange('timeout', hasMeaningfulDuration(val) ? val : undefined)}
-      />
+      >
+        <HaSwitch
+          checked={hasTimeout}
+          onChange={(checked) => onChange('timeout', checked ? DEFAULT_TIMEOUT : undefined)}
+          fallback={
+            <Switch
+              aria-label={t('nodes:wait.timeoutLabel')}
+              checked={hasTimeout}
+              onCheckedChange={(checked) =>
+                onChange('timeout', checked ? DEFAULT_TIMEOUT : undefined)
+              }
+            />
+          }
+        />
+      </FormField>
 
-      {hasMeaningfulDuration(node.data.timeout) && (
+      {hasTimeout && (
+        <DurationField
+          label={t('nodes:wait.timeoutDurationLabel')}
+          description={t('nodes:wait.timeoutDurationDescription')}
+          value={node.data.timeout ?? ''}
+          onChange={(val) => onChange('timeout', val)}
+        />
+      )}
+
+      {hasTimeout && (
         <FormField
           label={t('nodes:wait.continueOnTimeout')}
           description={t('nodes:wait.continueOnTimeoutDescription')}
