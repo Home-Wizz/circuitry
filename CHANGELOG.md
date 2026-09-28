@@ -5,7 +5,7 @@ rebrand below were written under this project's previous name — FLODE —
 and are kept exactly as originally written for historical accuracy rather
 than edited to say "Circuitry" throughout.
 
-## [2.2.0] — 2026-09-28 — Faithful to Home Assistant
+## [2.2.0] — 2026-09-28
 
 Circuitry now reads automations the way Home Assistant does, writes more
 drawn shapes exactly as drawn, and offers only the options the connected
