@@ -1,13 +1,14 @@
 import { TruncatedTooltip } from '@/components/ui/truncated-tooltip';
 import { DEFAULT_DOMAIN_COLOR, type DomainColor } from '@/lib/domain-colors';
 import { cn } from '@/lib/utils';
+import { type PickerIcon, PickerIconBadge } from '@/components/nodes/StepIcon';
+import { CurrentChip, useIsChosen, useIsCurrent } from '@/components/canvas/pickerCurrent';
 
 /** Covers both `lucide-react`'s own `LucideIcon` type and the narrower
  * `React.ComponentType<{ className?: string }>` PLATFORM_ICONS
  * (TriggerTypePicker.tsx) is typed as — both are just "a component that
  * takes a className", so this row doesn't need the stricter lucide-specific
  * type to render either one. */
-type IconComponent = React.ComponentType<{ className?: string }>;
 
 /**
  * One selectable trigger/recipe row — shared by `TargetResultsPanel`
@@ -38,8 +39,10 @@ export function TriggerResultRow({
   chip,
   color,
   onSelect,
+  pickKey,
+  choiceKey,
 }: {
-  icon: IconComponent;
+  icon: PickerIcon;
   label: string;
   /** Real HA's own trigger-doc wording where verified (see lib/triggerRecipes.ts) — omitted rather than guessed for recipes without confirmed copy. */
   description?: string;
@@ -48,14 +51,22 @@ export function TriggerResultRow({
   /** Icon badge color — see lib/domain-colors.ts. Defaults to a neutral gray badge for non-domain-specific rows (platforms, Blocks). */
   color?: DomainColor;
   onSelect: () => void;
+  /** The pick this row makes, marked "Current" when it is the step being
+   * replaced (canvas/pickerCurrent.tsx). */
+  pickKey?: string;
+  /** The key it's chosen by in its column (useIsChosen): marked chosen
+   * while the column it opened is showing. */
+  choiceKey?: string;
 }) {
   const { bg, fg } = color ?? DEFAULT_DOMAIN_COLOR;
+  const isCurrent = useIsCurrent(pickKey);
+  const isChosen = useIsChosen(choiceKey);
   return (
     <button
       type="button"
       onClick={onSelect}
       className={cn(
-        'flex w-full items-start gap-3.5 rounded-xl border px-4 py-3.5 text-left',
+        'flex w-full items-start gap-3.5 rounded-xl border border-foreground/15 px-4 py-3.5 text-left',
         // Deliberately `bg-muted` rather than `bg-accent` for the hover
         // state: inside real HA, `--accent` is HA's bright orange
         // `accent-color` (ha-theme.ts mirrors HA's own theme, not a neutral
@@ -65,16 +76,25 @@ export function TriggerResultRow({
         // rather than just "colorful". `bg-muted` (HA's neutral
         // secondary-background-color) keeps the same hover affordance
         // without fighting the description text's own color.
-        'transition-colors hover:border-foreground/20 hover:bg-muted'
+        'transition-colors hover:border-foreground/20 hover:bg-muted',
+        isCurrent && 'border-primary/50',
+        isChosen && 'border-primary bg-primary/10 hover:border-primary hover:bg-primary/10'
       )}
+      aria-pressed={choiceKey === undefined ? undefined : isChosen}
     >
-      <span className={cn('flex h-10 w-10 shrink-0 items-center justify-center rounded-full', bg)}>
-        <Icon className={cn('h-5 w-5', fg)} />
-      </span>
+      <PickerIconBadge icon={Icon} color={{ bg, fg }} size="lg" />
       <div className="min-w-0 flex-1 pt-0.5">
-        <div className="font-medium text-lg">{label}</div>
+        <div className="flex items-center gap-2 font-medium text-lg">
+          {label}
+          {isCurrent && <CurrentChip />}
+        </div>
         {description && (
-          <div className="mt-1 text-muted-foreground text-base leading-relaxed">{description}</div>
+          // At most two lines; the rest in a tooltip when it's cut.
+          <TruncatedTooltip content={description}>
+            <div className="mt-1 line-clamp-2 text-muted-foreground text-base leading-relaxed">
+              {description}
+            </div>
+          </TruncatedTooltip>
         )}
       </div>
       {chip && (

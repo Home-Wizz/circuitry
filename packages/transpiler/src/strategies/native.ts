@@ -75,12 +75,43 @@ interface SequencePattern {
   /** All node IDs strictly between start and end */
   bodyNodeIds: string[];
   alias?: string;
+  /** A frame (#141): the alias of the one `choose:` or `parallel:` block
+   * inside it, written onto that block rather than as a group. */
+  frame?: boolean;
 }
 
 /**
  * Native strategy for simple tree-shaped automations
  * Generates standard nested Home Assistant YAML with choose blocks
  */
+/** Which kind of loop a back-edge closes, or null when it closes none
+ * native can write (see NativeStrategy.classifyRepeatBackEdge's doc). The
+ * state machine reads loops the same way to give each its own budget
+ * (decision of #129's follow-up). */
+export type LoopBackEdgeKind = 'while' | 'while-body-exit' | 'until' | 'count' | null;
+
+export function classifyLoopBackEdge(
+  sourceNode: FlowNode,
+  targetNode: FlowNode,
+  sourceHandle: string | null | undefined
+): LoopBackEdgeKind {
+  const sourceBlockKey = (sourceNode.data as Record<string, unknown> | undefined)?._blockKey;
+  const targetBlockKey = (targetNode.data as Record<string, unknown> | undefined)?._blockKey;
+  if (sourceNode.type !== 'condition') {
+    return targetNode.type === 'condition' ? 'while' : null;
+  }
+  const isOwnUntilEdge = sourceHandle === 'false' && sourceBlockKey === 'repeat_until';
+  if (
+    !isOwnUntilEdge &&
+    (typeof sourceBlockKey === 'string' || targetBlockKey === 'repeat_while')
+  ) {
+    return targetNode.type === 'condition' ? 'while-body-exit' : null;
+  }
+  if (sourceHandle === 'false') return 'until';
+  if (sourceHandle === 'true') return 'count';
+  return null;
+}
+
 export class NativeStrategy extends BaseStrategy {
   readonly name = 'native';
   readonly description = 'Generates nested HA YAML for simple tree-shaped automations';
@@ -451,22 +482,8 @@ export class NativeStrategy extends BaseStrategy {
     sourceNode: FlowNode,
     targetNode: FlowNode,
     sourceHandle: string | null | undefined
-  ): 'while' | 'while-body-exit' | 'until' | 'count' | null {
-    const sourceBlockKey = (sourceNode.data as Record<string, unknown> | undefined)?._blockKey;
-    const targetBlockKey = (targetNode.data as Record<string, unknown> | undefined)?._blockKey;
-    if (sourceNode.type !== 'condition') {
-      return targetNode.type === 'condition' ? 'while' : null;
-    }
-    const isOwnUntilEdge = sourceHandle === 'false' && sourceBlockKey === 'repeat_until';
-    if (
-      !isOwnUntilEdge &&
-      (typeof sourceBlockKey === 'string' || targetBlockKey === 'repeat_while')
-    ) {
-      return targetNode.type === 'condition' ? 'while-body-exit' : null;
-    }
-    if (sourceHandle === 'false') return 'until';
-    if (sourceHandle === 'true') return 'count';
-    return null;
+  ): LoopBackEdgeKind {
+    return classifyLoopBackEdge(sourceNode, targetNode, sourceHandle);
   }
 
   /** An until loop's condition list, head first -- see the until branch of
@@ -1040,6 +1057,7 @@ export class NativeStrategy extends BaseStrategy {
         bodyEntryNodeIds,
         bodyNodeIds,
         alias: 'alias' in node.data && typeof node.data.alias === 'string' ? node.data.alias : undefined,
+        frame: (node.data as Record<string, unknown>)._frame === true,
       });
     }
 
@@ -1168,6 +1186,20 @@ export class NativeStrategy extends BaseStrategy {
       pattern.bodyEntryNodeIds.length > 0
         ? this.buildFanOutUntilNode(flow, pattern.bodyEntryNodeIds, pattern.endNodeId, visited)
         : [];
+    // A frame holding one block with no alias of its own: the frame's alias
+    // is that block's. Anything else in it (steps added on the canvas, a
+    // block with its own alias) is a group, which HA runs the same way.
+    const only = body.length === 1 ? body[0] : undefined;
+    if (
+      pattern.frame &&
+      typeof only === 'object' &&
+      only !== null &&
+      !Array.isArray(only) &&
+      ['choose', 'if', 'parallel'].some((key) => key in only) &&
+      !('alias' in only && only.alias !== undefined)
+    ) {
+      return { ...only, ...(pattern.alias ? { alias: pattern.alias } : {}) };
+    }
     return {
       ...(pattern.alias ? { alias: pattern.alias } : {}),
       sequence: body,
@@ -1250,7 +1282,9 @@ export class NativeStrategy extends BaseStrategy {
     // not this fan-out's to build.
     const convergenceSet = this.findConvergenceSet(flow, remainingTargets, stopSet);
     const convergencePoints = convergenceSet.length > 0 ? convergenceSet : [...stopSet];
-    const boundSet = new Set(convergencePoints);
+    // With the caller's stop set (#152): a branch's edge to where the
+    // enclosing branches meet goes there, not into the branch.
+    const boundSet = new Set([...convergencePoints, ...stopSet]);
     const parallelActions = this.buildParallelBranches(
       flow,
       remainingTargets,
@@ -1360,14 +1394,18 @@ export class NativeStrategy extends BaseStrategy {
     for (const id of pattern.bodyNodeIds) visited.add(id);
     visited.add(pattern.entryNodeId);
 
-    // Get alias from the first condition (while) or from the init node (count)
+    // Get alias from the first condition (while, until) or from the init
+    // node (count, below). An until loop's alias was never read (#140).
     let alias: string | undefined;
+    for (const id of pattern.conditionNodeIds) {
+      const node = this.getNode(flow, id) as ConditionNode;
+      if (!alias && node?.data?.alias) alias = node.data.alias;
+    }
 
     if (pattern.type === 'while') {
       // Build while conditions
       const whileConditions = pattern.conditionNodeIds.map((id) => {
         const node = this.getNode(flow, id) as ConditionNode;
-        if (!alias && node?.data?.alias) alias = node.data.alias;
         return this.buildCondition(node);
       });
 
@@ -1460,9 +1498,21 @@ export class NativeStrategy extends BaseStrategy {
       if (falseEdges.length > 0) conditionsWithFalsePath++;
     }
 
+    // #132: an OR only when its arms are the only ways to where they meet.
+    // Another way there that always arrives (a test whose other edge goes
+    // there too) makes the step run anyway.
+    const onlyWaysIn = (target: string, handle: 'true' | 'false'): boolean =>
+      flow.edges
+        .filter((e) => e.target === target && !this.backEdgeIds.has(e.id))
+        .every((e) => e.sourceHandle === handle && firstActionIds.includes(e.source));
+
     // OR via true paths: all conditions have the same true target
     // AND either no false paths exist OR all false paths also converge (no information loss)
-    if (trueTargets.size === 1 && conditionsWithTruePath === firstActionIds.length) {
+    if (
+      trueTargets.size === 1 &&
+      conditionsWithTruePath === firstActionIds.length &&
+      onlyWaysIn([...trueTargets][0], 'true')
+    ) {
       // Reject if false paths diverge — that would silently drop else-branch actions
       if (conditionsWithFalsePath > 0 && falseTargets.size > 1) {
         return null;
@@ -1479,7 +1529,11 @@ export class NativeStrategy extends BaseStrategy {
 
     // OR via false paths: all conditions have the same false target
     // AND either no true paths exist OR all true paths also converge
-    if (falseTargets.size === 1 && conditionsWithFalsePath === firstActionIds.length) {
+    if (
+      falseTargets.size === 1 &&
+      conditionsWithFalsePath === firstActionIds.length &&
+      onlyWaysIn([...falseTargets][0], 'false')
+    ) {
       // Reject if true paths diverge — that would silently drop then-branch actions
       if (conditionsWithTruePath > 0 && trueTargets.size > 1) {
         return null;
@@ -1499,7 +1553,8 @@ export class NativeStrategy extends BaseStrategy {
   /**
    * Extract leading condition nodes that can be promoted to the root conditions block.
    * Only conditions with no false/else path are promotable, forming a straight chain
-   * from triggers to actions via true paths only (or false paths only for inverted conditions).
+   * from triggers to actions via true paths only (#128: a condition wired through its
+   * false handle only stays in the actions, see below).
    * Fan-out is allowed when only one handle type is used - the condition is promoted and
    * all fan-out targets become action starting points.
    */
@@ -1529,36 +1584,34 @@ export class NativeStrategy extends BaseStrategy {
       // Must have at least one path
       if (truePaths.length === 0 && falsePaths.length === 0) break;
 
+      // Connected via its false handle only: left in the actions, where it
+      // is written `if: C, then: [], else: ...`. A condition HA can't
+      // evaluate (an unknown entity, a sensor unavailable to numeric_state)
+      // then takes the "no" edge, as HA's if/else does; as a top-level
+      // `not`, the error stopped the automation instead (#128).
+      if (falsePaths.length > 0) break;
+
+      // A block's first condition holding the block's name (an if's, a
+      // choose option's) stays the block it names: promoted, the name was
+      // moved onto the condition, in place of the condition's own (#143).
+      if (this.namesItsBlock(node)) break;
+
       // Build the condition object with alias preserved
       const condition = this.buildCondition(node as ConditionNode);
       if ((node as ConditionNode).data.alias) {
         condition.alias = (node as ConditionNode).data.alias;
       }
 
-      if (falsePaths.length > 0) {
-        // Connected via false handle only → inverted condition, wrap in "not"
-        conditions.push({
-          condition: 'not',
-          conditions: [condition],
-        });
-        visitedIds.add(currentId);
+      // Connected via true handle only → promote as-is (an error fails it,
+      // and the graph has no "no" edge there either: the automation stops)
+      conditions.push(condition);
+      visitedIds.add(currentId);
 
-        // If there's fan-out (multiple false paths), stop extraction and return all targets
-        if (falsePaths.length > 1) {
-          return { conditions, nextNodeIds: falsePaths.map((e) => e.target), visitedIds };
-        }
-        currentId = falsePaths[0].target;
-      } else {
-        // Connected via true handle only → promote as-is
-        conditions.push(condition);
-        visitedIds.add(currentId);
-
-        // If there's fan-out (multiple true paths), stop extraction and return all targets
-        if (truePaths.length > 1) {
-          return { conditions, nextNodeIds: truePaths.map((e) => e.target), visitedIds };
-        }
-        currentId = truePaths[0].target;
+      // If there's fan-out (multiple true paths), stop extraction and return all targets
+      if (truePaths.length > 1) {
+        return { conditions, nextNodeIds: truePaths.map((e) => e.target), visitedIds };
       }
+      currentId = truePaths[0].target;
     }
 
     return { conditions, nextNodeIds: currentId ? [currentId] : [], visitedIds };
@@ -1595,6 +1648,13 @@ export class NativeStrategy extends BaseStrategy {
       );
 
     if (sources.length <= 1) return [];
+    // #132: another way into the node that always gets there (a source's
+    // other edge, a plain step) makes it run anyway: the tests gate nothing
+    // (the same rule as gateConditionMeetings).
+    const waysIn = flow.edges.filter(
+      (e) => e.target === targetNodeId && !this.backEdgeIds.has(e.id)
+    );
+    if (waysIn.length !== sources.length) return [];
 
     // Only treat as OR if the opposite handle (else/then) of each source
     // either has no edge, or all opposite edges converge to the same target.
@@ -1788,7 +1848,7 @@ export class NativeStrategy extends BaseStrategy {
       if (isChooseChain) {
         // ===== Choose Block Logic =====
         // Build choose: [{conditions, sequence}, ...] from condition chain via FALSE paths
-        type BranchInfo = { conditions: unknown[]; thenNodeIds: string[] };
+        type BranchInfo = { conditions: unknown[]; thenNodeIds: string[]; alias?: string };
         const branchInfos: BranchInfo[] = [];
         let currentChoiceNode: FlowNode | null = node;
         // Every false target of the last case examined (a `parallel:` when
@@ -1856,7 +1916,15 @@ export class NativeStrategy extends BaseStrategy {
             }
           }
 
-          branchInfos.push({ conditions: branchConditions, thenNodeIds });
+          // The case's alias: an option's own, or the if's whose else this
+          // case came from (#142: options were written without one).
+          const caseData = this.getNode(flow, choiceFirstNodeId)?.data;
+          const caseAlias = caseData && 'alias' in caseData ? caseData.alias : undefined;
+          branchInfos.push({
+            conditions: branchConditions,
+            thenNodeIds,
+            ...(typeof caseAlias === 'string' && caseAlias !== '' ? { alias: caseAlias } : {}),
+          });
 
           const choiceFalse = this.getOutgoingEdges(flow, choiceFirstNodeId).filter(
             (e) => e.sourceHandle === 'false' && !this.backEdgeIds.has(e.id)
@@ -1958,7 +2026,11 @@ export class NativeStrategy extends BaseStrategy {
                 ? this.buildFanOutUntilNode(flow, branch.thenNodeIds, convergenceBoundSet, new Set(visited))
                 : this.buildFanOut(flow, branch.thenNodeIds, new Set(visited))
               : [];
-          chooseOptions.push({ conditions: branch.conditions, sequence: branchSeq });
+          chooseOptions.push({
+            ...(branch.alias ? { alias: branch.alias } : {}),
+            conditions: branch.conditions,
+            sequence: branchSeq,
+          });
         }
 
         const chooseAction: Record<string, unknown> = { choose: chooseOptions };
@@ -2392,6 +2464,14 @@ export class NativeStrategy extends BaseStrategy {
    * extractFromGraph.ts's buildConditionChain applies the same rule
    * independently.
    */
+  /** A block's first condition that holds the block's name (#143). */
+  private namesItsBlock(node: FlowNode): boolean {
+    const data = node.data as Record<string, unknown> | undefined;
+    return (
+      typeof data?._blockKey === 'string' && typeof data.alias === 'string' && data.alias !== ''
+    );
+  }
+
   private canFoldIntoAndChain(
     flow: FlowGraph,
     next: FlowNode,
@@ -2416,6 +2496,10 @@ export class NativeStrategy extends BaseStrategy {
     if (!this.hasOneWayIn(flow, next.id)) return false;
     const isConstructHead =
       typeof (next.data as Record<string, unknown> | undefined)?._blockKey === 'string';
+    // A block with a name of its own stays the block (nested in this one's
+    // then): folded, its name was lost (#143). The programs compare equal
+    // either way (behaviorProgram's normalizeProgram folds nested ifs).
+    if (this.namesItsBlock(next)) return false;
     if (isConstructHead) return sameIds(nextFalseTargets, chainElseTargets);
     if (nextFalseTargets.length === 0) return true;
     // Its false edges go exactly where the chain's else does -- one target,
@@ -2521,6 +2605,9 @@ export class NativeStrategy extends BaseStrategy {
     if (meet.length === 0) return false;
     return !earlierCases.every((c) => {
       if (c.thenNodeIds.length === 0) return false;
+      // A case that only stops never gets anywhere after the choose: it
+      // doesn't keep a later one from being a case (#161).
+      if (this.withoutStopOnly(flow, c.thenNodeIds).length === 0) return true;
       const reached = this.reachedAvoiding(flow, c.thenNodeIds, conditionId);
       return meet.every((id) => reached.has(id));
     });

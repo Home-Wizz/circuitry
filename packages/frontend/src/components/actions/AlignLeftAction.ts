@@ -7,7 +7,7 @@ export function getAlignLeftAction(t: TFunction): NodeAction {
   return {
     name: 'align-left',
     icon: AlignStartVertical,
-    tooltip: t('toolbar.alignLeft'),
+    tooltip: t('toolbar.lineUpColumn'),
     shortcut: 'ctrl+shift+l',
     group: 'align',
     isEnabled: (context: NodeActionContext) => context.selectedNodes.length >= 2,

@@ -1,27 +1,25 @@
 import { useHass } from '@/contexts/HassContext';
+import { entityName, nameFromEntityId } from '@/lib/entityNames';
 
 export interface EntityTargetDisplay {
-  /** "{device or area name} - {home name}" when a device resolved; area/entity name alone otherwise. */
+  /** The device's name when a device resolved; the entity's name otherwise. */
   label: string;
   /** Domain of the resolved entity (e.g. `light`) — used to pick a card icon via lib/domain-icons.ts. */
   domain: string | undefined;
   /** The entity's `device_class` attribute (e.g. `door`, `motion`) when set — lets card display logic pick device-class-aware phrasing (see useTriggerCardDisplay.ts's 'state' case). */
   deviceClass: string | undefined;
+  /** The entity's area (its own, or its device's), for the card's context line. */
+  area?: string;
 }
 
 /**
- * Shared by TriggerNode.tsx and ActionNode.tsx to build
- * device-name-plus-home-name card titles — "{device name} - {home name}"
- * rather than a raw entity_id — so the resolution order (device name >
- * area name > entity friendly name > raw entity_id) and the "home name"
- * (HA's own instance name, the `location_name` shown throughout HA's own
- * UI) only live in one place.
+ * Shared by the trigger, condition and action cards so the label's
+ * resolution order (device name > entity friendly name > raw entity_id)
+ * lives in one place. The label is the name alone: every step is in the
+ * same home, and the room is shown on the card.
  */
 export function useNodeCardDisplay() {
-  const { hass, entities, getDeviceNameForEntity, getDeviceNameById, getAreaNameForEntity } = useHass();
-  const homeName = hass?.config?.location_name;
-
-  const withHomeSuffix = (name: string) => (homeName ? `${name} - ${homeName}` : name);
+  const { entities, getDeviceNameForEntity, getDeviceNameById, getAreaNameForEntity } = useHass();
 
   const resolveEntityTarget = (entityId: string | undefined): EntityTargetDisplay | null => {
     if (!entityId) return null;
@@ -29,18 +27,16 @@ export function useNodeCardDisplay() {
     const entity = entities.find((e) => e.entity_id === entityId);
     const deviceClass = entity?.attributes.device_class as string | undefined;
 
+    const area = getAreaNameForEntity(entityId) || undefined;
     const deviceName = getDeviceNameForEntity(entityId);
     if (deviceName) {
-      return { label: withHomeSuffix(deviceName), domain, deviceClass };
+      return { label: deviceName, domain, deviceClass, area };
     }
 
-    const areaName = getAreaNameForEntity(entityId);
-    if (areaName) {
-      return { label: areaName, domain, deviceClass };
-    }
-
-    const friendlyName = entity?.attributes.friendly_name as string | undefined;
-    return { label: friendlyName || entityId, domain, deviceClass };
+    // Not the area's name: on a card the label names the entity ("Turn on
+    // [Hallway light]"), and an area name there reads as the whole area.
+    // The area is the card's context line instead.
+    return { label: entityName(entity, entityId), domain, deviceClass, area };
   };
 
   /** For device triggers/conditions, which carry a `device_id` but not always an `entity_id`. */
@@ -51,8 +47,12 @@ export function useNodeCardDisplay() {
     if (!deviceId) return null;
     const deviceName = getDeviceNameById(deviceId);
     if (!deviceName) return null;
-    return { label: withHomeSuffix(deviceName), domain, deviceClass: undefined };
+    return { label: deviceName, domain, deviceClass: undefined };
   };
 
-  return { resolveEntityTarget, resolveDeviceTarget, homeName };
+  /** Several entities by name ("Hall light, Kitchen light"), never their ids. */
+  const entityNames = (entityIds: readonly string[]): string =>
+    entityIds.map((id) => resolveEntityTarget(id)?.label ?? nameFromEntityId(id)).join(', ');
+
+  return { resolveEntityTarget, resolveDeviceTarget, entityNames };
 }

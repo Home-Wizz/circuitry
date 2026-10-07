@@ -3,11 +3,12 @@
  * Can be easily enabled/disabled for debugging
  */
 
+import { readStored, writeStored } from '@/lib/storage';
+
 // Enable debugging by setting this to true or via localStorage
 const DEBUG_ENABLED =
   typeof window !== 'undefined' &&
-  (localStorage.getItem('circuitry_debug') === 'true' ||
-    window.location.search.includes('debug=true'));
+  (readStored('circuitry_debug') === 'true' || window.location.search.includes('debug=true'));
 
 // Console styling for better visibility
 const styles = {
@@ -32,9 +33,7 @@ class Logger {
    */
   setEnabled(enabled: boolean) {
     this.enabled = enabled;
-    if (typeof window !== 'undefined') {
-      localStorage.setItem('circuitry_debug', enabled.toString());
-    }
+    writeStored('circuitry_debug', enabled.toString());
   }
 
   /**

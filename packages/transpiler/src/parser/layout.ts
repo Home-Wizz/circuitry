@@ -3,6 +3,9 @@ import ELK from 'elkjs/lib/elk.bundled.js';
 
 const elk = new ELK();
 
+/** The widest a step's card gets on the canvas (frontend StepCard.tsx). */
+const STEP_CARD_MAX_WIDTH = 400;
+
 /**
  * Apply heuristic layout to nodes when metadata is missing
  * Uses ELK (Eclipse Layout Kernel) for automatic graph layout
@@ -270,16 +273,15 @@ function applyFallbackLayout(nodes: FlowNode[]): FlowNode[] {
  */
 function getNodeWidth(type: string): number {
   switch (type) {
+    // A step's card is at most this wide (the editor's StepCard, max-w
+    // 400px): laid out at its widest, so long sentences never overlap the
+    // next column.
     case 'trigger':
-      return 200;
     case 'condition':
-      return 220;
     case 'action':
-      return 200;
     case 'delay':
-      return 180;
     case 'wait':
-      return 180;
+      return STEP_CARD_MAX_WIDTH;
     default:
       return 200;
   }

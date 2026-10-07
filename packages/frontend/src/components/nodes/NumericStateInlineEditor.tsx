@@ -1,7 +1,8 @@
 import { useTranslation } from 'react-i18next';
 
 /**
- * Inline Above/Below threshold editor for `numeric_state` trigger AND
+ * The Above/Below editor opened from a card's threshold pill
+ * (ThresholdPill.tsx) for `numeric_state` trigger AND
  * condition cards (e.g. "Light brightness crossed threshold" trigger,
  * "Temperature between 17 and 25" condition) — same nodrag/stopPropagation
  * pattern as DelayNode.tsx's inline Sec/Min editor, generalizing that

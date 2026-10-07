@@ -1,6 +1,40 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { z } from 'zod';
-import { useHass } from '@/contexts/HassContext';
+import { useOptionalHass } from '@/contexts/HassContext';
+
+const DEFAULT_CATEGORIES = ['device_automation'] as const;
+
+type CallWS = { callWS: (message: { type: string; [key: string]: unknown }) => Promise<unknown> };
+
+/** Each connection's fetched categories, by language and category. */
+const fetched = new WeakMap<object, Map<string, Promise<Record<string, string>>>>();
+
+function cachedCategory(
+  connection: object,
+  language: string,
+  category: string,
+  hass: CallWS
+): Promise<Record<string, string>> {
+  let byKey = fetched.get(connection);
+  if (!byKey) {
+    byKey = new Map();
+    fetched.set(connection, byKey);
+  }
+  const key = `${language}|${category}`;
+  let pending = byKey.get(key);
+  if (!pending) {
+    pending = Promise.resolve()
+      .then(() => hass.callWS({ type: 'frontend/get_translations', language, category }))
+      .then((result) => {
+        const parsed = TranslationResponseSchema.safeParse(result);
+        return parsed.success ? parsed.data.resources : {};
+      })
+      // Expected if message type doesn't exist (or there's no such call)
+      .catch(() => ({}));
+    byKey.set(key, pending);
+  }
+  return pending;
+}
 
 // Zod schema for translation API response
 const TranslationResponseSchema = z.object({
@@ -17,12 +51,17 @@ const TranslationResponseSchema = z.object({
 
 /**
  * Hook to manage Home Assistant translation loading.
- * Uses the unified hass instance from context and fetches device_automation translations.
+ * Uses the unified hass instance from context and fetches the given
+ * translation categories (device_automation by default; the pickers also
+ * read `triggers`, `conditions` and `title` for the types HA describes).
  */
-export function useTranslations() {
-  const { hass } = useHass();
+export function useTranslations(categories: readonly string[] = DEFAULT_CATEGORIES) {
+  // Outside a HassProvider (a field editor rendered alone), no translations.
+  const hass = useOptionalHass()?.hass;
   const [wsTranslations, setWsTranslations] = useState<Record<string, string>>({});
   const [isLoading, setIsLoading] = useState(true);
+  // One string, so a new array each render doesn't refetch.
+  const categoryList = categories.join('|');
 
   // Get base translations from hass.resources (already unified via HassContext)
   // Note: At runtime, HA provides resources as a flat Record<string, string> for the current language,
@@ -51,35 +90,35 @@ export function useTranslations() {
     return {};
   }, [hass?.resources]);
 
-  // Fetch device_automation translations via WebSocket
+  // Fetch the categories' translations via WebSocket, once per connection,
+  // language and category (every panel and picker shares the answer).
+  const connection = hass?.connection;
+  const hassRef = useRef(hass);
+  hassRef.current = hass;
   useEffect(() => {
-    if (!hass) {
+    const current = hassRef.current;
+    if (!current || !connection) {
       setIsLoading(false);
       return;
     }
-
-    const fetchTranslations = async () => {
-      setIsLoading(true);
-      try {
-        const result = await hass.callWS({
-          type: 'frontend/get_translations',
-          language: navigator.language.split('-')[0] || 'en',
-          category: 'device_automation',
-        });
-
-        const parsed = TranslationResponseSchema.safeParse(result);
-        if (parsed.success) {
-          setWsTranslations(parsed.data.resources);
-        }
-      } catch {
-        // Expected if message type doesn't exist
-      } finally {
-        setIsLoading(false);
-      }
+    const language = navigator.language.split('-')[0] || 'en';
+    let cancelled = false;
+    setIsLoading(true);
+    Promise.all(
+      categoryList
+        .split('|')
+        .map((category) => cachedCategory(connection, language, category, current))
+    )
+      .then((all) => {
+        if (!cancelled) setWsTranslations(Object.assign({}, ...all));
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoading(false);
+      });
+    return () => {
+      cancelled = true;
     };
-
-    fetchTranslations();
-  }, [hass]);
+  }, [connection, categoryList]);
 
   // Merge base translations with WS-fetched translations
   const translations = useMemo(

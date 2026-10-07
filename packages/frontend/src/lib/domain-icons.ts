@@ -26,6 +26,7 @@ import {
   MessageSquare,
   Mic,
   Move,
+  Moon,
   MousePointerClick,
   Power,
   Radio,
@@ -53,6 +54,7 @@ import {
   Zap,
   type LucideIcon,
 } from 'lucide-react';
+import { firstKeyIn } from '@/lib/utils';
 
 /**
  * Entity-domain -> icon, for canvas node cards (TriggerNode/ActionNode) that
@@ -126,6 +128,8 @@ const DOMAIN_ICONS: Record<string, LucideIcon> = {
   air_quality: Wind,
   assist_satellite: Mic,
   calendar: Calendar,
+  sun: Sun,
+  moon: Moon,
   update: RefreshCw,
   ai_task: Sparkles,
   conversation: MessageSquare,
@@ -173,4 +177,14 @@ const DOMAIN_ICONS: Record<string, LucideIcon> = {
 export function getDomainIcon(domain: string | undefined, fallback: LucideIcon): LucideIcon {
   if (!domain) return fallback;
   return DOMAIN_ICONS[domain] ?? fallback;
+}
+
+/**
+ * The most specific icon key of those given, in order: the first one the
+ * icons know. A card passes the entity's device class first, so a door
+ * sensor shows a door and a motion sensor a motion icon rather than the
+ * generic sensor gauge.
+ */
+export function iconKeyFor(...keys: (string | undefined)[]): string | undefined {
+  return firstKeyIn(DOMAIN_ICONS, keys) ?? keys.find(Boolean);
 }

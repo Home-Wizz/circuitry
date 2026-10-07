@@ -1,46 +1,66 @@
 import {
-  Blocks,
+  Blocks as BlocksIcon,
   Clock,
   Hourglass,
-  Home,
   Layers,
-  type LucideIcon,
+  ListTree,
+  Play,
   Power,
   PowerOff,
   ScrollText,
-  Search,
   Tag,
   Zap,
 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
+  actionPickKey,
+  PickerCurrentProvider,
+  recipeChoiceKey,
+} from '@/components/canvas/pickerCurrent';
+import { type ConfigurableNodeType, NodeConfigColumn } from '@/components/canvas/NodeConfigColumn';
+import {
+  PickerColumnRow,
   MILLER_DIALOG_CONTENT_CLASS,
+  usePickerSize,
   MultiTargetPanel,
   NavColumnList,
   NavColumnSections,
   type NavRow,
   type NavSection,
+  PickerHeader,
+  type PickerKind,
+  PickerKindSwitch,
   ResizableColumn,
   ResultsColumn,
-  type TargetPickerRow,
+  renderStackedColumns,
 } from '@/components/canvas/PickerColumns';
+import { groupSections, headed } from '@/components/canvas/pickerRoot';
+import {
+  deviceEntityRows,
+  devicesSections,
+  homeSections,
+  labelRow,
+  type PlaceColumn,
+  type PlaceLabels,
+  placeRows,
+  searchPlaceSections,
+  entityTargetRows,
+  routeScopePick,
+  unassignedRows,
+  usePickerPlaces,
+} from '@/components/canvas/pickerPlaces';
+import { DeviceAutomationColumn } from '@/components/canvas/DeviceAutomationColumn';
 import { TriggerResultRow } from '@/components/panels/node-fields/TriggerResultRow';
 import {
-  allEntityIds,
-  buildDeviceScope,
-  buildUnassignedGroups,
-  type DeviceGroup,
-  type EntityScope,
-  getEntityName,
-  groupByDevice,
   type SelectedScope,
+  scopeTypeEntityIds,
 } from '@/components/panels/node-fields/TriggerTargetPicker';
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Dialog, DialogContent } from '@/components/ui/dialog';
 import { useHass } from '@/contexts/HassContext';
 import { type DeviceAction, useDeviceAutomation } from '@/hooks/useDeviceAutomation';
 import { useIntegrationManifests } from '@/hooks/useIntegrationManifests';
-import { useStableEntityList } from '@/hooks/useStableEntityList';
+import { usePickNeedsSettings } from '@/hooks/usePickGaps';
 import { useTranslations } from '@/hooks/useTranslations';
 import { ACTION_BLOCKS, type ActionBlock, getActionBlockIcon } from '@/lib/actionBlocks';
 import { actionRecipeTakesEntities, buildActionNodeData } from '@/lib/actionNodeData';
@@ -48,98 +68,101 @@ import {
   type ActionRecipe,
   ENTITY_ACTION_CATEGORIES,
   type EntityActionCategory,
-  getEntityActionCategory,
 } from '@/lib/actionRecipes';
 import type { CompoundBlockKey } from '@/lib/block-factories';
 import { buildCompositeValue, getDeviceAutomationLabel } from '@/lib/deviceTriggerLabels';
 import { getDomainColor } from '@/lib/domain-colors';
-import { getDomainIcon } from '@/lib/domain-icons';
+import { entityPickerIcon, getPickerIcon, StepIcon } from '@/components/nodes/StepIcon';
+import { ACTION_NON_DEVICE_BLOCKS } from '@/lib/pickerLayout';
+import { actionRecipeOffers, entitiesForService, serviceHasTarget } from '@/lib/serviceTargets';
 import { prettify } from '@/lib/utils';
 import type { HassEntity } from '@/types/hass';
+import { toneStyle } from '@/lib/node-colors';
 
 /**
- * "+Add > Then" — the ThenActionDialog equivalent of AndConditionDialog.tsx/
- * WhenTriggerDialog.tsx, applying the same Miller-column architecture to
- * Home Assistant actions (service calls). See lib/actionRecipes.ts for the
- * catalog and lib/actionNodeData.ts for the selection -> node-data mapping.
+ * "Then…": the When picker's (WhenTriggerDialog.tsx) counterpart for
+ * actions (service calls, lib/actionRecipes.ts) and the flow's blocks. Its
+ * first column follows lib/pickerLayout.ts: Blocks, Home, Devices, Device
+ * types, Non-device types (Fire manual event, Perform action) and Home
+ * Assistant (Unassigned, Labels, Generic: Device; Integrations). A pick
+ * that still needs something is set up under the column it was picked in;
+ * a ready one is added at once.
  *
- * Two differences from When/And, both explained in lib/actionBlocks.ts's
- * doc comment:
- *
- *  1. **`onCommit` takes a node `type`, not just `data`.** When/And always
- *     create one fixed node type ('trigger'/'condition'); Then's Blocks
- *     section spans several real node types (delay/wait/set_variables/
- *     action-as-stop) depending which block was picked, so the type has to
- *     travel with the data.
- *  2. **A second `onCommitCompound` prop.** Some of the Blocks (If/Else,
- *     Choose, the count/while/until Repeat variants, Parallel) are compound
- *     blocks — a whole (nodes, edges) subgraph via `lib/block-factories.ts`'s
- *     `createCompoundBlock`, not a single node's `data` — so they commit
- *     through a completely different callback than everything else in this
- *     dialog, mirroring how `useAddNodeAtCenter` itself splits
- *     `addNodeAtCenter`/`addCompoundAtCenter`.
- *
- * Unlike AndConditionDialog's `ConditionTargetResultsPanel`, this dialog's
- * `ThenTargetResultsPanel` has **no singleEntityId fallback row** — there's
- * no generic "act on this entity" service the way `state` is a
- * generic "test this entity" condition/trigger; every action needs a real
- * verb, so an entity with no matching lib/actionRecipes.ts category (e.g. a
- * bare sensor/binary_sensor — read-only, nothing to act on) just shows no
- * results, full stop.
+ * Two differences from When and And: `onCommit` takes a node type (a block
+ * can be a delay, a wait, set_variables or a stop), and compound blocks
+ * (If/Else, Choose, the Repeats, Parallel, Sequence) commit through
+ * `onCommitCompound` as a whole subgraph (lib/block-factories.ts). A
+ * device's results merge in its live `device_automation/action/list`
+ * actions; there is no "this entity" fallback row as for conditions, since
+ * every action needs a verb.
  */
+
+type GroupKey = 'unassigned' | 'labels' | 'generic' | 'integrations';
 
 type NavColumn =
   | { kind: 'root' }
+  | { kind: 'search'; query: string }
+  | PlaceColumn
+  | { kind: 'devices' }
+  | { kind: 'deviceTypes' }
+  | { kind: 'nonDevice' }
+  | { kind: 'group'; key: GroupKey; title: string }
+  | { kind: 'genericDevicePick' }
   | { kind: 'blocks' }
-  | { kind: 'areas' }
-  | { kind: 'areaChildren'; areaLabel: string; scope: EntityScope }
-  | { kind: 'deviceChildren'; group: DeviceGroup }
-  | { kind: 'targetResults'; scope: SelectedScope }
+  | { kind: 'waitForOptions' }
+  // "Wait for a script to finish" / "for an automation to turn on/off": the
+  // scripts or automations to wait for. `toState` is the row's (a script
+  // turns off when it finishes).
+  | {
+      kind: 'waitEntityPick';
+      domain: 'script' | 'automation';
+      toState: 'on' | 'off';
+      title: string;
+    }
+  // An integration's actions (Automation, Backup, ...): every service-only
+  // domain the connected HA has, from `manifest/list` and `hass.services`.
+  | { kind: 'integrationServices'; domain: string; label: string }
   | { kind: 'typeResults'; category: EntityActionCategory }
   | { kind: 'recipeEntities'; category: EntityActionCategory; recipe: ActionRecipe }
-  | { kind: 'scopeTargets'; label: string; recipe: ActionRecipe; entityIds: string[] }
-  | { kind: 'labels' }
-  | { kind: 'waitForOptions' }
-  // Terminal column for the "Wait for a script to finish"/"Wait for an
-  // automation to turn on/off" waitForOptions rows — a domain-filtered
-  // entity multi-select (script.*/automation.*), same MultiTargetPanel
-  // mechanism the By-type flow already uses for regular actions. `toState`
-  // is baked in per-row rather than asked here (finish=off for scripts,
-  // on/off for automations are two distinct rows) — see WaitForOptionsColumn.
-  | { kind: 'waitEntityPick'; domain: 'script' | 'automation'; toState: 'on' | 'off'; title: string }
-  | { kind: 'unassignedOptions' }
-  | { kind: 'generic' }
-  // "By type" > "Generic" only ever offers one thing in real HA — "Device"
-  // (home-assistant/frontend's data/action.ts's ACTION_COLLECTIONS: the
-  // generic collection's `groups` is just `{ device_id: {} }`) — a flat,
-  // area-unscoped device list leading to the exact same device_action
-  // results panel the Zones flow already uses.
-  | { kind: 'genericDevicePick' }
-  | { kind: 'integration' }
-  // "By type" > "Integration" lists every service-only domain the connected
-  // HA instance actually has installed (Activity, Automation, Backup, File,
-  // Home Assistant Cloud, ...) — generated live from `manifest/list` +
-  // `hass.services`, see useIntegrationManifests.ts and
-  // integrationDomainRows below, rather than a hand-maintained guess.
-  | { kind: 'integrationServices'; domain: string; label: string };
+  | {
+      kind: 'scopeTargets';
+      label: string;
+      recipe: ActionRecipe;
+      entityIds: string[];
+      /** "Anything in <room>" as the list's first line. */
+      area?: { areaId: string; label: string };
+    }
+  // The pick's settings, when it still needs something (NodeConfigColumn):
+  // an action's target and fields (Automation > Turn on asks which
+  // automations), a delay's duration, a wait's template.
+  | ({ kind: 'configure' } & StepDraft);
 
-function deviceGroupIcon(group: DeviceGroup): LucideIcon {
-  const domain = group.entities[0]?.entity_id.split('.')[0];
-  return getDomainIcon(domain, Layers);
-}
-function deviceGroupColor(group: DeviceGroup) {
-  const domain = group.entities[0]?.entity_id.split('.')[0];
-  return getDomainColor(domain);
-}
+/** A pick's draft, waiting for its settings. */
+type StepDraft = {
+  pickKey: string;
+  title: string;
+  nodeType: ConfigurableNodeType;
+  data: Record<string, unknown>;
+};
 
-const INITIAL_COLUMNS: NavColumn[] = [{ kind: 'root' }, { kind: 'areas' }];
-const INITIAL_SELECTED_KEYS: (string | null)[] = ['zones'];
-// Alternate starting point for callers that already know the user wants
-// "Wait for..." specifically (NodePalette's own Wait node-type button) — see
-// useAddNodeDialogs.tsx's openThenForWait. Skips straight to the 6-option
-// waitForOptions column instead of making the user click Blocks first.
-const WAIT_FOR_INITIAL_COLUMNS: NavColumn[] = [{ kind: 'root' }, { kind: 'waitForOptions' }];
-const WAIT_FOR_INITIAL_SELECTED_KEYS: (string | null)[] = ['blocks'];
+/** The columns that set a pick up: shown under the column it was made in. */
+const isSetup = (column: NavColumn) =>
+  column.kind === 'recipeEntities' ||
+  column.kind === 'scopeTargets' ||
+  column.kind === 'waitEntityPick';
+
+const INITIAL_COLUMNS: NavColumn[] = [{ kind: 'root' }];
+// For callers that already know it's a wait (NodePalette's Wait button, see
+// useAddNodeDialogs.tsx's openThenForWait): straight to Blocks › Wait for….
+const WAIT_FOR_INITIAL_COLUMNS: NavColumn[] = [
+  { kind: 'root' },
+  { kind: 'blocks' },
+  { kind: 'waitForOptions' },
+];
+const WAIT_FOR_INITIAL_SELECTED_KEYS: (string | null)[] = ['blocks', 'wait_for'];
+
+/** Blocks HA lists as types of their own (lib/pickerLayout.ts): not in Blocks. */
+const BLOCKS_COLUMN = ACTION_BLOCKS.filter((b) => !ACTION_NON_DEVICE_BLOCKS.has(b.key));
 
 interface ThenActionDialogProps {
   open: boolean;
@@ -148,21 +171,20 @@ interface ThenActionDialogProps {
   onCommit: (type: string, data: Record<string, unknown>) => void;
   onCommitCompound: (key: CompoundBlockKey) => void;
   /**
-   * "Wait for..." block's "Trigger" option needs a whole separate dialog
-   * (WhenTriggerDialog) to build the actual trigger, not just a bit of data
-   * this dialog can build itself — see useAddNodeDialogs.tsx's
-   * openWhenForWaitTrigger, which owns closing this dialog, opening that
-   * one, and wrapping its result into a wait node's wait_for_trigger.
+   * "Wait for a trigger" needs the When picker to build its trigger: see
+   * useAddNodeDialogs.tsx's openWhenForWaitTrigger, which closes this
+   * picker, opens that one, and wraps its result into a wait node.
    */
   onOpenWhenForWaitTrigger: () => void;
-  /**
-   * When true, opens straight into the waitForOptions column instead of the
-   * usual root+areas default — see useAddNodeDialogs.tsx's openThenForWait,
-   * which sets this for NodePalette's dedicated Wait node-type button (that
-   * button used to drop a blank, unconfigurable wait node directly; this is
-   * the fix).
-   */
+  /** Opens at Blocks › Wait for… (NodePalette's Wait button). */
   startAtWaitFor?: boolean;
+  /** Offered when the picker may become the When or And picker instead. */
+  onSwitchKind?: (kind: PickerKind) => void;
+  /** The step a Replace… started from: the picker opens where it is, its
+   * row marked "Current". */
+  current?: { type: string; data: Record<string, unknown> };
+  /** Text to open the picker's search with (the side panel's "Add a step…"). */
+  initialQuery?: string;
 }
 
 export function ThenActionDialog({
@@ -173,47 +195,45 @@ export function ThenActionDialog({
   onCommitCompound,
   onOpenWhenForWaitTrigger,
   startAtWaitFor = false,
+  onSwitchKind,
+  current,
+  initialQuery,
 }: ThenActionDialogProps) {
   const { t } = useTranslation(['nodes']);
-  const {
-    areas,
-    getAreaIdForEntity,
-    getDeviceIdForEntity,
-    getDeviceNameById,
-    isAutomationRelevantEntity,
-    labels,
-    getLabelIdsForEntity,
-    services,
-  } = useHass();
+  const { getDeviceNameById, services } = useHass();
   const { manifests, fetchManifests } = useIntegrationManifests();
-  // Stabilized via useStableEntityList — see its own doc comment — so this
-  // dialog's area/device/label grouping chain below doesn't recompute on
-  // every live entity-state tick (was causing multi-second freezes while
-  // browsing, confirmed from a user screen recording).
-  const stableAllEntities = useStableEntityList(allEntities);
-  const entities = useMemo(
-    () => stableAllEntities.filter((e) => isAutomationRelevantEntity(e.entity_id)),
-    [stableAllEntities, isAutomationRelevantEntity]
-  );
+  const places = usePickerPlaces(allEntities);
+  const { entities } = places;
 
   const initialColumns = startAtWaitFor ? WAIT_FOR_INITIAL_COLUMNS : INITIAL_COLUMNS;
-  const initialSelectedKeys = startAtWaitFor ? WAIT_FOR_INITIAL_SELECTED_KEYS : INITIAL_SELECTED_KEYS;
+  const initialSelectedKeys = startAtWaitFor ? WAIT_FOR_INITIAL_SELECTED_KEYS : [];
 
   const [columns, setColumns] = useState<NavColumn[]>(initialColumns);
   const [selectedKeys, setSelectedKeys] = useState<(string | null)[]>(initialSelectedKeys);
   const [search, setSearch] = useState('');
-  const [searchSelectedEntityId, setSearchSelectedEntityId] = useState<string | null>(null);
 
+  // The step being replaced, by the key its row is marked with.
+  const currentKey = current ? actionPickKey(current.type, current.data) : undefined;
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: only on opening; the path is read from that render's catalog.
   useEffect(() => {
     if (open) {
-      setColumns(startAtWaitFor ? WAIT_FOR_INITIAL_COLUMNS : INITIAL_COLUMNS);
-      setSelectedKeys(startAtWaitFor ? WAIT_FOR_INITIAL_SELECTED_KEYS : INITIAL_SELECTED_KEYS);
+      const path = currentKey
+        ? pathToStep(currentKey)
+        : startAtWaitFor
+          ? { columns: WAIT_FOR_INITIAL_COLUMNS, selected: WAIT_FOR_INITIAL_SELECTED_KEYS }
+          : null;
+      setColumns(path?.columns ?? INITIAL_COLUMNS);
+      setSelectedKeys(path?.selected ?? []);
       setSearch('');
-      setSearchSelectedEntityId(null);
-      // Mirrors real HA's own add-automation-element-dialog.ts's showDialog(),
-      // which kicks off its manifest/list fetch as soon as the dialog opens
-      // rather than waiting for the user to drill into "Integration" —
-      // useIntegrationManifests.ts no-ops once already loaded.
+      const query = initialQuery?.trim();
+      if (query) {
+        setSearch(initialQuery ?? '');
+        setColumns([{ kind: 'search', query }]);
+        setSelectedKeys([]);
+      }
+      // As HA's own dialog does: the manifests are fetched when it opens,
+      // not when Integrations is opened (a no-op once loaded).
       fetchManifests();
     }
   }, [open, startAtWaitFor, fetchManifests]);
@@ -222,491 +242,479 @@ export function ThenActionDialog({
     setColumns((prev) => [...prev.slice(0, atIndex + 1), column]);
     setSelectedKeys((prev) => [...prev.slice(0, atIndex), key]);
   };
-
-  const openAreaResults = (atIndex: number, areaId: string, label: string, scope: EntityScope) =>
-    pushColumn(
-      atIndex,
-      {
-        kind: 'targetResults',
-        scope: {
-          key: `area::${areaId}`,
-          label,
-          deviceIds: scope.deviceGroups.map((g) => g.deviceId),
-          entityIds: allEntityIds(scope),
-        },
-      },
-      areaId
-    );
-
-  const openLabelResults = (atIndex: number, labelId: string, label: string, scope: EntityScope) =>
-    pushColumn(
-      atIndex,
-      {
-        kind: 'targetResults',
-        scope: {
-          key: `label::${labelId}`,
-          label,
-          deviceIds: scope.deviceGroups.map((g) => g.deviceId),
-          entityIds: allEntityIds(scope),
-        },
-      },
-      labelId
-    );
-
-  const openDeviceResults = (atIndex: number, group: DeviceGroup) =>
-    pushColumn(atIndex, { kind: 'targetResults', scope: buildDeviceScope(group.deviceId, group) }, group.deviceId);
-
-  const openEntityResults = (atIndex: number, entity: HassEntity, deviceId: string | null) =>
-    pushColumn(
-      atIndex,
-      {
-        kind: 'targetResults',
-        scope: {
-          key: `entity::${entity.entity_id}`,
-          label: getEntityName(entity),
-          deviceIds: deviceId ? [deviceId] : [],
-          entityIds: [entity.entity_id],
-          singleEntityId: entity.entity_id,
-        },
-      },
-      entity.entity_id
-    );
+  const changeSearch = (value: string) => {
+    setSearch(value);
+    const query = value.trim();
+    setColumns(query ? [{ kind: 'search', query }] : INITIAL_COLUMNS);
+    setSelectedKeys([]);
+  };
 
   const closeDialog = () => onOpenChange(false);
 
-  const handleSelectBlock = (block: ActionBlock, atIndex: number) => {
+  // A single-step pick that's ready (lib/pickGaps.ts) is added at once, its
+  // optional settings at HA's defaults; one that still needs something (an
+  // action's target or required fields, an event name, a wait's template)
+  // is set up first, with the property panel's own editors. Compound blocks
+  // (if/else, choose, loops, parallel, sequence) add their whole structure.
+  const commitDraft = (nodeType: ConfigurableNodeType, data: Record<string, unknown>) => {
+    onCommit(nodeType, data);
+    closeDialog();
+  };
+  const pickNeedsSettings = usePickNeedsSettings();
+  const pickerSize = usePickerSize();
+  const configure = (atIndex: number, draft: StepDraft) =>
+    pickNeedsSettings(draft.nodeType, draft.data)
+      ? pushColumn(atIndex, { kind: 'configure', ...draft }, draft.pickKey)
+      : commitDraft(draft.nodeType, draft.data);
+
+  const selectBlock = (block: ActionBlock, atIndex: number) => {
     if (block.commit.kind === 'drill') {
       pushColumn(atIndex, { kind: 'waitForOptions' }, block.key);
       return;
     }
     if (block.commit.kind === 'compound') {
       onCommitCompound(block.commit.compoundKey);
-    } else {
-      onCommit(block.commit.type, block.commit.data);
+      closeDialog();
+      return;
     }
-    closeDialog();
+    configure(atIndex, {
+      pickKey: `block:${block.key}`,
+      title: t(`nodes:blocks.${block.key}.label`),
+      nodeType: block.commit.type,
+      data: block.commit.data,
+    });
   };
-  const handleSelectRecipe = (entityIds: string[], recipe: ActionRecipe) => {
-    onCommit('action', buildActionNodeData({ kind: 'recipe', entityIds, recipe }));
-    closeDialog();
-  };
-  // Device-specific action (ZHA/deCONZ remote "press" commands, "identify",
-  // IR-blaster commands, ...) fetched live from device_automation/action/list
-  // — see useDeviceAutomation.ts's DeviceAction doc comment for why this is
-  // needed alongside the domain-recipe rows above.
-  const handleSelectDeviceAction = (action: DeviceAction) => {
-    onCommit('action', buildActionNodeData({ kind: 'deviceAction', action }));
-    closeDialog();
-  };
-  // "Wait for a script to finish"/"Wait for an automation to turn on/off" —
-  // builds a plain state trigger scoped to the picked script/automation
-  // entities and wraps it into a wait node, same wait_for_trigger shape
-  // onOpenWhenForWaitTrigger's generic Trigger option produces, just without
-  // needing the full When dialog since there's only one real choice to make
-  // (which entity, and the to: state is already implied by which row was
-  // picked).
-  const handleSelectWaitEntities = (entityIds: string[], toState: 'on' | 'off') => {
-    onCommit('wait', {
+  const recipeDraft = (entityIds: string[], recipe: ActionRecipe, areaId?: string): StepDraft => ({
+    pickKey: areaId
+      ? `recipe:${recipe.id}:area:${areaId}`
+      : `recipe:${recipe.id}:${entityIds.join(',')}`,
+    title: recipe.label,
+    nodeType: 'action',
+    data: buildActionNodeData({ kind: 'recipe', entityIds, recipe, areaId }),
+  });
+  /** An action picked from a list of types: its entities first, when it acts on some. */
+  const selectTypeRecipe = (
+    atIndex: number,
+    category: EntityActionCategory,
+    recipe: ActionRecipe
+  ) =>
+    actionRecipeTakesEntities(recipe)
+      ? pushColumn(
+          atIndex,
+          { kind: 'recipeEntities', category, recipe },
+          recipeChoiceKey(recipe.id, [])
+        )
+      : configure(atIndex, recipeDraft([], recipe));
+  // A device's own action (ZHA/deCONZ remote "press" commands, "identify",
+  // IR-blaster commands, ...), fetched live from device_automation/action/list.
+  const deviceActionDraft = (action: DeviceAction): StepDraft => ({
+    pickKey: `device:${action.device_id}:${buildCompositeValue(action)}`,
+    title: getDeviceNameById(action.device_id) || prettify(action.type),
+    nodeType: 'action',
+    data: buildActionNodeData({ kind: 'deviceAction', action }),
+  });
+  // "Wait for a script to finish" / "for an automation to turn on/off": a
+  // state trigger on the picked entities, in a wait node.
+  const waitEntitiesDraft = (
+    title: string,
+    entityIds: string[],
+    toState: 'on' | 'off'
+  ): StepDraft => ({
+    pickKey: `wait:${toState}:${entityIds.join(',')}`,
+    title,
+    nodeType: 'wait',
+    data: {
       wait_for_trigger: [{ trigger: 'state', entity_id: entityIds, to: toState }],
       timeout: '00:01:00',
-    });
-    closeDialog();
+    },
+  });
+  // An integration's action (Automation > Turn on): set up with the target
+  // and fields HA describes for the service.
+  const integrationServiceDraft = (domain: string, service: string, label: string): StepDraft => ({
+    pickKey: `service:${domain}.${service}`,
+    title: label,
+    nodeType: 'action',
+    data: { service: `${domain}.${service}`, target: {}, data: {} },
+  });
+  // "Perform action": any action, picked by name in its settings.
+  const performActionDraft = (): StepDraft => ({
+    pickKey: 'perform',
+    title: t('nodes:picker.rows.performAction'),
+    nodeType: 'action',
+    data: { service: '', target: {}, data: {} },
+  });
+
+  const placeLabels: PlaceLabels = {
+    home: t('nodes:picker.sections.home'),
+    otherAreas: t('nodes:picker.groups.otherAreas'),
+    unassignedOption: (key) => t(`nodes:picker.unassignedOptions.${key}`),
   };
-  // A bare service call from the dynamically-generated "Integration" list
-  // (e.g. Automation > "Trigger automation") — no recipe/entity-domain
-  // catalog entry exists for these since they're generated live from
-  // whatever integrations the connected instance has, so this commits the
-  // service directly with empty target/data and leaves ActionFields.tsx's
-  // existing live getServiceDefinition()-driven form (same one every other
-  // action node already uses) to render the right fields once placed.
-  const handleSelectIntegrationService = (domain: string, service: string) => {
-    onCommit('action', { service: `${domain}.${service}`, target: {}, data: {} });
-    closeDialog();
-  };
 
-  const areaGroups = useMemo(() => {
-    return areas
-      .map((area) => {
-        const areaEntities = entities.filter((e) => getAreaIdForEntity(e.entity_id) === area.area_id);
-        const scope = groupByDevice(areaEntities, getDeviceIdForEntity, getDeviceNameById);
-        return { area, ...scope };
-      })
-      .filter((g) => g.deviceGroups.length > 0 || g.standaloneEntities.length > 0);
-  }, [areas, entities, getAreaIdForEntity, getDeviceIdForEntity, getDeviceNameById]);
-
-  const labelGroups = useMemo(() => {
-    return labels
-      .map((label) => {
-        const labelEntities = entities.filter((e) => getLabelIdsForEntity(e.entity_id).includes(label.label_id));
-        const scope = groupByDevice(labelEntities, getDeviceIdForEntity, getDeviceNameById);
-        return { label, ...scope };
-      })
-      .filter((g) => g.deviceGroups.length > 0 || g.standaloneEntities.length > 0);
-  }, [labels, entities, getLabelIdsForEntity, getDeviceIdForEntity, getDeviceNameById]);
-
-  const allDeviceGroups = useMemo(
-    () => groupByDevice(entities, getDeviceIdForEntity, getDeviceNameById).deviceGroups,
-    [entities, getDeviceIdForEntity, getDeviceNameById]
-  );
-
-  const groupedDeviceIds = useMemo(() => {
-    const ids = new Set<string>();
-    for (const { deviceGroups } of areaGroups) {
-      for (const group of deviceGroups) ids.add(group.deviceId);
-    }
-    return ids;
-  }, [areaGroups]);
-
-  const { devicesInAreas, ungroupedDevices } = useMemo(() => {
-    const devicesInAreas: DeviceGroup[] = [];
-    const ungroupedDevices: DeviceGroup[] = [];
-    for (const group of allDeviceGroups) {
-      (groupedDeviceIds.has(group.deviceId) ? devicesInAreas : ungroupedDevices).push(group);
-    }
-    return { devicesInAreas, ungroupedDevices };
-  }, [allDeviceGroups, groupedDeviceIds]);
-
-  const unassignedStandaloneEntities = useMemo(
-    () =>
-      groupByDevice(entities, getDeviceIdForEntity, getDeviceNameById).standaloneEntities.filter(
-        (e) => !getAreaIdForEntity(e.entity_id)
-      ),
-    [entities, getDeviceIdForEntity, getDeviceNameById, getAreaIdForEntity]
-  );
-
-  // Split into Entities/Helpers/Devices/Services subcategories — see
-  // buildUnassignedGroups' doc comment and WhenTriggerDialog.tsx's identical
-  // usage for what each of the four covers.
-  const unassignedGroups = useMemo(
-    () => buildUnassignedGroups(entities, ungroupedDevices, unassignedStandaloneEntities),
-    [entities, ungroupedDevices, unassignedStandaloneEntities]
-  );
-
-  // Domains already covered by their own "By type" entry (lib/actionRecipes.ts)
-  // are never duplicated into the dynamic Integration list below.
+  // The integrations with actions that aren't an entity domain the catalog
+  // covers or a helper (those are under Device types and Unassigned, as HA
+  // classifies them). One with no manifest yet is included, as HA does.
   const coveredActionDomains = useMemo(
-    () => new Set(ENTITY_ACTION_CATEGORIES.map((category) => category.domain)),
+    () => new Set(ENTITY_ACTION_CATEGORIES.map((c) => c.domain)),
     []
   );
-
-  // Live-generated "Integration" domain list — see useIntegrationManifests.ts's
-  // doc comment for why this mirrors real HA's own manifest-driven
-  // classification instead of a hardcoded catalog. A domain qualifies once
-  // it (a) actually has services (`services` — HA wouldn't list it in "Add
-  // action" otherwise either), (b) isn't already one of our own curated
-  // domain categories, and (c) isn't an entity-domain or helper-type
-  // integration (those belong in the regular "By type" list / Unassigned >
-  // Helpers, matching real HA's `_classifyDomain`). A domain with no
-  // manifest entry at all (custom/HACS integrations before HA has indexed
-  // them) is still included — real HA's own algorithm falls through to
-  // "integration" for anything that isn't explicitly helper/entity/system,
-  // and an unclassified domain is closer to that than to a core entity
-  // domain.
-  const integrationDomains = useMemo(() => {
-    return Object.keys(services)
-      .filter((domain) => {
-        if (coveredActionDomains.has(domain)) return false;
-        const integrationType = manifests?.[domain]?.integration_type;
-        return integrationType !== 'entity' && integrationType !== 'helper';
-      })
-      .sort((a, b) => a.localeCompare(b));
-  }, [services, manifests, coveredActionDomains]);
-
-  const multiTargetLabels = useMemo(
-    () => ({
-      addAllLabel: t('nodes:actions.picker.then.addAllTargets'),
-      clearAllLabel: t('nodes:actions.picker.then.clearAllTargets'),
-      noResultsLabel: t('nodes:actions.picker.noResults'),
-      selectPromptLabel: t('nodes:actions.picker.then.selectTargetsPrompt'),
-      commitLabel: (count: number) => t('nodes:actions.picker.then.addActionButton', { count }),
-    }),
-    [t]
+  const integrationDomains = useMemo(
+    () =>
+      Object.keys(services)
+        .filter((domain) => {
+          if (coveredActionDomains.has(domain)) return false;
+          const integrationType = manifests?.[domain]?.integration_type;
+          return integrationType !== 'entity' && integrationType !== 'helper';
+        })
+        .sort((a, b) => a.localeCompare(b)),
+    [services, manifests, coveredActionDomains]
   );
+  const integrationLabel = (domain: string) => manifests?.[domain]?.name || prettify(domain);
 
-  // Same panel, different commit wording — "Add wait" reads correctly for
-  // the script/automation entity pick, where "Add action" (multiTargetLabels
-  // above) would be misleading: this always produces a wait node, never an
-  // action node.
-  const waitTargetLabels = useMemo(
-    () => ({
-      addAllLabel: t('nodes:actions.picker.then.addAllTargets'),
-      clearAllLabel: t('nodes:actions.picker.then.clearAllTargets'),
-      noResultsLabel: t('nodes:actions.picker.noResults'),
-      selectPromptLabel: t('nodes:actions.picker.then.selectTargetsPrompt'),
-      commitLabel: (count: number) => t('nodes:actions.waitFor.addWaitButton', { count }),
-    }),
-    [t]
-  );
+  const multiTargetLabels = {
+    addAllLabel: t('nodes:actions.picker.then.addAllTargets'),
+    clearAllLabel: t('nodes:actions.picker.then.clearAllTargets'),
+    noResultsLabel: t('nodes:actions.picker.noResults'),
+    selectPromptLabel: t('nodes:actions.picker.then.selectTargetsPrompt'),
+    commitLabel: (count: number) => t('nodes:actions.picker.then.addActionButton', { count }),
+  };
+  // "Add wait": the script/automation pick always makes a wait node.
+  const waitTargetLabels = {
+    ...multiTargetLabels,
+    commitLabel: (count: number) => t('nodes:actions.waitFor.addWaitButton', { count }),
+  };
 
-  const normalizedSearch = search.trim().toLowerCase();
-  const searchResults = useMemo(() => {
-    if (!normalizedSearch) return null;
-    return entities
-      .filter(
-        (e) =>
-          getEntityName(e).toLowerCase().includes(normalizedSearch) ||
-          e.entity_id.toLowerCase().includes(normalizedSearch)
-      )
-      .slice(0, 100)
-      .sort((a, b) => getEntityName(a).localeCompare(getEntityName(b)));
-  }, [entities, normalizedSearch]);
+  const configureCommitLabel = (nodeType: ConfigurableNodeType) =>
+    t(
+      nodeType === 'condition' ? 'nodes:pickerConfig.addCondition' : 'nodes:pickerConfig.addAction'
+    );
 
-  // ---- Row builders -------------------------------------------------------
+  // ---- Rows -----------------------------------------------------------
 
-  const rootSections = useMemo((): NavSection[] => {
-    const blocksRow: NavRow = {
-      key: 'blocks',
-      label: t('nodes:actions.picker.then.blocksRootLabel'),
-      icon: Blocks,
-      color: getDomainColor('blocks'),
-      onDrill: () => pushColumn(0, { kind: 'blocks' }, 'blocks'),
+  const blockRow = (block: ActionBlock, atIndex: number): NavRow => ({
+    key: `block:${block.key}`,
+    label: t(`nodes:blocks.${block.key}.label`),
+    pickKey: `block:${block.key}`,
+    icon: getActionBlockIcon(block),
+    color: getDomainColor('blocks'),
+    onSelect: () => selectBlock(block, atIndex),
+  });
+  const integrationRow = (domain: string, atIndex: number): NavRow => ({
+    key: `int:${domain}`,
+    label: integrationLabel(domain),
+    icon: getPickerIcon(domain, Layers),
+    color: getDomainColor(domain),
+    onDrill: () =>
+      pushColumn(
+        atIndex,
+        { kind: 'integrationServices', domain, label: integrationLabel(domain) },
+        `int:${domain}`
+      ),
+  });
+
+  /** The columns that show a step's row: Building blocks (Wait for…'s
+   * choices for a wait or a delay), Non-device types, its domain under
+   * Device types, or its integration's actions. */
+  function pathToStep(key: string): { columns: NavColumn[]; selected: (string | null)[] } | null {
+    const root = { kind: 'root' } as const;
+    if (key.startsWith('wait:'))
+      return { columns: WAIT_FOR_INITIAL_COLUMNS, selected: WAIT_FOR_INITIAL_SELECTED_KEYS };
+    if (key === 'block:fire_event')
+      return { columns: [root, { kind: 'nonDevice' }], selected: ['nonDevice'] };
+    if (key.startsWith('block:'))
+      return { columns: [root, { kind: 'blocks' }], selected: ['blocks'] };
+    if (!key.startsWith('service:')) return null;
+    const domain = key.slice('service:'.length).split('.')[0] ?? '';
+    const category = ENTITY_ACTION_CATEGORIES.find((c) => c.domain === domain);
+    if (category)
+      return {
+        columns: [root, { kind: 'deviceTypes' }, { kind: 'typeResults', category }],
+        selected: ['deviceTypes', category.groupKey],
+      };
+    return {
+      columns: [root, { kind: 'integrationServices', domain, label: integrationLabel(domain) }],
+      selected: [`int:${domain}`],
     };
+  }
 
-    const zonesRow: NavRow = {
-      key: 'zones',
-      label: t('nodes:actions.picker.then.zonesRootLabel'),
-      onDrill: () => pushColumn(0, { kind: 'areas' }, 'zones'),
-    };
+  /** Device types: every entity domain with actions, as HA lists them all. */
+  const deviceTypeRows = (atIndex: number): NavRow[] =>
+    ENTITY_ACTION_CATEGORIES.map((category) => ({
+      key: category.groupKey,
+      label: category.label,
+      icon: getPickerIcon(category.domain, Layers),
+      color: getDomainColor(category.domain),
+      onSelect: () => pushColumn(atIndex, { kind: 'typeResults', category }, category.groupKey),
+    })).sort((a, b) => a.label.localeCompare(b.label));
 
-    // "Generic"/"Integration" — mirrors real HA's own `ACTION_COLLECTIONS`
-    // generic/integration split (home-assistant/frontend's data/action.ts) —
-    // see the NavColumn type's doc comment and integrationDomains above for
-    // what each one actually contains. Listed as two more browsable entries
-    // inside "By type" itself (not as separate root sections) — per direct
-    // comparison against native HA's own "Add action" > "By type" tab, which
-    // lists Generic and Integration alongside Light/Switch/Cover/... in that
-    // same flat list.
-    const genericRow: NavRow = {
-      key: 'generic',
-      label: t('nodes:actions.picker.then.genericRootLabel'),
-      icon: getDomainIcon('generic', Layers),
-      color: getDomainColor('generic'),
-      onDrill: () => pushColumn(0, { kind: 'generic' }, 'generic'),
-    };
-    const integrationRow: NavRow = {
-      key: 'integration',
-      label: t('nodes:actions.picker.then.integrationRootLabel'),
-      icon: getDomainIcon('integration', Layers),
+  const nonDeviceRows = (atIndex: number): NavRow[] => [
+    ...ACTION_BLOCKS.filter((b) => ACTION_NON_DEVICE_BLOCKS.has(b.key)).map((b) =>
+      blockRow(b, atIndex)
+    ),
+    {
+      key: 'perform',
+      label: t('nodes:picker.rows.performAction'),
+      icon: getPickerIcon('action', Zap),
       color: getDomainColor('integration'),
-      onDrill: () => pushColumn(0, { kind: 'integration' }, 'integration'),
-    };
+      onSelect: () => configure(atIndex, performActionDraft()),
+    },
+  ];
 
-    const deviceTypeRows: NavRow[] = [
-      ...ENTITY_ACTION_CATEGORIES.map((category) => ({
-        key: category.groupKey,
-        label: category.label,
-        icon: getDomainIcon(category.domain, Layers),
-        color: getDomainColor(category.domain),
-        onSelect: () => pushColumn(0, { kind: 'typeResults', category }, category.groupKey),
-      })),
-      genericRow,
-      integrationRow,
-    ].sort((a, b) => a.label.localeCompare(b.label));
-
-    const unassignedRow: NavRow = {
-      key: 'unassigned',
-      label: t('nodes:actions.picker.unassigned'),
-      onDrill: () => pushColumn(0, { kind: 'unassignedOptions' }, 'unassigned'),
-    };
-
-    const labelsRow: NavRow = {
-      key: 'labels',
-      label: t('nodes:actions.picker.then.labelsRootLabel'),
-      icon: Tag,
-      color: getDomainColor('labels'),
-      onDrill: () => pushColumn(0, { kind: 'labels' }, 'labels'),
-    };
-
-    const sections: NavSection[] = [
-      { title: t('nodes:actions.picker.then.sections.blocks'), rows: [blocksRow] },
-      { title: t('nodes:actions.picker.then.sections.zones'), rows: [zonesRow] },
-      { title: t('nodes:actions.picker.then.sections.deviceTypes'), rows: deviceTypeRows },
-      { title: t('nodes:actions.picker.unassigned'), rows: [unassignedRow] },
-    ];
-    if (labelGroups.length > 0) {
-      sections.push({ title: t('nodes:actions.picker.then.sections.labels'), rows: [labelsRow] });
+  const groupHead = (key: GroupKey) =>
+    ({
+      unassigned: {
+        key,
+        label: t('nodes:picker.rows.unassigned'),
+        icon: getPickerIcon('unassigned', ListTree),
+      },
+      labels: {
+        key,
+        label: t('nodes:picker.groups.labels'),
+        icon: getPickerIcon('tag', Tag),
+        color: getDomainColor('labels'),
+      },
+      generic: {
+        key,
+        label: t('nodes:picker.groups.generic'),
+        icon: getPickerIcon('generic', BlocksIcon),
+      },
+      integrations: {
+        key,
+        label: t('nodes:picker.groups.integrations'),
+        icon: getPickerIcon('integration', Layers),
+      },
+    })[key];
+  const groupRows = (key: GroupKey, atIndex: number): NavRow[] => {
+    switch (key) {
+      case 'unassigned':
+        return unassignedRows(places, atIndex, pushColumn, placeLabels);
+      case 'labels':
+        return places.labelGroups.map((g) => labelRow(g, atIndex, pushColumn));
+      case 'generic':
+        return [
+          {
+            key: 'g:device',
+            label: t('nodes:picker.groups.device'),
+            icon: getPickerIcon('devices', Layers),
+            color: getDomainColor('devices'),
+            onDrill: () => pushColumn(atIndex, { kind: 'genericDevicePick' }, 'g:device'),
+          },
+        ];
+      case 'integrations':
+        return integrationDomains.map((d) => integrationRow(d, atIndex));
     }
-    return sections;
-  }, [t, labelGroups.length]);
+  };
+  const groupSectionsAt = (key: GroupKey) =>
+    groupSections(groupHead(key), groupRows(key, 0), () =>
+      pushColumn(0, { kind: 'group', key, title: groupHead(key).label }, key)
+    );
 
-  // The four rows shown when drilling into "Unassigned" — see
-  // WhenTriggerDialog.tsx's identical helper.
-  const unassignedOptionRows = useMemo((): NavRow[] => {
-    const makeRow = (key: 'entities' | 'helpers' | 'devices' | 'services', scope: EntityScope): NavRow => ({
-      key,
-      label: t(`nodes:actions.picker.unassignedOptions.${key}`),
-      icon: getDomainIcon(key, Layers),
-      color: getDomainColor(key),
-      onDrill: () =>
-        pushColumn(
-          1,
-          { kind: 'areaChildren', areaLabel: t(`nodes:actions.picker.unassignedOptions.${key}`), scope },
-          key
-        ),
-    });
+  const rootSections = (): NavSection[] => [
+    {
+      rows: [
+        {
+          key: 'blocks',
+          label: t('nodes:picker.rows.blocks'),
+          icon: getPickerIcon('blocks', BlocksIcon),
+          color: getDomainColor('blocks'),
+          onDrill: () => pushColumn(0, { kind: 'blocks' }, 'blocks'),
+        },
+      ],
+    },
+    ...homeSections(places, 0, pushColumn, placeLabels),
+    {
+      separate: true,
+      rows: [
+        {
+          key: 'devices',
+          label: t('nodes:picker.rows.devices'),
+          icon: getPickerIcon('devices', Layers),
+          color: getDomainColor('devices'),
+          onDrill: () => pushColumn(0, { kind: 'devices' }, 'devices'),
+        },
+        {
+          key: 'deviceTypes',
+          label: t('nodes:picker.rows.deviceTypes'),
+          icon: getPickerIcon('device_types', Layers),
+          onDrill: () => pushColumn(0, { kind: 'deviceTypes' }, 'deviceTypes'),
+        },
+        {
+          key: 'nonDevice',
+          label: t('nodes:picker.rows.nonDeviceTypes'),
+          icon: Zap,
+          onDrill: () => pushColumn(0, { kind: 'nonDevice' }, 'nonDevice'),
+        },
+      ],
+    },
+    ...headed(t('nodes:picker.sections.homeAssistant'), [
+      ...groupSectionsAt('unassigned'),
+      ...groupSectionsAt('labels'),
+      ...groupSectionsAt('generic'),
+      ...groupSectionsAt('integrations'),
+    ]),
+  ];
+
+  /** Search: the action types whose names match, then the places. */
+  const searchSections = (query: string): NavSection[] => {
+    const q = query.toLowerCase();
+    const matches = (...texts: (string | undefined)[]) =>
+      texts.some((s) => s?.toLowerCase().includes(q));
+    const typeRows: NavRow[] = [
+      ...ACTION_BLOCKS.filter((b) =>
+        matches(t(`nodes:blocks.${b.key}.label`), t(`nodes:blocks.${b.key}.description`))
+      ).map((b) => blockRow(b, 0)),
+      ...nonDeviceRows(0).filter((r) => r.key === 'perform' && matches(r.label)),
+      ...ENTITY_ACTION_CATEGORIES.flatMap((category) =>
+        category.recipes
+          .filter((recipe) => matches(recipe.label, recipe.description, category.label))
+          .map((recipe) => ({
+            key: `recipe:${recipe.id}`,
+            label: recipe.label,
+            icon: getPickerIcon(category.domain, Layers),
+            color: getDomainColor(category.domain),
+            onSelect: () => selectTypeRecipe(0, category, recipe),
+          }))
+      ),
+      ...integrationDomains.flatMap((domain) =>
+        Object.entries(services[domain] ?? {})
+          .filter(([service, definition]) =>
+            matches(definition?.name, service, integrationLabel(domain))
+          )
+          .map(([service, definition]) => {
+            const label = definition?.name || prettify(service);
+            return {
+              key: `service:${domain}.${service}`,
+              label: `${integrationLabel(domain)}: ${label}`,
+              icon: getPickerIcon(domain, Layers),
+              color: getDomainColor(domain),
+              onSelect: () => configure(0, integrationServiceDraft(domain, service, label)),
+            };
+          })
+      ),
+    ].slice(0, 60);
     return [
-      makeRow('entities', unassignedGroups.entities),
-      makeRow('helpers', unassignedGroups.helpers),
-      makeRow('devices', unassignedGroups.devices),
-      makeRow('services', unassignedGroups.services),
+      { subtitle: t('nodes:picker.search.types'), rows: typeRows },
+      ...searchPlaceSections(places, query, 0, pushColumn, {
+        areas: t('nodes:picker.search.areas'),
+        devices: t('nodes:picker.search.devices'),
+        entities: t('nodes:picker.search.entities'),
+      }),
     ];
-  }, [t, unassignedGroups]);
+  };
 
-  const areaRows = useMemo((): NavRow[] => {
-    return areaGroups.map(({ area, deviceGroups, standaloneEntities }) => ({
-      key: area.area_id,
-      label: area.name,
-      icon: Home,
-      color: getDomainColor('zones'),
-      onSelect: () => openAreaResults(1, area.area_id, area.name, { deviceGroups, standaloneEntities }),
-      onDrill: () =>
-        pushColumn(
-          1,
-          { kind: 'areaChildren', areaLabel: area.name, scope: { deviceGroups, standaloneEntities } },
-          area.area_id
-        ),
-    }));
-  }, [areaGroups]);
-
-  const labelRows = useMemo((): NavRow[] => {
-    return labelGroups.map(({ label, deviceGroups, standaloneEntities }) => ({
-      key: label.label_id,
-      label: label.name,
-      icon: Tag,
-      color: getDomainColor('labels'),
-      onSelect: () => openLabelResults(1, label.label_id, label.name, { deviceGroups, standaloneEntities }),
-      onDrill: () =>
-        pushColumn(
-          1,
-          { kind: 'areaChildren', areaLabel: label.name, scope: { deviceGroups, standaloneEntities } },
-          label.label_id
-        ),
-    }));
-  }, [labelGroups]);
-
-  const toDeviceRows = (groups: DeviceGroup[]): NavRow[] =>
-    groups.map((group) => ({
-      key: group.deviceId,
-      label: group.name,
-      icon: deviceGroupIcon(group),
-      color: deviceGroupColor(group),
-      onSelect: () => openDeviceResults(1, group),
-      onDrill: () => openDeviceResults(1, group),
-    }));
-
-  const deviceRows = useMemo(() => toDeviceRows(devicesInAreas), [devicesInAreas]);
-  const zonesColumnSections = useMemo(
-    (): NavSection[] => [
-      { title: t('nodes:actions.picker.then.sections.zones'), rows: areaRows },
-      { title: t('nodes:actions.picker.then.sections.devices'), rows: deviceRows },
-    ],
-    [t, areaRows, deviceRows]
-  );
-
-  // ---- Column renderer ------------------------------------------------
+  // ---- Columns ----------------------------------------------------------
 
   function renderColumn(column: NavColumn, index: number) {
     switch (column.kind) {
       case 'root':
-        return <NavColumnSections key={index} sections={rootSections} selectedKey={selectedKeys[index]} />;
+        return (
+          <NavColumnSections
+            key={index}
+            sections={rootSections()}
+            selectedKey={selectedKeys[index]}
+          />
+        );
+
+      case 'search':
+        return (
+          <NavColumnSections
+            key={index}
+            sections={searchSections(column.query)}
+            selectedKey={selectedKeys[index]}
+          />
+        );
 
       case 'blocks':
         return (
-          <BlocksColumn key={index} blocks={ACTION_BLOCKS} onSelectBlock={(block) => handleSelectBlock(block, index)} />
+          <BlocksColumn
+            key={index}
+            blocks={BLOCKS_COLUMN}
+            onSelectBlock={(block) => selectBlock(block, index)}
+          />
         );
 
-      case 'generic': {
-        // Real HA's own "Generic" collection is just this one row — see the
-        // NavColumn type's doc comment.
-        const deviceRow: NavRow = {
-          key: 'device',
-          label: t('nodes:actions.picker.then.genericDeviceLabel'),
-          icon: getDomainIcon('devices', Layers),
-          color: getDomainColor('devices'),
-          onDrill: () => pushColumn(index, { kind: 'genericDevicePick' }, 'device'),
-        };
+      case 'devices':
         return (
-          <NavColumnList
+          <NavColumnSections
             key={index}
-            title={t('nodes:actions.picker.then.genericRootLabel')}
-            rows={[deviceRow]}
+            title={t('nodes:picker.rows.devices')}
+            sections={devicesSections(places, index, pushColumn)}
             selectedKey={selectedKeys[index]}
           />
         );
-      }
 
-      case 'genericDevicePick': {
-        const rows: NavRow[] = allDeviceGroups.map((group) => ({
-          key: group.deviceId,
-          label: group.name,
-          icon: deviceGroupIcon(group),
-          color: deviceGroupColor(group),
-          onSelect: () => openDeviceResults(index, group),
-        }));
+      case 'deviceTypes':
         return (
           <NavColumnList
             key={index}
-            title={t('nodes:actions.picker.then.genericDeviceLabel')}
-            rows={rows}
+            title={t('nodes:picker.rows.deviceTypes')}
+            rows={deviceTypeRows(index)}
             selectedKey={selectedKeys[index]}
-            emptyLabel={t('nodes:actions.picker.noResults')}
           />
         );
-      }
 
-      case 'integration': {
-        const rows: NavRow[] = integrationDomains.map((domain) => {
-          const manifest = manifests?.[domain];
-          const label = manifest?.name || prettify(domain);
-          return {
-            key: domain,
-            label,
-            icon: getDomainIcon(domain, Layers),
-            color: getDomainColor(domain),
-            onDrill: () => pushColumn(index, { kind: 'integrationServices', domain, label }, domain),
-          };
-        });
+      case 'nonDevice':
         return (
           <NavColumnList
             key={index}
-            title={t('nodes:actions.picker.then.integrationRootLabel')}
-            rows={rows}
+            title={t('nodes:picker.rows.nonDeviceTypes')}
+            rows={nonDeviceRows(index)}
+            selectedKey={selectedKeys[index]}
+          />
+        );
+
+      case 'group':
+        return (
+          <NavColumnList
+            key={index}
+            title={column.title}
+            rows={groupRows(column.key, index)}
+            selectedKey={selectedKeys[index]}
+          />
+        );
+
+      case 'genericDevicePick':
+        return (
+          <DeviceAutomationColumn
+            key={index}
+            kind="action"
+            places={places}
+            atIndex={index}
+            push={pushColumn}
             selectedKey={selectedKeys[index]}
             emptyLabel={t('nodes:actions.picker.noResults')}
           />
         );
-      }
 
       case 'integrationServices': {
-        const domainServices = services[column.domain] ?? {};
-        const rows = Object.entries(domainServices).map(([service, definition]) => ({
+        const rows = Object.entries(services[column.domain] ?? {}).map(([service, definition]) => ({
           key: service,
           label: definition?.name || prettify(service),
           description: definition?.description || undefined,
         }));
         return (
-          <ResizableColumn key={index} defaultWidth={384} minWidth={280} maxWidth={640}>
-            <div className="flex h-full flex-col overflow-y-auto p-1.5">
-              <div className="space-y-1.5">
-                {rows.length === 0 ? (
-                  <p className="p-2 text-center text-muted-foreground text-xs">
-                    {t('nodes:actions.picker.noResults')}
-                  </p>
-                ) : (
-                  rows.map((row) => (
-                    <TriggerResultRow
-                      key={row.key}
-                      icon={getDomainIcon(column.domain, Layers)}
-                      color={getDomainColor(column.domain)}
-                      label={row.label}
-                      description={row.description}
-                      onSelect={() => handleSelectIntegrationService(column.domain, row.key)}
-                    />
-                  ))
-                )}
-              </div>
+          <ResultsColumn key={index} title={column.label} chosenKey={selectedKeys[index]}>
+            <div className="space-y-1.5">
+              {rows.length === 0 ? (
+                <p className="p-2 text-center text-muted-foreground text-xs">
+                  {t('nodes:actions.picker.noResults')}
+                </p>
+              ) : (
+                rows.map((row) => (
+                  <TriggerResultRow
+                    key={row.key}
+                    icon={getPickerIcon(column.domain, Layers)}
+                    color={getDomainColor(column.domain)}
+                    label={row.label}
+                    description={row.description}
+                    onSelect={() =>
+                      configure(index, integrationServiceDraft(column.domain, row.key, row.label))
+                    }
+                    pickKey={`service:${column.domain}.${row.key}`}
+                  />
+                ))
+              )}
             </div>
-          </ResizableColumn>
+          </ResultsColumn>
         );
       }
 
@@ -714,15 +722,23 @@ export function ThenActionDialog({
         return (
           <WaitForOptionsColumn
             key={index}
-            onSelectTemplate={() => {
-              onCommit('wait', { timeout: '00:01:00' });
-              closeDialog();
-            }}
+            onSelectTemplate={() =>
+              configure(index, {
+                pickKey: 'wait:template',
+                title: t('nodes:actions.waitFor.template'),
+                nodeType: 'wait',
+                data: { timeout: '00:01:00' },
+              })
+            }
             onSelectTrigger={onOpenWhenForWaitTrigger}
-            onSelectDelay={() => {
-              onCommit('delay', { delay: '00:00:05' });
-              closeDialog();
-            }}
+            onSelectDelay={() =>
+              configure(index, {
+                pickKey: 'delay',
+                title: t('nodes:actions.waitFor.delay'),
+                nodeType: 'delay',
+                data: { delay: '00:00:05' },
+              })
+            }
             onSelectAutomationOn={() =>
               pushColumn(
                 index,
@@ -762,225 +778,173 @@ export function ThenActionDialog({
           />
         );
 
-      case 'waitEntityPick': {
-        const domainPrefix = `${column.domain}.`;
-        const rows: TargetPickerRow[] = entities
-          .filter((e) => e.entity_id.startsWith(domainPrefix))
-          .sort((a, b) => getEntityName(a).localeCompare(getEntityName(b)))
-          .map((entity) => ({
-            entityId: entity.entity_id,
-            label: getEntityName(entity),
-            icon: getDomainIcon(column.domain, Layers),
-            color: getDomainColor(column.domain),
-          }));
+      case 'waitEntityPick':
         return (
           <MultiTargetPanel
             key={index}
             title={column.title}
-            rows={rows}
+            rows={entityTargetRows(
+              entities.filter((e) => e.entity_id.startsWith(`${column.domain}.`))
+            )}
             labels={waitTargetLabels}
-            onCommit={(entityIds) => handleSelectWaitEntities(entityIds, column.toState)}
-          />
-        );
-      }
-
-      case 'unassignedOptions':
-        return (
-          <NavColumnList
-            key={index}
-            title={t('nodes:actions.picker.unassigned')}
-            rows={unassignedOptionRows}
-            selectedKey={selectedKeys[index]}
+            onCommit={(entityIds) =>
+              configure(index, waitEntitiesDraft(column.title, entityIds, column.toState))
+            }
           />
         );
 
-      case 'areas':
-        return (
-          <NavColumnSections key={index} sections={zonesColumnSections} selectedKey={selectedKeys[index]} />
-        );
-
-      case 'labels':
+      case 'areaChildren':
         return (
           <NavColumnList
             key={index}
-            title={t('nodes:actions.picker.then.sections.labels')}
-            rows={labelRows}
+            title={column.areaLabel}
+            rows={placeRows(column, index, pushColumn)}
             selectedKey={selectedKeys[index]}
             emptyLabel={t('nodes:actions.picker.noResults')}
           />
         );
 
-      case 'areaChildren': {
-        const rows: NavRow[] = [
-          ...column.scope.deviceGroups.map((group) => ({
-            key: group.deviceId,
-            label: group.name,
-            icon: deviceGroupIcon(group),
-            color: deviceGroupColor(group),
-            onSelect: () => openDeviceResults(index, group),
-            onDrill: () => pushColumn(index, { kind: 'deviceChildren', group }, group.deviceId),
-          })),
-          ...column.scope.standaloneEntities.map((entity) => ({
-            key: entity.entity_id,
-            label: getEntityName(entity),
-            icon: getDomainIcon(entity.entity_id.split('.')[0], Layers),
-            color: getDomainColor(entity.entity_id.split('.')[0]),
-            onSelect: () => openEntityResults(index, entity, null),
-          })),
-        ];
-        return <NavColumnList key={index} title={column.areaLabel} rows={rows} selectedKey={selectedKeys[index]} />;
-      }
-
-      case 'deviceChildren': {
-        const rows: NavRow[] = column.group.entities.map((entity) => ({
-          key: entity.entity_id,
-          label: getEntityName(entity),
-          icon: getDomainIcon(entity.entity_id.split('.')[0], Layers),
-          color: getDomainColor(entity.entity_id.split('.')[0]),
-          onSelect: () => openEntityResults(index, entity, column.group.deviceId),
-        }));
-        return <NavColumnList key={index} title={column.group.name} rows={rows} selectedKey={selectedKeys[index]} />;
-      }
+      case 'deviceChildren':
+        return (
+          <NavColumnList
+            key={index}
+            title={column.group.name}
+            rows={deviceEntityRows(column.group, index, pushColumn)}
+            selectedKey={selectedKeys[index]}
+          />
+        );
 
       case 'targetResults':
         return (
-          <ResultsColumn key={index} title={column.scope.label}>
+          <ResultsColumn key={index} title={column.scope.label} chosenKey={selectedKeys[index]}>
             <ThenTargetResultsPanel
               selected={column.scope}
               entities={entities}
               onSelectRecipe={(entityIds, recipe) =>
-                entityIds.length > 1
-                  ? pushColumn(index, { kind: 'scopeTargets', label: recipe.label, recipe, entityIds }, recipe.id)
-                  : handleSelectRecipe(entityIds, recipe)
+                routeScopePick(
+                  column.scope,
+                  entityIds,
+                  serviceHasTarget(services, recipe.service),
+                  {
+                    pick: (ids) => configure(index, recipeDraft(ids, recipe)),
+                    tick: (ids, areaId) =>
+                      pushColumn(
+                        index,
+                        {
+                          kind: 'scopeTargets',
+                          label: recipe.label,
+                          recipe,
+                          entityIds: ids,
+                          area: areaId ? { areaId, label: column.scope.label } : undefined,
+                        },
+                        recipeChoiceKey(recipe.id, entityIds)
+                      ),
+                  }
+                )
               }
-              onSelectDeviceAction={handleSelectDeviceAction}
+              onSelectDeviceAction={(action) => configure(index, deviceActionDraft(action))}
             />
           </ResultsColumn>
         );
 
       case 'typeResults':
         return (
-          <ResultsColumn key={index} title={column.category.label}>
+          <ResultsColumn key={index} title={column.category.label} chosenKey={selectedKeys[index]}>
             <ThenTypeResultsPanel
               category={column.category}
-              onSelectRecipe={(recipe) =>
-                actionRecipeTakesEntities(recipe)
-                  ? pushColumn(index, { kind: 'recipeEntities', category: column.category, recipe }, recipe.id)
-                  : handleSelectRecipe([], recipe)
-              }
+              onSelectRecipe={(recipe) => selectTypeRecipe(index, column.category, recipe)}
             />
           </ResultsColumn>
         );
 
-      case 'recipeEntities': {
-        const domainPrefix = `${column.category.domain}.`;
-        const rows: TargetPickerRow[] = entities
-          .filter((e) => e.entity_id.startsWith(domainPrefix))
-          .sort((a, b) => getEntityName(a).localeCompare(getEntityName(b)))
-          .map((entity) => ({
-            entityId: entity.entity_id,
-            label: getEntityName(entity),
-            icon: getDomainIcon(column.category.domain, Layers),
-            color: getDomainColor(column.category.domain),
-          }));
+      case 'recipeEntities':
+        // Only the entities that can do it (#130): HA refuses the call for
+        // one without the features the action needs.
         return (
           <MultiTargetPanel
             key={index}
             title={column.recipe.label}
-            rows={rows}
+            rows={entityTargetRows(
+              entitiesForService(
+                services,
+                column.recipe.service,
+                entities.filter((e) => e.entity_id.startsWith(`${column.category.domain}.`))
+              )
+            )}
             labels={multiTargetLabels}
-            onCommit={(entityIds) => handleSelectRecipe(entityIds, column.recipe)}
+            onCommit={(entityIds) => configure(index, recipeDraft(entityIds, column.recipe))}
           />
         );
-      }
 
-      case 'scopeTargets': {
-        const rows: TargetPickerRow[] = column.entityIds
-          .map((id) => entities.find((e) => e.entity_id === id))
-          .filter((e): e is HassEntity => Boolean(e))
-          .sort((a, b) => getEntityName(a).localeCompare(getEntityName(b)))
-          .map((entity) => ({
-            entityId: entity.entity_id,
-            label: getEntityName(entity),
-            icon: getDomainIcon(entity.entity_id.split('.')[0], Layers),
-            color: getDomainColor(entity.entity_id.split('.')[0]),
-          }));
+      case 'scopeTargets':
         return (
           <MultiTargetPanel
             key={index}
             title={column.label}
-            rows={rows}
+            rows={entityTargetRows(
+              entitiesForService(
+                services,
+                column.recipe.service,
+                column.entityIds
+                  .map((id) => entities.find((e) => e.entity_id === id))
+                  .filter((e): e is HassEntity => Boolean(e))
+              )
+            )}
             labels={multiTargetLabels}
-            onCommit={(entityIds) => handleSelectRecipe(entityIds, column.recipe)}
+            onCommit={(entityIds) => configure(index, recipeDraft(entityIds, column.recipe))}
+            wholeArea={
+              column.area && {
+                label: t('nodes:picker.rows.anythingIn', { name: column.area.label }),
+                onSelect: () =>
+                  configure(
+                    index,
+                    recipeDraft(column.entityIds, column.recipe, column.area?.areaId)
+                  ),
+              }
+            }
           />
         );
-      }
 
-      default:
-        return null;
+      case 'configure':
+        return (
+          <NodeConfigColumn
+            key={`${index}:${column.pickKey}`}
+            onBack={() => {
+              setColumns((prev) => prev.slice(0, index));
+              setSelectedKeys((prev) => prev.slice(0, index));
+            }}
+            title={column.title}
+            nodeType={column.nodeType}
+            initialData={column.data}
+            entities={entities}
+            commitLabel={configureCommitLabel(column.nodeType)}
+            onCommit={(data) => commitDraft(column.nodeType, data)}
+          />
+        );
     }
   }
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className={MILLER_DIALOG_CONTENT_CLASS}>
-        <DialogHeader className="border-b px-6 py-4">
-          <DialogTitle>{t('nodes:actions.picker.then.title')}</DialogTitle>
-        </DialogHeader>
-
-        <div className="flex items-center gap-2 border-b px-6 py-3">
-          <Search className="h-4 w-4 shrink-0 text-muted-foreground" />
-          <input
-            autoFocus
-            value={search}
-            onChange={(e) => {
-              setSearch(e.target.value);
-              setSearchSelectedEntityId(null);
-            }}
-            placeholder={t('nodes:actions.picker.then.searchPlaceholder')}
-            className="h-8 w-full bg-transparent text-base outline-none placeholder:text-muted-foreground"
+      <DialogContent
+        className={MILLER_DIALOG_CONTENT_CLASS}
+        // Its kind's colour, for the "Anything in" line's edge (index.css).
+        style={{ ...toneStyle('action'), ...pickerSize.style }}
+      >
+        {pickerSize.grip}
+        <PickerCurrentProvider value={currentKey}>
+          <PickerHeader
+            title={t('nodes:actions.picker.then.title')}
+            icon={<StepIcon tone="action" icon={Play} size="md" />}
+            search={search}
+            onSearchChange={changeSearch}
+            placeholder={t('nodes:picker.search.placeholder')}
+            kindSwitch={onSwitchKind && <PickerKindSwitch current="then" onSwitch={onSwitchKind} />}
           />
-        </div>
-
-        <div className="flex min-h-0 flex-1 divide-x overflow-x-auto">
-          {searchResults ? (
-            <>
-              <NavColumnList
-                title={t('nodes:actions.picker.then.sections.zones')}
-                rows={searchResults.map((entity) => ({
-                  key: entity.entity_id,
-                  label: getEntityName(entity),
-                  onSelect: () => setSearchSelectedEntityId(entity.entity_id),
-                }))}
-                selectedKey={searchSelectedEntityId}
-                emptyLabel={t('nodes:actions.picker.noResults')}
-              />
-              {searchSelectedEntityId &&
-                (() => {
-                  const entity = entities.find((e) => e.entity_id === searchSelectedEntityId);
-                  const scope: SelectedScope = {
-                    key: `entity::${searchSelectedEntityId}`,
-                    label: entity ? getEntityName(entity) : searchSelectedEntityId,
-                    deviceIds: [],
-                    entityIds: [searchSelectedEntityId],
-                    singleEntityId: searchSelectedEntityId,
-                  };
-                  return (
-                    <ResultsColumn title={scope.label}>
-                      <ThenTargetResultsPanel
-                        selected={scope}
-                        entities={entities}
-                        onSelectRecipe={handleSelectRecipe}
-                        onSelectDeviceAction={handleSelectDeviceAction}
-                      />
-                    </ResultsColumn>
-                  );
-                })()}
-            </>
-          ) : (
-            columns.map((column, index) => renderColumn(column, index))
-          )}
-        </div>
+          <PickerColumnRow columnCount={columns.length}>
+            {renderStackedColumns(columns, isSetup, renderColumn)}
+          </PickerColumnRow>
+        </PickerCurrentProvider>
       </DialogContent>
     </Dialog>
   );
@@ -998,6 +962,7 @@ function BlocksColumn({
   blocks: ActionBlock[];
   onSelectBlock: (block: ActionBlock) => void;
 }) {
+  const { t } = useTranslation(['nodes']);
   return (
     <ResizableColumn defaultWidth={384} minWidth={280} maxWidth={640}>
       <div className="flex h-full flex-col overflow-y-auto p-1.5">
@@ -1007,8 +972,9 @@ function BlocksColumn({
               key={block.key}
               icon={getActionBlockIcon(block)}
               color={getDomainColor('blocks')}
-              label={block.label}
-              description={block.description}
+              label={t(`nodes:blocks.${block.key}.label`)}
+              description={t(`nodes:blocks.${block.key}.description`)}
+              pickKey={`block:${block.key}`}
               onSelect={() => onSelectBlock(block)}
             />
           ))}
@@ -1022,8 +988,9 @@ function BlocksColumn({
  * The "Wait for..." block's second column — template / trigger / time to
  * pass / automation on / automation off / script finish, consolidated here
  * instead of six separate top-level Blocks cards (see actionBlocks.ts's
- * 'wait_for' entry doc comment). Template and Delay commit immediately, same
- * as any other block; Trigger hands off to the WHEN dialog instead (see
+ * 'wait_for' entry doc comment). Template and Delay are picked like any
+ * other block (the template opens the configure column, the delay is added
+ * at its default); Trigger hands off to the WHEN dialog instead (see
  * onOpenWhenForWaitTrigger on ThenActionDialogProps); the automation/script
  * rows push a further column to pick which entity (see ThenActionDialog's
  * 'waitEntityPick' column).
@@ -1062,6 +1029,7 @@ function WaitForOptionsColumn({
             label={t('nodes:actions.waitFor.trigger')}
             description={t('nodes:actions.waitFor.triggerDescription')}
             onSelect={onSelectTrigger}
+            pickKey="wait:trigger"
           />
           <TriggerResultRow
             icon={Clock}
@@ -1069,6 +1037,7 @@ function WaitForOptionsColumn({
             label={t('nodes:actions.waitFor.template')}
             description={t('nodes:actions.waitFor.templateDescription')}
             onSelect={onSelectTemplate}
+            pickKey="wait:template"
           />
           <TriggerResultRow
             icon={Hourglass}
@@ -1076,6 +1045,7 @@ function WaitForOptionsColumn({
             label={t('nodes:actions.waitFor.delay')}
             description={t('nodes:actions.waitFor.delayDescription')}
             onSelect={onSelectDelay}
+            pickKey="wait:delay"
           />
           <TriggerResultRow
             icon={Power}
@@ -1113,18 +1083,24 @@ function ThenTypeResultsPanel({
 }) {
   const { t } = useTranslation(['nodes']);
   if (category.recipes.length === 0) {
-    return <p className="p-2 text-center text-muted-foreground text-xs">{t('nodes:actions.picker.noResults')}</p>;
+    return (
+      <p className="p-2 text-center text-muted-foreground text-xs">
+        {t('nodes:actions.picker.noResults')}
+      </p>
+    );
   }
   return (
     <div className="space-y-1.5">
       {category.recipes.map((recipe) => (
         <TriggerResultRow
           key={recipe.id}
-          icon={getDomainIcon(category.domain, Layers)}
+          icon={getPickerIcon(category.domain, Layers)}
           color={getDomainColor(category.domain)}
           label={recipe.label}
           description={recipe.description}
           onSelect={() => onSelectRecipe(recipe)}
+          pickKey={`service:${recipe.service}`}
+          choiceKey={recipeChoiceKey(recipe.id, [])}
         />
       ))}
     </div>
@@ -1155,7 +1131,7 @@ function ThenTargetResultsPanel({
   const { t } = useTranslation(['nodes']);
   const { getDeviceActions } = useDeviceAutomation();
   const { translations } = useTranslations();
-  const { getDeviceNameById } = useHass();
+  const { getDeviceNameById, services } = useHass();
   const [deviceActions, setDeviceActions] = useState<DeviceAction[]>([]);
   const [loading, setLoading] = useState(false);
 
@@ -1189,7 +1165,9 @@ function ThenTargetResultsPanel({
         // entities in scope; raw device-level actions with no entity_id are
         // only shown for whole-device/area selections.
         const entityIds = new Set(selected.entityIds);
-        const scoped = all.filter((a) => (a.entity_id ? entityIds.has(a.entity_id) : !selected.singleEntityId));
+        const scoped = all.filter((a) =>
+          a.entity_id ? entityIds.has(a.entity_id) : !selected.singleEntityId
+        );
         setDeviceActions(scoped);
       })
       .catch(() => {
@@ -1211,22 +1189,8 @@ function ThenTargetResultsPanel({
     );
   }
 
-  const recipesByHeading = new Map<string, Map<string, { recipes: ActionRecipe[]; entityIds: string[] }>>();
-  for (const entityId of selected.entityIds) {
-    const category = getEntityActionCategory(entityId);
-    if (!category) continue;
-    let byGroupKey = recipesByHeading.get(category.heading);
-    if (!byGroupKey) {
-      byGroupKey = new Map();
-      recipesByHeading.set(category.heading, byGroupKey);
-    }
-    const existing = byGroupKey.get(category.groupKey);
-    if (existing) {
-      existing.entityIds.push(entityId);
-    } else {
-      byGroupKey.set(category.groupKey, { recipes: category.recipes, entityIds: [entityId] });
-    }
-  }
+  // Each action with the selected entities that can do it (#130).
+  const recipesByHeading = actionRecipeOffers(scopeTypeEntityIds(selected), entities, services);
 
   const deviceActionsByHeading = new Map<string, DeviceAction[]>();
   for (const action of deviceActions) {
@@ -1236,41 +1200,54 @@ function ThenTargetResultsPanel({
     else deviceActionsByHeading.set(heading, [action]);
   }
 
-  const allHeadings = new Set<string>([...recipesByHeading.keys(), ...deviceActionsByHeading.keys()]);
+  const allHeadings = new Set<string>([
+    ...recipesByHeading.keys(),
+    ...deviceActionsByHeading.keys(),
+  ]);
   const sortedHeadings = Array.from(allHeadings).sort((a, b) => a.localeCompare(b));
 
   if (!loading && sortedHeadings.length === 0) {
-    return <p className="px-1.5 text-muted-foreground text-xs">{t('nodes:actions.picker.noResults')}</p>;
+    return (
+      <p className="px-1.5 text-muted-foreground text-xs">{t('nodes:actions.picker.noResults')}</p>
+    );
   }
 
   return (
     <div className="space-y-3">
-      {loading && <p className="px-1.5 text-muted-foreground text-xs">{t('nodes:triggers.picker.loadingTriggers')}</p>}
+      {loading && (
+        <p className="px-1.5 text-muted-foreground text-xs">
+          {t('nodes:triggers.picker.loadingTriggers')}
+        </p>
+      )}
 
       {sortedHeadings.map((heading) => {
-        const recipeGroups = Array.from(recipesByHeading.get(heading)?.values() ?? []);
+        const offers = recipesByHeading.get(heading) ?? [];
         return (
           <div key={heading}>
             <h4 className="px-1.5 py-1 font-semibold text-muted-foreground text-xs">{heading}</h4>
             <div className="space-y-1.5">
-              {recipeGroups.map(({ recipes, entityIds }) => {
+              {offers.map(({ recipe, entityIds }) => {
                 const domain = entityIds[0]?.split('.')[0];
-                return recipes.map((recipe) => (
+                return (
                   <TriggerResultRow
                     key={`${recipe.id}::${entityIds.join(',')}`}
-                    icon={getDomainIcon(domain, Zap)}
+                    icon={entityPickerIcon(
+                      entities.find((e) => e.entity_id === entityIds[0]),
+                      Zap
+                    )}
                     color={getDomainColor(domain)}
                     label={recipe.label}
                     description={recipe.description}
                     chip={selected.label}
                     onSelect={() => onSelectRecipe(entityIds, recipe)}
+                    choiceKey={recipeChoiceKey(recipe.id, entityIds)}
                   />
-                ));
+                );
               })}
               {(deviceActionsByHeading.get(heading) ?? []).map((action) => (
                 <TriggerResultRow
                   key={`device::${buildCompositeValue(action)}`}
-                  icon={getDomainIcon(action.entity_id?.split('.')[0] ?? action.domain, Zap)}
+                  icon={getPickerIcon(action.entity_id?.split('.')[0] ?? action.domain, Zap)}
                   color={getDomainColor(action.entity_id?.split('.')[0] ?? action.domain)}
                   label={getDeviceAutomationLabel(
                     'action',

@@ -30,6 +30,8 @@ export {
   FlowWorkspaceSourceSchema,
   validateGraphStructure,
 } from './graph';
+// Home Assistant's coercions of scalar values
+export { haCoerceAutomation, pythonStr } from './ha-coerce';
 // Home Assistant entity schemas
 export {
   type ConditionType,
@@ -85,6 +87,7 @@ export {
   isFlodeMetadata,
   isHACondition,
   isHATrigger,
+  TRIGGER_KEYS_KEEPING_NULL,
   VALID_WEEKDAYS,
   type Weekday,
 } from './ha-schemas';

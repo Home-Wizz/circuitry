@@ -1,5 +1,6 @@
-import { Panel } from '@xyflow/react';
+import { Panel, useReactFlow, useStore, useStoreApi } from '@xyflow/react';
 import type { TFunction } from 'i18next';
+import { Lock, LockOpen, Maximize, ZoomIn, ZoomOut } from 'lucide-react';
 import { useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
@@ -14,6 +15,7 @@ import {
   getAlignBottomAction,
   //  getAlignCenterAction,
   getAlignLeftAction,
+  getAlignMiddleAction,
   getAlignRightAction,
   getAlignTopAction,
   getCopyAction,
@@ -53,8 +55,22 @@ function formatShortcut(shortcut: string, t: TFunction): string {
 // Define the order of groups to display
 // New groups should be added here as needed!
 const groupOrder: Array<
-  'history' | 'node-specific' | 'selection' | 'clipboard' | 'edit' | 'align' | 'delete'
-> = ['history', 'node-specific', 'selection', 'clipboard', 'edit', 'align', 'delete'];
+  'history' | 'node-specific' | 'selection' | 'clipboard' | 'edit' | 'align' | 'delete' | 'view'
+> = ['history', 'node-specific', 'selection', 'clipboard', 'edit', 'align', 'delete', 'view'];
+
+/**
+ * Actions kept for their keyboard shortcuts and the right-click menu but not
+ * shown as toolbar buttons: copy, cut and paste (everyone uses the keys), and
+ * the edge aligns ("Line up in a row / column" are the toolbar's two).
+ */
+const NOT_ON_TOOLBAR = new Set([
+  'copy',
+  'cut',
+  'paste',
+  'align-right',
+  'align-top',
+  'align-bottom',
+]);
 
 export function NodeToolbar() {
   const { t } = useTranslation();
@@ -76,6 +92,7 @@ export function NodeToolbar() {
       getCopyAction(t),
       getCutAction(t),
       getPasteAction(t),
+      getAlignMiddleAction(t),
       getAlignLeftAction(t),
       //  getAlignCenterAction(t),
       getAlignRightAction(t),
@@ -87,6 +104,52 @@ export function NodeToolbar() {
       getDeleteAction(t),
     ],
     [t]
+  );
+
+  // The canvas view: zoom, fit and lock (formerly React Flow's corner
+  // controls). No shortcuts: Ctrl +/- are the browser's own zoom.
+  const { zoomIn, zoomOut, fitView } = useReactFlow();
+  const flowStore = useStoreApi();
+  const isInteractive = useStore(
+    (state) => state.nodesDraggable || state.nodesConnectable || state.elementsSelectable
+  );
+  const viewActions = useMemo<NodeAction[]>(
+    () => [
+      {
+        name: 'zoom-in',
+        icon: ZoomIn,
+        tooltip: t('toolbar.zoomIn'),
+        group: 'view',
+        execute: () => zoomIn(),
+      },
+      {
+        name: 'zoom-out',
+        icon: ZoomOut,
+        tooltip: t('toolbar.zoomOut'),
+        group: 'view',
+        execute: () => zoomOut(),
+      },
+      {
+        name: 'fit-view',
+        icon: Maximize,
+        tooltip: t('toolbar.fitView'),
+        group: 'view',
+        execute: () => fitView(),
+      },
+      {
+        name: 'lock',
+        icon: isInteractive ? LockOpen : Lock,
+        tooltip: isInteractive ? t('toolbar.lock') : t('toolbar.unlock'),
+        group: 'view',
+        execute: () =>
+          flowStore.setState({
+            nodesDraggable: !isInteractive,
+            nodesConnectable: !isInteractive,
+            elementsSelectable: !isInteractive,
+          }),
+      },
+    ],
+    [t, zoomIn, zoomOut, fitView, flowStore, isInteractive]
   );
 
   // Determine if we have any actions to show
@@ -201,7 +264,8 @@ export function NodeToolbar() {
   const actionsByGroup = useMemo(() => {
     const groups: Record<string, NodeAction[]> = {};
 
-    for (const action of allActions) {
+    for (const action of [...allActions, ...viewActions]) {
+      if (NOT_ON_TOOLBAR.has(action.name)) continue;
       const group = action.group || 'node-specific';
       if (!groups[group]) {
         groups[group] = [];
@@ -210,7 +274,7 @@ export function NodeToolbar() {
     }
 
     return groups;
-  }, [allActions]);
+  }, [allActions, viewActions]);
 
   // Show toolbar only if there are actions available
   if (!hasActions) return null;
@@ -227,6 +291,21 @@ export function NodeToolbar() {
   } catch {
     // Ignore parse errors
   }
+
+  // Only what can be used now: with nothing selected the step buttons stay
+  // out of the way and appear when a step is selected; undo and redo when
+  // there's something to undo or redo. The view controls always show.
+  const visibleGroups = groupOrder
+    .map(
+      (groupName) =>
+        [
+          groupName,
+          (actionsByGroup[groupName] ?? []).filter((action) =>
+            action.isEnabled ? action.isEnabled(context) : true
+          ),
+        ] as const
+    )
+    .filter(([, actions]) => actions.length > 0);
 
   const renderActionGroup = (actions: NodeAction[]) => {
     if (!actions || actions.length === 0) return null;
@@ -284,20 +363,14 @@ export function NodeToolbar() {
         )}
       >
         <div className="flex shrink-0 items-center gap-0.5 sm:gap-1">
-          {groupOrder.map((groupName, index) => {
-            const groupActions = actionsByGroup[groupName];
-            if (!groupActions || groupActions.length === 0) return null;
-
-            return (
-              <div key={groupName} className="flex items-center gap-0.5 sm:gap-1">
-                {renderActionGroup(groupActions)}
-                {index < groupOrder.length - 1 &&
-                  actionsByGroup[groupOrder[index + 1]]?.length > 0 && (
-                    <Separator orientation="vertical" className="mx-0.5 h-6 sm:mx-1" />
-                  )}
-              </div>
-            );
-          })}
+          {visibleGroups.map(([groupName, groupActions], index) => (
+            <div key={groupName} className="flex items-center gap-0.5 sm:gap-1">
+              {renderActionGroup(groupActions)}
+              {index < visibleGroups.length - 1 && (
+                <Separator orientation="vertical" className="mx-0.5 h-6 sm:mx-1" />
+              )}
+            </div>
+          ))}
         </div>
       </div>
     </Panel>

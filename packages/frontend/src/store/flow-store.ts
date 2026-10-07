@@ -7,6 +7,7 @@ import type {
   HAScriptField,
   NodeValidationError,
 } from '@circuitry/shared';
+import { validateNodeData } from '@circuitry/shared';
 import {
   addEdge,
   applyEdgeChanges,
@@ -24,11 +25,18 @@ import { persist } from 'zustand/middleware';
 import { shallow } from 'zustand/shallow';
 import type { AutomationTrace } from '@/lib/ha-api';
 import { getHomeAssistantAPI } from '@/lib/ha-api';
-import { buildAutomationConfig } from '@/lib/automation-config';
+import { buildAutomationConfig, transpileForSave } from '@/lib/automation-config';
+import { replacedData, replaceFits, replacePicker } from '@/lib/canvasEdits';
 import { computeSourceHash, saveGraph } from '@/lib/graph-storage';
 import { logger } from '@/lib/logger';
-import { editorNodeIssues } from '@/lib/nativeRequired';
+import { describedExtraIssues, describedNodeIssues } from '@/lib/describedFields';
+import { KNOWN_CONDITION_TYPES, KNOWN_TRIGGER_TYPES } from '@/lib/haCatalog';
+import type { NativeDescription } from '@/lib/nativeDescriptions';
+import { useNativeDescriptionsStore } from '@/lib/nativeDescriptionsStore';
+import { editorNodeIssues, splitIssues } from '@/lib/nativeRequired';
+import { ignoredTargetIssues } from '@/lib/nativeTargets';
 import type { ServiceRequiredFields } from '@/lib/serviceRequired';
+import type { ServiceTargetContext } from '@/lib/serviceTargets';
 import { generateUUID } from '@/lib/utils';
 import type { HomeAssistant } from '@/types/hass';
 import { circuitryIndexedDBStorage } from '@/utils/indexeddb-storage';
@@ -166,6 +174,9 @@ export interface JoinNodeData {
 export interface SequenceStartNodeData {
   alias?: string;
   enabled?: boolean;
+  /** A frame: names the one choose or parallel block inside it, rather
+   * than grouping steps (the alias is written onto that block). */
+  _frame?: boolean;
   [key: string]: unknown;
 }
 
@@ -212,6 +223,10 @@ export interface FlowTabState {
 /**
  * Flow store state
  */
+/** What a nodeEditRequest opens: the picker that configures a block's
+ * placeholder condition or action, or the one that replaces a step. */
+export type NodeEditKind = 'condition' | 'action' | 'replace';
+
 export interface FlowState {
   // Graph state
   flowId: string;
@@ -258,6 +273,16 @@ export interface FlowState {
   // tracked by undo/redo, same as selectedNodeId/nodeEditRequest below —
   // purely ephemeral UI signaling, not flow data.
   nodeDoubleClickSignal: number;
+  /** Bumped to open the properties panel (never close it): a card's
+   * "+ more" › Side panel. Ephemeral UI signaling, like the one above. */
+  openPanelSignal: number;
+  /** The canvas's overview map (MiniMap) shown: toggled from the left
+   * panel's menu. UI state only, not flow data. */
+  minimapOpen: boolean;
+  /** Something on the canvas asking the left panel to open its trigger
+   * picker or the Open dialog (the empty canvas's prompt); `n` makes each
+   * request new. UI state only. */
+  paletteRequest: { kind: 'when' | 'open'; n: number } | null;
 
   // Transient "open the miller for this already-placed node" request — see
   // ConditionNode.tsx/ActionNode.tsx's click-to-configure handling for
@@ -269,8 +294,9 @@ export interface FlowState {
   // direct access to useAddNodeDialogs.tsx's imperative open functions,
   // which are only ever instantiated once, in NodePalette.tsx — a sibling,
   // not an ancestor, of the canvas. NodePalette watches this field and
-  // dispatches to the right dialog.
-  nodeEditRequest: { kind: 'condition' | 'action'; nodeId: string } | null;
+  // dispatches to the right dialog. `replace` opens the picker that
+  // replaces the step (the canvas's right-click Replace…).
+  nodeEditRequest: { kind: NodeEditKind; nodeId: string } | null;
 
   // Save state
   automationId: string | null;
@@ -317,6 +343,13 @@ export interface FlowState {
   updateNodeData: (nodeId: string, data: Partial<FlowNodeData>) => void;
   /** Like updateNodeData, but also swaps the node's own `type` (e.g. an If/Else "Then" placeholder's `action` type becoming `delay`/`wait`/... once the user picks a Blocks entry that isn't a plain action) — updateNodeData alone can't do this since `type` lives outside `data` on the node object. `data` is still merged onto the existing data (not replaced), so structural markers like `_blockKey`/`_ifElseBranch`/`_parallelBranch` survive the type change same as updateNodeData already preserves them for a same-type edit. */
   updateNodeTypeAndData: (nodeId: string, type: string, data: Record<string, unknown>) => void;
+  /**
+   * Replaces a step with a new pick, in place: same node, position and
+   * links (see lib/canvasEdits.ts's replacedData for what of the old step
+   * it keeps). Returns false, changing nothing, when the node is gone, can't
+   * be replaced, or the new step has no outlet for a link that leaves it.
+   */
+  replaceNode: (nodeId: string, type: string, data: Record<string, unknown>) => boolean;
   removeNode: (nodeId: string) => void;
   /** Bulk remove — e.g. deleting an entire Repeat While/Until loop structure via its loop-back line (see lib/loop-structure.ts). One history entry for the whole batch, unlike calling removeNode in a loop. */
   removeNodes: (nodeIds: string[]) => void;
@@ -326,9 +359,15 @@ export interface FlowState {
   moveNodes: (updates: Array<{ id: string; position: { x: number; y: number } }>) => void;
 
   selectNode: (nodeId: string | null) => void;
+  /** Selects a step and opens the properties panel on it (openPanelSignal). */
+  openPanelFor: (nodeId: string) => void;
+  /** Shows or hides the canvas's overview map (minimapOpen). */
+  toggleMinimap: () => void;
+  /** Asks the left panel to open its trigger picker or the Open dialog. */
+  requestFromPalette: (kind: 'when' | 'open') => void;
   /** Bumps nodeDoubleClickSignal — call from a node double-click, see its own doc comment. */
   notifyNodeDoubleClicked: () => void;
-  requestNodeEdit: (kind: 'condition' | 'action', nodeId: string) => void;
+  requestNodeEdit: (kind: NodeEditKind, nodeId: string) => void;
   clearNodeEditRequest: () => void;
 
   setFlowName: (name: string) => void;
@@ -401,6 +440,10 @@ export interface FlowState {
    * leaving one empty gets a warning. Set from HA's services as they
    * change; kept across tabs and resets (it's HA's, not the flow's). */
   setServiceRequiredFields: (fields: ServiceRequiredFields) => void;
+  /** The connected HA's services and each entity's features (#130): an
+   * action step naming an entity that can't do it gets a warning. Set as
+   * they change; kept across tabs and resets like the above. */
+  setServiceTargets: (context: ServiceTargetContext) => void;
   clearNodeErrors: (nodeId: string) => void;
   hasValidationErrors: () => boolean;
 }
@@ -514,6 +557,65 @@ function findDuplicateIdErrors(nodes: Node<FlowNodeData>[]): Map<string, NodeVal
   return errors;
 }
 
+/** The trigger ids a "Triggered by" condition names, its own and its
+ * sub-conditions' (an And/Or/Not group's). */
+function triggerIdReferences(data: Record<string, unknown>): string[] {
+  const refs: string[] = [];
+  if (data.condition === 'trigger') {
+    const ids = Array.isArray(data.id) ? data.id : [data.id];
+    for (const id of ids) if (typeof id === 'string' && id.trim() !== '') refs.push(id);
+  }
+  if (Array.isArray(data.conditions)) {
+    for (const sub of data.conditions) {
+      if (sub && typeof sub === 'object' && !Array.isArray(sub)) {
+        refs.push(...triggerIdReferences(sub as Record<string, unknown>));
+      }
+    }
+  }
+  return refs;
+}
+
+/**
+ * A "Triggered by" condition naming a trigger id no trigger in the flow has
+ * (its trigger was deleted, or renamed): HA accepts it, and it never passes.
+ * A warning, since an index ("0", "1": HA's id for a trigger with none of
+ * its own) can't be told from the flow alone and is left alone.
+ */
+function findUnknownTriggerIdWarnings(
+  nodes: Node<FlowNodeData>[]
+): Map<string, NodeValidationError> {
+  const triggerIds = new Set<string>();
+  for (const node of nodes) {
+    const id = node.data.id;
+    if (node.type === 'trigger' && typeof id === 'string' && id.trim() !== '') triggerIds.add(id);
+  }
+  const warnings = new Map<string, NodeValidationError>();
+  for (const node of nodes) {
+    if (node.type !== 'condition') continue;
+    const unknown = triggerIdReferences(node.data as Record<string, unknown>).filter(
+      (ref) => !/^\d+$/.test(ref) && !triggerIds.has(ref)
+    );
+    if (unknown.length > 0) {
+      warnings.set(node.id, {
+        path: ['id'],
+        message: 'errors:validation.node.unknownTriggerId',
+        severity: 'warning',
+      });
+    }
+  }
+  return warnings;
+}
+
+/** The issues only the whole graph shows, by node: duplicate ids, and
+ * "Triggered by" conditions naming no trigger. */
+function graphIssues(nodes: Node<FlowNodeData>[]): Map<string, NodeValidationError[]> {
+  const issues = new Map<string, NodeValidationError[]>();
+  for (const found of [findDuplicateIdErrors(nodes), findUnknownTriggerIdWarnings(nodes)]) {
+    for (const [nodeId, issue] of found) issues.set(nodeId, [...(issues.get(nodeId) ?? []), issue]);
+  }
+  return issues;
+}
+
 const defaultFlowMetadata: FlowMetadata = {
   mode: 'single',
   initial_state: true,
@@ -532,6 +634,9 @@ const initialState = {
   edges: [],
   selectedNodeId: null,
   nodeDoubleClickSignal: 0,
+  openPanelSignal: 0,
+  minimapOpen: false,
+  paletteRequest: null,
   tabOrder: [initialFlowId] as string[],
   backgroundTabs: [] as FlowTabState[],
   nodeEditRequest: null,
@@ -615,17 +720,6 @@ export type TemporalFlowState = Pick<
   | 'userTriggerVariables'
 >;
 
-/** Validation issues split into errors (block saving) and warnings (shown only; bug #65). */
-function splitIssues(issues: NodeValidationError[]): {
-  errors: NodeValidationError[];
-  warnings: NodeValidationError[];
-} {
-  return {
-    errors: issues.filter((i) => i.severity !== 'warning'),
-    warnings: issues.filter((i) => i.severity === 'warning'),
-  };
-}
-
 const temporalSelector = (state: FlowState): TemporalFlowState => ({
   nodes: state.nodes,
   edges: state.edges,
@@ -686,6 +780,67 @@ function snapshotAsTab(state: FlowState): FlowTabState {
 
 /** See FlowState.setServiceRequiredFields. */
 let serviceRequiredFields: ServiceRequiredFields = {};
+/** See FlowState.setServiceTargets. */
+let serviceTargets: ServiceTargetContext | undefined;
+
+/** Everything the editor flags on a node's data, with the connected HA's
+ * service checks and its descriptions of purpose-specific types: what the
+ * canvas shows on such a node. The pickers ask it of a pick before there
+ * is a node. */
+export function nodeIssues(nodeType: string, data: Record<string, unknown>): NodeValidationError[] {
+  const described = describedType(nodeType, data);
+  // A type discovered from the connected HA: checked against its
+  // description alone (the tables have nothing for it).
+  if (described?.discovered) {
+    return [
+      ...validateNodeData(nodeType, data),
+      ...describedNodeIssues(described.description, data),
+      ...ignoredTargetIssues(data, described.description, serviceTargets),
+    ];
+  }
+  const issues = editorNodeIssues(
+    nodeType,
+    data,
+    serviceRequiredFields,
+    serviceTargets,
+    described?.description
+  );
+  // One of the catalog's own: the tables' checks, read as the connected HA
+  // describes it, and any field it describes that the panel has no editor
+  // of its own for.
+  return described
+    ? [
+        ...issues,
+        ...describedExtraIssues(described.kind, described.type, described.description, data),
+        ...ignoredTargetIssues(data, described.description, serviceTargets),
+      ]
+    : issues;
+}
+
+/** HA's description of a node's purpose-specific type, when the connected
+ * HA has sent one, and whether the type is one the catalog doesn't know
+ * (discovered from the connected HA, lib/haCatalog.ts). */
+function describedType(
+  nodeType: string,
+  data: Record<string, unknown>
+):
+  | {
+      kind: 'trigger' | 'condition';
+      type: string;
+      description: NativeDescription;
+      discovered: boolean;
+    }
+  | undefined {
+  const kind =
+    nodeType === 'trigger' ? 'trigger' : nodeType === 'condition' ? 'condition' : undefined;
+  const type =
+    kind === 'trigger' ? data.trigger : kind === 'condition' ? data.condition : undefined;
+  if (!kind || typeof type !== 'string' || !type.includes('.')) return undefined;
+  const description = useNativeDescriptionsStore.getState()[kind][type];
+  if (!description) return undefined;
+  const known = kind === 'trigger' ? KNOWN_TRIGGER_TYPES : KNOWN_CONDITION_TYPES;
+  return { kind, type, description, discovered: !known.has(type) };
+}
 
 export const useFlowStore = create<FlowState>()(
   persist(
@@ -703,7 +858,7 @@ export const useFlowStore = create<FlowState>()(
         setNodes: (nodes) => set({ nodes, hasUnsavedChanges: true }),
         setEdges: (edges) => set({ edges, hasUnsavedChanges: true }),
 
-        onNodesChange: (changes) =>
+        onNodesChange: (changes) => {
           set((state) => ({
             nodes: applyNodeChanges(changes, state.nodes),
             // A plain click-to-select dispatches a 'select'-type NodeChange
@@ -714,7 +869,10 @@ export const useFlowStore = create<FlowState>()(
             // changes. Any OTHER change type (position/remove/add/replace/
             // dimensions) is a real edit and should still mark it dirty.
             hasUnsavedChanges: changes.some((c) => c.type !== 'select') || state.hasUnsavedChanges,
-          })),
+          }));
+          // A node removed on the canvas (its Delete key): as removeNode.
+          if (changes.some((c) => c.type === 'remove')) get().validateAllNodes();
+        },
 
         onEdgesChange: (changes) =>
           set((state) => ({
@@ -875,15 +1033,41 @@ export const useFlowStore = create<FlowState>()(
           get().validateNode(nodeId);
         },
 
-        removeNode: (nodeId) =>
+        replaceNode: (nodeId, type, data) => {
+          const { nodes, edges } = get();
+          const node = nodes.find((n) => n.id === nodeId);
+          if (!node || replacePicker(node.type) === null || replacePicker(type) === null)
+            return false;
+          const oldData: Record<string, unknown> = { ...node.data };
+          const outgoing = edges.filter((e) => e.source === nodeId);
+          if (!replaceFits({ type: node.type, data: oldData }, { type, data }, outgoing))
+            return false;
+          const next = normalizeNodeData(type, replacedData(node.type, oldData, type, data));
+          set((state) => ({
+            nodes: state.nodes.map((n) =>
+              n.id === nodeId ? { ...n, type, data: next as FlowNodeData } : n
+            ),
+            hasUnsavedChanges: true,
+          }));
+          // The whole graph's checks: a replaced "Triggered by" or trigger
+          // changes which references resolve.
+          get().validateAllNodes();
+          return true;
+        },
+
+        removeNode: (nodeId) => {
           set((state) => ({
             nodes: state.nodes.filter((n) => n.id !== nodeId),
             edges: state.edges.filter((e) => e.source !== nodeId && e.target !== nodeId),
             selectedNodeId: state.selectedNodeId === nodeId ? null : state.selectedNodeId,
             hasUnsavedChanges: true,
-          })),
+          }));
+          // The whole graph's issues change with it (a duplicate id that's
+          // now alone, a "Triggered by" whose trigger is gone).
+          get().validateAllNodes();
+        },
 
-        removeNodes: (nodeIds) =>
+        removeNodes: (nodeIds) => {
           set((state) => {
             const idSet = new Set(nodeIds);
             return {
@@ -895,7 +1079,9 @@ export const useFlowStore = create<FlowState>()(
                   : state.selectedNodeId,
               hasUnsavedChanges: true,
             };
-          }),
+          });
+          get().validateAllNodes();
+        },
 
         removeEdge: (edgeId) =>
           set((state) => ({
@@ -918,6 +1104,11 @@ export const useFlowStore = create<FlowState>()(
         selectNode: (nodeId) => set({ selectedNodeId: nodeId }),
         notifyNodeDoubleClicked: () =>
           set((state) => ({ nodeDoubleClickSignal: state.nodeDoubleClickSignal + 1 })),
+        openPanelFor: (nodeId) =>
+          set((state) => ({ selectedNodeId: nodeId, openPanelSignal: state.openPanelSignal + 1 })),
+        toggleMinimap: () => set((state) => ({ minimapOpen: !state.minimapOpen })),
+        requestFromPalette: (kind) =>
+          set((state) => ({ paletteRequest: { kind, n: (state.paletteRequest?.n ?? 0) + 1 } })),
         requestNodeEdit: (kind, nodeId) => set({ nodeEditRequest: { kind, nodeId } }),
         clearNodeEditRequest: () => set({ nodeEditRequest: null }),
 
@@ -934,8 +1125,7 @@ export const useFlowStore = create<FlowState>()(
           })),
         setUserVariables: (variables) =>
           set({
-            userVariables:
-              variables && Object.keys(variables).length > 0 ? variables : undefined,
+            userVariables: variables && Object.keys(variables).length > 0 ? variables : undefined,
             hasUnsavedChanges: true,
           }),
 
@@ -997,21 +1187,9 @@ export const useFlowStore = create<FlowState>()(
             const { FlowTranspiler } = await import('@circuitry/transpiler');
             const transpiler = new FlowTranspiler();
 
-            // Validate first
-            const validation = transpiler.validate(graph);
-
-            if (validation.errors.length > 0) {
-              console.error('Circuitry: Validation errors:', validation.errors);
-              throw new Error(
-                `Validation failed: ${validation.errors.map((e) => e.message).join(', ')}`
-              );
-            }
-
-            // Transpile to automation config
-            const result = transpiler.transpile(graph);
-            if (!result.success || !result.output?.automation) {
-              throw new Error('Failed to transpile flow to automation config');
-            }
+            // Validate and transpile: a flow that can't be saved throws
+            // with the transpiler's reasons.
+            const result = transpileForSave(transpiler, graph);
 
             // Create automation in Home Assistant
             const automationConfig = buildAutomationConfig(
@@ -1106,19 +1284,9 @@ export const useFlowStore = create<FlowState>()(
             const { FlowTranspiler } = await import('@circuitry/transpiler');
             const transpiler = new FlowTranspiler();
 
-            // Validate first
-            const validation = transpiler.validate(graph);
-            if (validation.errors.length > 0) {
-              throw new Error(
-                `Validation failed: ${validation.errors.map((e) => e.message).join(', ')}`
-              );
-            }
-
-            // Transpile to automation config
-            const result = transpiler.transpile(graph);
-            if (!result.success || !result.output?.automation) {
-              throw new Error('Failed to transpile flow to automation config');
-            }
+            // Validate and transpile: a flow that can't be saved throws
+            // with the transpiler's reasons.
+            const result = transpileForSave(transpiler, graph);
 
             // Update automation in Home Assistant
             const automationConfig = buildAutomationConfig(
@@ -1132,12 +1300,7 @@ export const useFlowStore = create<FlowState>()(
             // Option 1: keep the canonical graph in sync with every save.
             // Best-effort, same rationale as saveAutomation above.
             try {
-              await saveGraph(
-                api,
-                state.automationId,
-                graph,
-                computeSourceHash(automationConfig)
-              );
+              await saveGraph(api, state.automationId, graph, computeSourceHash(automationConfig));
               // eslint-disable-next-line no-console -- deliberate diagnostic,
               // see the matching log in useLoadAutomation.ts.
               console.info('Circuitry: saved canonical graph for automation', state.automationId);
@@ -1592,9 +1755,12 @@ export const useFlowStore = create<FlowState>()(
           const node = state.nodes.find((n) => n.id === nodeId);
           if (!node || !node.type) return;
 
-          const { errors, warnings } = splitIssues(
-            editorNodeIssues(node.type, node.data as Record<string, unknown>, serviceRequiredFields)
-          );
+          // With the issues only the whole graph shows (#165: re-validating
+          // one node alone used to drop its duplicate-id error).
+          const { errors, warnings } = splitIssues([
+            ...nodeIssues(node.type, node.data as Record<string, unknown>),
+            ...(graphIssues(state.nodes).get(nodeId) ?? []),
+          ]);
 
           set((s) => {
             const newErrors = new Map(s.nodeErrors);
@@ -1615,15 +1781,18 @@ export const useFlowStore = create<FlowState>()(
           for (const node of state.nodes) {
             if (!node.type) continue;
             const { errors, warnings } = splitIssues(
-              editorNodeIssues(node.type, node.data as Record<string, unknown>, serviceRequiredFields)
+              nodeIssues(node.type, node.data as Record<string, unknown>)
             );
             if (errors.length > 0) newErrors.set(node.id, errors);
             if (warnings.length > 0) newWarnings.set(node.id, warnings);
           }
 
-          const duplicateIdErrors = findDuplicateIdErrors(state.nodes);
-          for (const [nodeId, error] of duplicateIdErrors) {
-            newErrors.set(nodeId, [...(newErrors.get(nodeId) ?? []), error]);
+          for (const [nodeId, issues] of graphIssues(state.nodes)) {
+            const { errors, warnings } = splitIssues(issues);
+            if (errors.length > 0)
+              newErrors.set(nodeId, [...(newErrors.get(nodeId) ?? []), ...errors]);
+            if (warnings.length > 0)
+              newWarnings.set(nodeId, [...(newWarnings.get(nodeId) ?? []), ...warnings]);
           }
 
           set({ nodeErrors: newErrors, nodeWarnings: newWarnings });
@@ -1631,6 +1800,11 @@ export const useFlowStore = create<FlowState>()(
 
         setServiceRequiredFields: (fields) => {
           serviceRequiredFields = fields;
+          get().validateAllNodes();
+        },
+
+        setServiceTargets: (context) => {
+          serviceTargets = context;
           get().validateAllNodes();
         },
 
@@ -1734,3 +1908,8 @@ export const useFlowStore = create<FlowState>()(
     }
   )
 );
+
+// A node of a type discovered from the connected HA is checked against HA's
+// description of it (nodeIssues), which arrives after the flow may have
+// loaded: check every node again when the descriptions change.
+useNativeDescriptionsStore.subscribe(() => useFlowStore.getState().validateAllNodes());

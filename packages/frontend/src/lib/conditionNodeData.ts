@@ -1,6 +1,7 @@
 import type { DeviceCondition } from '@/hooks/useDeviceAutomation';
 import type { ConditionBlock, ConditionRecipe } from '@/lib/conditionRecipes';
 import { conditionIsTargetless, defaultThreshold } from '@/lib/nativeThreshold';
+import { picksZone } from '@/lib/nativeZone';
 import { isRecord } from '@/lib/utils';
 
 /**
@@ -16,17 +17,48 @@ import { isRecord } from '@/lib/utils';
  */
 export type ConditionSelection =
   | { kind: 'block'; block: ConditionBlock }
-  | { kind: 'entityTarget'; entityId: string }
-  | { kind: 'recipe'; entityIds: string[]; recipe: ConditionRecipe }
+  | { kind: 'entityTarget'; entityIds: string[] }
+  | {
+      kind: 'recipe';
+      entityIds: string[];
+      recipe: ConditionRecipe;
+      /** A whole area as its target ("Anything in <room>"), instead of entities. */
+      areaId?: string;
+    }
   | { kind: 'deviceCondition'; condition: DeviceCondition };
+
+/** Whether picking this recipe asks for entities first: not for a
+ * condition with no target in HA and nothing else to pick; a zone
+ * occupancy condition's entities are its zones (as triggerNodeData.ts's
+ * triggerRecipeTakesEntities). */
+export function conditionRecipeTakesEntities(recipe: ConditionRecipe): boolean {
+  const { condition } = recipe.fields;
+  return !recipeIsTargetless(recipe) || picksZone('condition', condition);
+}
+
+/** Whether a recipe's type can target a whole area: one with a target that
+ * isn't its zones (as triggerNodeData.ts's triggerRecipeTakesArea). */
+export function conditionRecipeTakesArea(recipe: ConditionRecipe): boolean {
+  const { condition } = recipe.fields;
+  return (
+    condition.includes('.') && !recipeIsTargetless(recipe) && !picksZone('condition', condition)
+  );
+}
+
+/** Whether a recipe's type has no target: as HA describes it, for a type
+ * the tables don't know, else the tables'. */
+function recipeIsTargetless(recipe: ConditionRecipe): boolean {
+  return recipe.fields.targetless ?? conditionIsTargetless(recipe.fields.condition);
+}
 
 /** A new purpose-specific condition's options: a threshold type starts
  * with the threshold the panel shows (#124, #127). */
 function startingOptions(
   condition: unknown,
-  options: Record<string, unknown> | undefined
+  options: Record<string, unknown> | undefined,
+  thresholdless = false
 ): Record<string, unknown> | undefined {
-  if (typeof condition !== 'string' || !condition.includes('.')) return options;
+  if (typeof condition !== 'string' || !condition.includes('.') || thresholdless) return options;
   const threshold = options?.threshold ?? defaultThreshold('condition', condition);
   return threshold !== undefined ? { ...options, threshold } : options;
 }
@@ -46,7 +78,10 @@ export function buildConditionNodeData(selection: ConditionSelection): Record<st
     // elevation" started with none).
     case 'block': {
       const { data } = selection.block;
-      const options = startingOptions(data.condition, isRecord(data.options) ? data.options : undefined);
+      const options = startingOptions(
+        data.condition,
+        isRecord(data.options) ? data.options : undefined
+      );
       return { ...data, ...(options ? { options } : {}) };
     }
 
@@ -55,12 +90,17 @@ export function buildConditionNodeData(selection: ConditionSelection): Record<st
     // with the chosen entity, matching nodeTypeCatalog's own condition
     // node default shape (`{ condition: 'state', entity_id: '' }').
     case 'entityTarget':
-      return { condition: 'state', entity_id: [selection.entityId] };
+      return { condition: 'state', entity_id: selection.entityIds };
 
     case 'recipe': {
       const { entityIds, recipe } = selection;
       const { condition } = recipe.fields;
-      const options = startingOptions(condition, recipe.fields.options);
+      // A zone condition's picked entities are its zones; zone.in_zone/
+      // not_in_zone still need a target (the people and device trackers),
+      // which HA requires: an empty one, filled in the panel.
+      const zone = picksZone('condition', condition);
+      const picked = startingOptions(condition, recipe.fields.options, recipe.fields.thresholdless);
+      const options = zone && entityIds.length > 0 ? { ...picked, zone: entityIds } : picked;
       // Every recipe in lib/conditionRecipes.ts is a purpose-specific,
       // dotted `domain.is_*` condition (unlike triggers, there's no legacy
       // fallback branch to handle here — see that file's doc comment) —
@@ -68,7 +108,14 @@ export function buildConditionNodeData(selection: ConditionSelection): Record<st
       return {
         condition,
         // None for a condition with no target in HA (#118).
-        ...(conditionIsTargetless(condition) ? {} : { target: { entity_id: entityIds } }),
+        ...(recipeIsTargetless(recipe)
+          ? {}
+          : {
+              target:
+                selection.areaId && conditionRecipeTakesArea(recipe)
+                  ? { area_id: selection.areaId }
+                  : { entity_id: zone ? [] : entityIds },
+            }),
         ...(options ? { options } : {}),
       };
     }

@@ -1,4 +1,5 @@
 import type { FlowGraph } from '@circuitry/shared';
+import { load } from 'js-yaml';
 import { describe, expect, it } from 'vitest';
 import { FlowTranspiler } from '../FlowTranspiler';
 import { YamlParser } from '../parser/YamlParser';
@@ -786,7 +787,10 @@ describe('Nested Conditions', () => {
       expect(yaml).toContain('action: notify.mobile_app');
     });
 
-    it('should promote inverted condition (false-handle only) as condition: not', () => {
+    // #128: a condition wired only through its false handle stays in the
+    // actions as `if: C, then: [], else: ...` -- a top-level `not` stopped the
+    // automation when HA couldn't evaluate C, where the graph takes "no".
+    it('keeps an inverted condition (false-handle only) in the actions as if/else (#128)', () => {
       // trigger → cond1 (false only) → action
       // This represents an inverted condition: execute action when condition is NOT true
       const graph = createBaseGraph(
@@ -823,17 +827,14 @@ describe('Nested Conditions', () => {
 
       const yaml = result.yaml ?? '';
 
-      // Should be promoted to root conditions with "not" wrapper
-      expect(yaml).toContain('conditions:');
-      expect(yaml).toContain('condition: not');
-      expect(yaml).toContain('condition: state');
-      expect(yaml).not.toMatch(/^\s+if:/m);
-
-      // Action should be in actions block
-      expect(yaml).toContain('action: light.turn_on');
+      expect(yaml).not.toContain('condition: not');
+      const actions = (load(yaml) as { actions: Record<string, unknown>[] }).actions;
+      expect(actions).toHaveLength(1);
+      expect(actions[0].then).toEqual([]);
+      expect(JSON.stringify(actions[0].else)).toContain('light.turn_on');
     });
 
-    it('should promote chain of mixed true/false-handle conditions to root conditions', () => {
+    it('keeps a chain starting with a false-handle condition in the actions (#128)', () => {
       // trigger → cond1 (false only) → cond2 (true only) → action
       const graph = createBaseGraph(
         [
@@ -876,17 +877,16 @@ describe('Nested Conditions', () => {
 
       const yaml = result.yaml ?? '';
 
-      // cond1 (false-only) should be promoted as "not", cond2 (true-only) as-is
-      expect(yaml).toContain('conditions:');
-      expect(yaml).toContain('condition: not');
-      expect(yaml).toContain('condition: numeric_state');
-      expect(yaml).not.toMatch(/^\s+if:/m);
-
-      // Action should be in actions block
-      expect(yaml).toContain('action: light.turn_on');
+      // Nothing promoted: both tests stay in the actions (native writes the
+      // chain as a choose, whose skipped options HA treats as if/else does).
+      expect(yaml).not.toContain('condition: not');
+      const parsed = load(yaml) as { conditions?: unknown[]; actions: unknown[] };
+      expect(parsed.conditions ?? []).toEqual([]);
+      expect(JSON.stringify(parsed.actions)).toContain('numeric_state');
+      expect(JSON.stringify(parsed.actions)).toContain('light.turn_on');
     });
 
-    it('should promote multiple false-handle conditions as not wrappers', () => {
+    it('keeps multiple false-handle conditions in the actions as nested if/else (#128)', () => {
       // trigger → cond1 (false) → cond2 (false) → action
       const graph = createBaseGraph(
         [
@@ -929,16 +929,11 @@ describe('Nested Conditions', () => {
 
       const yaml = result.yaml ?? '';
 
-      // Both should be promoted as "not" wrappers
-      expect(yaml).toContain('conditions:');
-      expect(yaml).not.toMatch(/^\s+if:/m);
-
-      // Should have two "condition: not" entries
-      const notMatches = yaml.match(/condition: not/g);
-      expect(notMatches?.length).toBe(2);
-
-      // Action should be in actions block
-      expect(yaml).toContain('action: light.turn_on');
+      expect(yaml).not.toContain('condition: not');
+      const parsed = load(yaml) as { conditions?: unknown[]; actions: unknown[] };
+      expect(parsed.conditions ?? []).toEqual([]);
+      expect(JSON.stringify(parsed.actions)).toContain('light.bedroom');
+      expect(JSON.stringify(parsed.actions)).toContain('light.turn_on');
     });
   });
 
@@ -1325,17 +1320,16 @@ describe('Nested Conditions', () => {
 
       const yaml = result.yaml ?? '';
 
-      // Should have 'condition: or' for the combined parallel conditions
-      expect(yaml).toContain('condition: or');
-      expect(yaml).toContain('conditions:');
-
-      // Both conditions should be present inside the OR
-      expect(yaml).toContain('condition: state');
-      expect(yaml).toContain('condition: numeric_state');
-
-      // Should have the action in the else block (since false paths converge)
-      expect(yaml).toContain('action: notify.mobile_app');
-      expect(yaml).toContain('Both conditions failed');
+      // The "no" edges meet: the action runs when either test fails or
+      // can't be evaluated -- an AND of the tests with the action in its
+      // else (#128; an OR of `not`s raised the error instead).
+      expect(yaml).toContain('condition: and');
+      expect(yaml).not.toContain('condition: not');
+      const actions = (load(yaml) as { actions: Record<string, unknown>[] }).actions;
+      const gate = actions.find((a) => 'if' in a) as Record<string, unknown>;
+      expect(JSON.stringify(gate.if)).toContain('"condition":"state"');
+      expect(JSON.stringify(gate.if)).toContain('numeric_state');
+      expect(JSON.stringify(gate.else)).toContain('Both conditions failed');
     });
 
     it('should handle three parallel conditions converging to OR', () => {

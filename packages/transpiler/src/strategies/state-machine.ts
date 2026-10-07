@@ -8,8 +8,16 @@ import type {
 import { isStartNode } from '@circuitry/shared';
 import { findBackEdges, type TopologyAnalysis } from '../analyzer/topology';
 import { fanOutHash } from '../utils/fanOutHash';
+import { GraphClaimError } from '../utils/theOnly';
+import {
+  loopLimitStep,
+  loopRoundsStep,
+  loopRoundsVar,
+  RUN_ALIAS,
+  RUN_CHUNK,
+} from '../utils/stateMachineLoops';
 import { BaseStrategy, bareParallelBranch, type HAYamlOutput } from './base';
-import { NativeStrategy } from './native';
+import { classifyLoopBackEdge, NativeStrategy } from './native';
 
 /**
  * State Machine strategy for complex flows with cycles, cross-links, or converging paths
@@ -25,6 +33,16 @@ import { NativeStrategy } from './native';
  * - Converging paths (multiple paths merging)
  * - Complex state machines
  */
+/** A drawn loop's round count (#157): see StateMachineStrategy.loopBudgets. */
+interface LoopBudget {
+  index: number;
+  head: string;
+  region: string[];
+  /** Where the check goes: the head, or a while loop's list end. */
+  checkAt: string;
+  whileTest: boolean;
+}
+
 export class StateMachineStrategy extends BaseStrategy {
   readonly name = 'state-machine';
   readonly description =
@@ -115,9 +133,10 @@ export class StateMachineStrategy extends BaseStrategy {
     // Build choose blocks for each non-trigger, non-start node (start nodes,
     // like trigger nodes, are metadata-only entry markers and never a valid
     // `current_node` dispatch state)
+    const budgets = this.loopBudgets(flow);
     const nodeBlocks = flow.nodes
       .filter((n) => n.type !== 'trigger' && n.type !== 'start')
-      .map((node) => this.generateNodeBlock(flow, node));
+      .map((node) => this.withLoopBookkeeping(this.generateNodeBlock(flow, node), node, budgets));
 
     // Historical note (bug #18 investigation, 2026-09-25): this block used to
     // warn that an explicit Join node with 2+ incoming branches "may only
@@ -162,12 +181,45 @@ export class StateMachineStrategy extends BaseStrategy {
     // In HA automations, actions are a flat list - we use:
     // 1. A variables action to initialize state
     // 2. A repeat action with choose dispatcher
+    const dispatch = {
+      choose: chooseBlocks,
+      default: [
+        {
+          service: 'system_log.write',
+          data: {
+            message: 'Circuitry: Unknown state "{{ current_node }}", ending flow',
+            level: 'warning',
+          },
+        },
+        {
+          variables: {
+            current_node: 'END',
+          },
+        },
+      ],
+    };
+    // HA stops a `repeat: while/until` after 10,000 rounds and never stops
+    // a `repeat: count`. With a loop in the graph, each drawn loop keeps its
+    // own rounds (`loop_rounds_N`, counted at its head from the state that
+    // ran before, `prev_node`) and stops the run as HA would stop that loop;
+    // the dispatch loop runs in chunks under HA's limit, so it never stops
+    // a run itself (#157; #129 counted passes of the whole automation, which
+    // loops inside loops shared, and stopped count loops too).
+    const hasLoops = findBackEdges(flow).size > 0;
     const actionSequence: Record<string, unknown>[] = [
       // Initialize the state machine variables
       {
         variables: {
           current_node: entryNodeExpr,
           flow_context: {},
+          ...(hasLoops
+            ? {
+                prev_node: '',
+                this_node: '',
+                run_rounds: 0,
+                ...Object.fromEntries(budgets.map((b) => [loopRoundsVar(b.index), 0])),
+              }
+            : {}),
         },
       },
       // The main execution loop
@@ -175,25 +227,27 @@ export class StateMachineStrategy extends BaseStrategy {
         alias: 'State Machine Loop',
         repeat: {
           until: '{{ current_node == "END" }}',
-          sequence: [
-            {
-              choose: chooseBlocks,
-              default: [
+          sequence: hasLoops
+            ? [
+                { variables: { run_rounds: 0 } },
                 {
-                  service: 'system_log.write',
-                  data: {
-                    message: 'Circuitry: Unknown state "{{ current_node }}", ending flow',
-                    level: 'warning',
+                  alias: RUN_ALIAS,
+                  repeat: {
+                    until: `{{ current_node == "END" or run_rounds >= ${RUN_CHUNK} }}`,
+                    sequence: [
+                      {
+                        variables: {
+                          prev_node: '{{ this_node }}',
+                          this_node: '{{ current_node }}',
+                          run_rounds: '{{ run_rounds + 1 }}',
+                        },
+                      },
+                      dispatch,
+                    ],
                   },
                 },
-                {
-                  variables: {
-                    current_node: 'END',
-                  },
-                },
-              ],
-            },
-          ],
+              ]
+            : [dispatch],
         },
       },
     ];
@@ -427,7 +481,7 @@ export class StateMachineStrategy extends BaseStrategy {
       // same class of bug, just scoped to a trigger's own direct fan-out
       // targets instead of a mid-flow one.
       const convergenceSet = nativeSubBuilder.findConvergenceSetForBranches(flow, targets);
-      const convergenceBoundSet = convergenceSet.length > 0 ? new Set(convergenceSet) : null;
+      const convergenceBoundSet = this.fanOutBound(flow, targets, convergenceSet);
 
       // Build parallel action calls for all target nodes.
       //
@@ -745,11 +799,14 @@ export class StateMachineStrategy extends BaseStrategy {
     // splices the recursive call's own extraSteps in as more inline YAML,
     // rather than arbitrarily picking one sibling as "the" continuation.
     let convergenceSet = this.nativeSubBuilder.findConvergenceSetForBranches(flow, targetIds);
+    let boundSet = this.fanOutBound(flow, targetIds, convergenceSet);
     if (convergenceSet.length === 0) {
       const loopBack = this.findLoopBackConvergence(flow, targetIds);
-      if (loopBack) convergenceSet = [loopBack];
+      if (loopBack) {
+        convergenceSet = [loopBack];
+        boundSet = new Set(convergenceSet);
+      }
     }
-    const boundSet = convergenceSet.length > 0 ? new Set(convergenceSet) : null;
 
     // Branches that meet again before the boundary when not all of them do
     // are one branch (#99, NativeStrategy.buildParallelBranches).
@@ -768,6 +825,232 @@ export class StateMachineStrategy extends BaseStrategy {
     const inner = this.buildFanOutFromTargets(flow, convergenceSet);
     extraSteps.push(...inner.extraSteps);
     return { extraSteps, nextNode: inner.nextNode };
+  }
+
+  /**
+   * Decision D4: where a fan-out's branches stop, given where they meet
+   * (`convergenceSet`, forward edges): there, and at anything after it. A
+   * branch that runs on into a step after the meeting point, through a
+   * step that isn't part of it (P and Q meet at M1, Q also leads to M2, M1
+   * and M2 meet at Z), stops at that step, which runs once after the
+   * meeting point, as drawn: when it runs on every way on from there.
+   * When it doesn't, no tree writes it (the branch runs it, the steps after
+   * the meeting point maybe again) and the graph is refused. Each branch
+   * used to run on into Z, which ran again after M1.
+   */
+  private fanOutBound(
+    flow: FlowGraph,
+    targetIds: string[],
+    convergenceSet: string[]
+  ): Set<string> | null {
+    if (convergenceSet.length === 0) return null;
+    const backEdgeIds = findBackEdges(flow);
+    const edgesOut = (id: string) =>
+      this.getOutgoingEdges(flow, id).filter((e) => e.type !== 'hint' && e.type !== 'choose-hint');
+    const forward = (id: string) =>
+      edgesOut(id)
+        .filter((e) => !backEdgeIds.has(e.id))
+        .map((e) => e.target);
+    const after = new Set<string>();
+    const queue = [...convergenceSet];
+    while (queue.length > 0) {
+      const id = queue.shift()!;
+      if (after.has(id)) continue;
+      after.add(id);
+      queue.push(...forward(id));
+    }
+    // The steps after the meeting point the branches run into.
+    const cuts = new Set<string>();
+    const seen = new Set<string>();
+    const walk = [...targetIds];
+    while (walk.length > 0) {
+      const id = walk.shift()!;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      if (after.has(id)) {
+        if (!convergenceSet.includes(id)) cuts.add(id);
+        continue;
+      }
+      walk.push(...forward(id));
+    }
+    for (const cut of cuts) {
+      if (!convergenceSet.some((id) => this.alwaysReaches(flow, id, cut, edgesOut, backEdgeIds))) {
+        const name = flow.nodes.find((n) => n.id === cut)?.data.alias ?? cut;
+        throw new GraphClaimError(
+          `a branch of a parallel leads to "${String(name)}", which also comes after where the ` +
+            `branches meet, but only on some paths from there. Connect the branch to where the ` +
+            `branches meet, or make "${String(name)}" run on every path after that point`
+        );
+      }
+    }
+    return after;
+  }
+
+  /**
+   * Whether every way on from `from` runs `target`: a condition needs both
+   * its sides to (a side left unwired ends the path), a step with several
+   * edges (a parallel) needs one of them to, and a path that ends doesn't.
+   * A step whose only edges go back to a loop's test returns there: the
+   * test's way out decides. Forward edges otherwise.
+   */
+  private alwaysReaches(
+    flow: FlowGraph,
+    from: string,
+    target: string,
+    edgesOut: (id: string) => FlowEdge[],
+    backEdgeIds: Set<string>,
+    memo = new Map<string, boolean>()
+  ): boolean {
+    if (from === target) return true;
+    const known = memo.get(from);
+    if (known !== undefined) return known;
+    memo.set(from, false);
+    const edges = edgesOut(from);
+    const ahead = edges.filter((e) => !backEdgeIds.has(e.id));
+    const reaches = (e: FlowEdge) =>
+      backEdgeIds.has(e.id) ||
+      this.alwaysReaches(flow, e.target, target, edgesOut, backEdgeIds, memo);
+    const node = flow.nodes.find((n) => n.id === from);
+    let result: boolean;
+    if (edges.length === 0) result = false;
+    else if (ahead.length === 0) result = true;
+    else if (node?.type === 'condition') {
+      const side = (handle: string) => edges.filter((e) => e.sourceHandle === handle);
+      result =
+        side('true').length > 0 && side('false').length > 0 && edges.every((e) => reaches(e));
+    } else result = ahead.some((e) => reaches(e));
+    memo.set(from, result);
+    return result;
+  }
+
+  /**
+   * #157: each drawn loop's budget, by its head (where its back edges go).
+   * A loop all of whose back edges close a count loop has none (HA never
+   * stops a `repeat: count`). A while loop's test is checked where it
+   * passes -- in its condition list's last member's yes side -- so a loop
+   * that has run 10,000 rounds and then fails its test ends normally; any
+   * other (an until, a loop drawn by hand) is checked as a round starts.
+   * `region`: the states inside the loop, from which arriving at the head
+   * means it goes round again.
+   */
+  private loopBudgets(flow: FlowGraph): LoopBudget[] {
+    const backEdgeIds = findBackEdges(flow);
+    const edges = flow.edges.filter((e) => e.type !== 'hint' && e.type !== 'choose-hint');
+    const byId = new Map(flow.nodes.map((n) => [n.id, n]));
+    const forwardOut = (id: string) =>
+      edges.filter((e) => e.source === id && !backEdgeIds.has(e.id));
+    const heads = [...new Set(edges.filter((e) => backEdgeIds.has(e.id)).map((e) => e.target))].sort();
+    const budgets: LoopBudget[] = [];
+    for (const head of heads) {
+      const headNode = byId.get(head);
+      const into = edges.filter((e) => backEdgeIds.has(e.id) && e.target === head);
+      if (!headNode) continue;
+      const kinds = into.map((e) => {
+        const source = byId.get(e.source);
+        return source ? classifyLoopBackEdge(source, headNode, e.sourceHandle) : null;
+      });
+      if (kinds.every((k) => k === 'count')) continue;
+      const fromHead = new Set<string>();
+      const queue = [head];
+      while (queue.length > 0) {
+        const id = queue.shift()!;
+        if (fromHead.has(id)) continue;
+        fromHead.add(id);
+        queue.push(...forwardOut(id).map((e) => e.target));
+      }
+      const region = new Set(into.map((e) => e.source));
+      const back = [...region];
+      while (back.length > 0) {
+        const id = back.shift()!;
+        for (const e of edges) {
+          if (e.target !== id || backEdgeIds.has(e.id) || region.has(e.source)) continue;
+          if (!fromHead.has(e.source)) continue;
+          region.add(e.source);
+          back.push(e.source);
+        }
+      }
+      const isWhile = kinds.some((k) => k === 'while' || k === 'while-body-exit');
+      budgets.push({
+        index: budgets.length + 1,
+        head,
+        region: [...region].sort(),
+        checkAt: isWhile ? this.whileListEnd(flow, head, forwardOut, backEdgeIds) : head,
+        whileTest: isWhile,
+      });
+    }
+    return budgets;
+  }
+
+  /** The last member of a while loop's condition list (its yes side enters
+   * the body): conditions chained on yes edges with no `_blockKey`, one
+   * way in, and no "no" edge or the head's own exits. */
+  private whileListEnd(
+    flow: FlowGraph,
+    head: string,
+    forwardOut: (id: string) => FlowEdge[],
+    backEdgeIds: Set<string>
+  ): string {
+    const exitKey = (targets: string[]) => [...new Set(targets)].sort().join('\u0000');
+    const headExits = exitKey(
+      forwardOut(head)
+        .filter((e) => e.sourceHandle === 'false')
+        .map((e) => e.target)
+    );
+    const chain = [head];
+    let current = head;
+    while (true) {
+      const yes = forwardOut(current).filter((e) => e.sourceHandle === 'true');
+      if (yes.length !== 1) break;
+      const next = flow.nodes.find((n) => n.id === yes[0].target);
+      if (next?.type !== 'condition' || chain.includes(next.id)) break;
+      if (typeof (next.data as Record<string, unknown>)._blockKey === 'string') break;
+      const waysIn = flow.edges.filter(
+        (e) =>
+          e.target === next.id && !backEdgeIds.has(e.id) && e.type !== 'hint' && e.type !== 'choose-hint'
+      );
+      if (waysIn.length !== 1) break;
+      const no = flow.edges.filter(
+        (e) =>
+          e.source === next.id && e.sourceHandle === 'false' && e.type !== 'hint' && e.type !== 'choose-hint'
+      );
+      const noForward = no.filter((e) => !backEdgeIds.has(e.id));
+      const foldable =
+        no.length === 0 ||
+        (headExits !== '' &&
+          noForward.length === no.length &&
+          exitKey(noForward.map((e) => e.target)) === headExits);
+      if (!foldable) break;
+      chain.push(next.id);
+      current = next.id;
+    }
+    return current;
+  }
+
+  /** A state's block with its loop bookkeeping (#157): a loop head counts
+   * its round first; the check stops the run before a round past HA's
+   * limit (a while loop's on its test's yes side). */
+  private withLoopBookkeeping(
+    block: Record<string, unknown>,
+    node: FlowNode,
+    budgets: LoopBudget[]
+  ): Record<string, unknown> {
+    let sequence = Array.isArray(block.sequence) ? [...block.sequence] : [];
+    for (const budget of budgets) {
+      if (budget.checkAt === node.id && budget.whileTest) {
+        sequence = sequence.map((step) => {
+          const record = step as Record<string, unknown>;
+          return 'if' in record && Array.isArray(record.then)
+            ? { ...record, then: [loopLimitStep(budget.index), ...record.then] }
+            : step;
+        });
+      }
+    }
+    const atHead = budgets.filter((b) => b.head === node.id);
+    const first = atHead.flatMap((b) => [
+      loopRoundsStep(b.index, b.region),
+      ...(b.whileTest ? [] : [loopLimitStep(b.index)]),
+    ]);
+    return { ...block, sequence: [...first, ...sequence] };
   }
 
   /** One branch of a fan-out's `parallel:` as a step: a single step as

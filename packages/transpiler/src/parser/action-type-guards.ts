@@ -270,7 +270,8 @@ function parallelBranchContainer(branch: unknown): unknown {
  * it ends a list that was ending anyway (HA runs each nested list as its
  * own script). An if with nothing in either branch does nothing either
  * (conditions have no side effects), a `condition: trigger` one included,
- * unless its `enabled:` is a template (kept as written, bug #70). Removed from
+ * and so does a parallel whose branches all do nothing (#138), unless its
+ * `enabled:` is a template (kept as written, bug #70). Removed from
  * the innermost lists out, so a branch that held only such steps is an
  * empty branch, and every block reads it the way it reads an empty one.
  * Needs the lists normalizeActionLists makes.
@@ -347,6 +348,16 @@ function stepWithoutNoOps(step: unknown): unknown {
       const kept = stepWithoutNoOps(branch);
       return kept === NO_OP_STEP ? [] : kept;
     });
+    // A parallel whose branches all run nothing (`parallel: []` included,
+    // which HA takes; a `null` branch is an empty one to HA) does nothing
+    // either. Kept, a loop body or a Choose default of such blocks made no
+    // node: the loop was lost, the default went nowhere (#138).
+    if (
+      typeof out.enabled !== 'string' &&
+      (out.parallel as unknown[]).every((branch) => toList(branch).length === 0)
+    ) {
+      return NO_OP_STEP;
+    }
   }
   return out;
 }
@@ -470,7 +481,7 @@ export function isUnexpandableCountRepeat(action: unknown): action is Record<str
  * reason to keep a step as written. */
 const REMOVED_BY_HA = new Set(['note', 'metadata']);
 
-const isMapping = (value: unknown): boolean =>
+export const isMapping = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === 'object' && !Array.isArray(value);
 
 /**
@@ -485,7 +496,10 @@ const isMapping = (value: unknown): boolean =>
  *   service ran with no target);
  * - an event with `event_data_template` or a non-mapping `event_data`
  *   (bug #90: dropped), a `variables` or `set_conversation_response` step
- *   with any key its node doesn't hold (`continue_on_error`, ...);
+ *   with any key its node doesn't hold (`continue_on_error`, ...), and a
+ *   `variables` step whose value isn't names and values (`null`, a list:
+ *   #139, it failed the graph's schema or became `{}`; HA refuses it, as
+ *   it refuses the source);
  * - a `choose:` with no options, or with an always-true option (`conditions:
  *   []`) that has another option or a default after it (bug #98, found by
  *   the H1 audit): HA runs the first option that passes, so nothing after
@@ -494,13 +508,22 @@ const isMapping = (value: unknown): boolean =>
  *   dropped it, with a warning, when there was a default), and a choose
  *   with no options couldn't be imported after a block with several ways
  *   out. An always-true last option with no default is still the default.
+ * - a `choose:` with an option that isn't a mapping (`choose: [null]`):
+ *   HA refuses it, as it refuses the source; the option was dropped, so a
+ *   choose HA refuses was written as one it runs, or as a step that
+ *   couldn't be saved (#146).
+ * - a `stop:` whose reason isn't text (`stop: null`, which HA takes): the
+ *   Stop node holds text, and it was written as `stop: ""` (#144);
+ * - an `if:` with no conditions (`if: []`, and `if: null`, an empty list
+ *   to HA), which always runs its `then`: the canvas has no If without a
+ *   test, and the import failed with an internal error (#145).
  */
 export function isStepKeptAsWritten(action: unknown): action is Record<string, unknown> {
   if (!isMapping(action)) return false;
   const step = action as Record<string, unknown>;
   if (isChooseAction(action)) {
     const options = toList(step.choose);
-    if (options.length === 0) return true;
+    if (options.length === 0 || !options.every(isMapping)) return true;
     const always = options.findIndex(
       (option) =>
         isMapping(option) &&
@@ -539,7 +562,11 @@ export function isStepKeptAsWritten(action: unknown): action is Record<string, u
       typeof step.set_conversation_response !== 'string'
     );
   }
-  if (isVariablesAction(action)) return !onlyKeys(['variables', 'alias', 'enabled']);
+  if (isVariablesAction(action)) {
+    return !onlyKeys(['variables', 'alias', 'enabled']) || !isMapping(step.variables);
+  }
+  if (isStopAction(action)) return typeof step.stop !== 'string';
+  if (isIfThenAction(action)) return conditionList(step.if).length === 0;
   return false;
 }
 

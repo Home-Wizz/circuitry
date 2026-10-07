@@ -1,7 +1,17 @@
-import type { CircuitryMetadata, FlowEdge, FlowGraph, FlowNode } from '@circuitry/shared';
+import type {
+  CircuitryMetadata,
+  FlowEdge,
+  FlowGraph,
+  FlowGraphMetadata,
+  FlowNode,
+} from '@circuitry/shared';
 import {
+  AutomationModeSchema,
   FlowGraphMetadataSchema,
   FlowGraphSchema,
+  haBoolean,
+  haCoerceAutomation,
+  MaxExceededSchema,
   validateGraphStructure,
 } from '@circuitry/shared';
 import { load as yamlLoad } from 'js-yaml';
@@ -221,6 +231,10 @@ async parse(yamlString: string): Promise<ParseResult> {
       };
     }
 
+    // Values HA coerces (`continue_on_error: "yes"`, `alias: 5`,
+    // `conditions: null`, ...) read as HA reads them (#144).
+    parsed = haCoerceAutomation(parsed);
+
     // Step 2: Extract Circuitry metadata if present
     const metadata = extractMetadata(parsed, warnings);
     const hadMetadata = metadata !== null;
@@ -272,8 +286,10 @@ async parse(yamlString: string): Promise<ParseResult> {
     const isStateMachine =
       metadata?.strategy === 'state-machine' || detectStateMachineFormat(content);
 
-    // Step 6: Parse nodes and edges from YAML structure
-    const { nodes, edges } = isStateMachine
+    // Step 6: Parse nodes and edges from YAML structure. A state machine
+    // edited outside Circuitry into something its reader would read only in
+    // part is read as the plain YAML it is: every step kept, as HA runs it.
+    const machine = isStateMachine
       ? parseStateMachineStructure(
           content,
           warnings,
@@ -281,7 +297,17 @@ async parse(yamlString: string): Promise<ParseResult> {
           metadata?.fan_outs,
           metadata?.markers
         )
-      : parseAutomationStructure(content, warnings, metadataNodeIds);
+      : null;
+    if (machine?.unread) {
+      warnings.push(
+        `This automation's state machine was edited outside Circuitry (${machine.unread}), so it ` +
+          'opens as the plain steps Home Assistant runs, not as the flow it was saved from.'
+      );
+    }
+    const { nodes, edges } =
+      machine && !machine.unread
+        ? machine
+        : parseAutomationStructure(content, warnings, metadataNodeIds);
 
     return { ok: true, nodes, edges, metadata, hadMetadata, content, userVariables };
   }
@@ -303,19 +329,7 @@ async parse(yamlString: string): Promise<ParseResult> {
     warnings: string[]
   ): ParseResult {
     // Step 8: Build FlowGraph object
-    // Validate and parse metadata block using FlowGraphMetadataSchema
-    const rawMetadata = {
-      mode: content.mode,
-      max: content.max,
-      max_exceeded: content.max_exceeded,
-      initial_state: content.initial_state,
-      hide_entity: content.hide_entity,
-      trace: content.trace,
-    };
-    const metadataResult = FlowGraphMetadataSchema.safeParse(rawMetadata);
-    const metadataBlock = metadataResult.success
-      ? metadataResult.data
-      : FlowGraphMetadataSchema.parse({});
+    const metadataBlock = readAutomationSettings(content, warnings);
 
     const userTriggerVariables =
       typeof content.trigger_variables === 'object' &&
@@ -395,3 +409,77 @@ async parse(yamlString: string): Promise<ParseResult> {
 
 // Export singleton instance
 export const yamlParser = new YamlParser();
+
+/** Python's `int()`, which HA's `vol.Coerce(int)` calls: a number (a
+ * fraction cut short), a boolean (1 or 0), or text of a whole number
+ * (spaces around it and `_` between digits allowed). */
+function pythonInt(value: unknown): number | undefined {
+  if (typeof value === 'boolean') return Number(value);
+  if (typeof value === 'number' && Number.isFinite(value)) return Math.trunc(value);
+  if (typeof value === 'string' && /^\s*[+-]?\d+(_\d+)*\s*$/.test(value)) {
+    return Number(value.replaceAll('_', ''));
+  }
+  return undefined;
+}
+
+/** HA's `vol.All(vol.Coerce(int), vol.Range(min=...))`. */
+function haInt(value: unknown, min: number): number | undefined {
+  const n = pythonInt(value);
+  return n !== undefined && n >= min ? n : undefined;
+}
+
+/** `max_exceeded`, read as HA does (any case; `fatal` and `warn` are other
+ * names of `critical` and `warning`, the same log level; `notset` is a
+ * level of its own). */
+function haMaxExceeded(value: unknown): FlowGraphMetadata['max_exceeded'] {
+  if (typeof value !== 'string') return undefined;
+  const lower = value.toLowerCase();
+  const named = lower === 'fatal' ? 'critical' : lower === 'warn' ? 'warning' : lower;
+  const result = MaxExceededSchema.safeParse(named);
+  return result.success ? result.data : undefined;
+}
+
+/**
+ * The automation's settings (mode, max, max_exceeded, initial_state,
+ * hide_entity, trace), each read the way HA reads it (#137): HA coerces
+ * `max: "10"`, `initial_state: "off"`, `stored_traces: "5"`, and before
+ * this one such value made the whole block be dropped, so the automation
+ * came back `mode: single` with none of them. A value HA wouldn't take
+ * either is left out, with a warning; the others are kept.
+ */
+function readAutomationSettings(
+  content: Record<string, unknown>,
+  warnings: string[]
+): FlowGraphMetadata {
+  const settings: Record<string, unknown> = {};
+  const dropped = (key: string) =>
+    warnings.push(
+      `The automation's \`${key}\` (${JSON.stringify(content[key])}) isn't one Home Assistant takes; left out.`
+    );
+  const read = <T>(key: string, parse: (v: unknown) => T | undefined) => {
+    // Absent: HA's default. Given, even as `null`, HA validates it (and
+    // refuses a null for every one of these).
+    if (content[key] === undefined) return;
+    const value = parse(content[key]);
+    if (value === undefined) dropped(key);
+    else settings[key] = value;
+  };
+  read('mode', (v) => {
+    const result = AutomationModeSchema.safeParse(v);
+    return result.success ? result.data : undefined;
+  });
+  // HA: max is vol.All(vol.Coerce(int), vol.Range(min=2)), stored_traces
+  // cv.positive_int (0 or more).
+  read('max', (v) => haInt(v, 2));
+  read('max_exceeded', haMaxExceeded);
+  read('initial_state', haBoolean);
+  read('hide_entity', haBoolean);
+  read('trace', (v) => {
+    if (typeof v !== 'object' || v === null || Array.isArray(v)) return undefined;
+    const stored = (v as Record<string, unknown>).stored_traces;
+    if (stored === undefined) return {};
+    const count = haInt(stored, 0);
+    return count === undefined ? undefined : { stored_traces: count };
+  });
+  return FlowGraphMetadataSchema.parse(settings);
+}

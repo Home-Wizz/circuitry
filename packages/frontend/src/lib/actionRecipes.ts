@@ -112,7 +112,7 @@ function buildCategories(): EntityActionCategory[] {
     { id: 'mp_turn_on', label: 'Turn on media player', description: 'Turns on a media player.', service: 'media_player.turn_on' },
     { id: 'mp_turn_off', label: 'Turn off media player', description: 'Turns off a media player.', service: 'media_player.turn_off' },
     { id: 'mp_toggle', label: 'Toggle media player', description: 'Toggles a media player on or off.', service: 'media_player.toggle' },
-    { id: 'mp_play', label: 'Play media', description: 'Starts playback on a media player.', service: 'media_player.media_play' },
+    { id: 'mp_play', label: 'Play', description: 'Starts playback on a media player.', service: 'media_player.media_play' },
     { id: 'mp_pause', label: 'Pause media', description: 'Pauses playback on a media player.', service: 'media_player.media_pause' },
     { id: 'mp_play_pause', label: 'Play/Pause media', description: 'Toggles play and pause on a media player.', service: 'media_player.media_play_pause' },
     { id: 'mp_stop', label: 'Stop media', description: 'Stops playback on a media player.', service: 'media_player.media_stop' },
@@ -177,7 +177,7 @@ function buildCategories(): EntityActionCategory[] {
     { id: 'remote_learn_command', label: 'Learn remote command', description: 'Teaches a remote a new command.', service: 'remote.learn_command' },
   ]);
 
-  push('select', 'Dropdown', [
+  push('select', 'Select', [
     { id: 'select_select_option', label: 'Select dropdown option', description: 'Selects an option of a dropdown.', service: 'select.select_option' },
     { id: 'select_select_next', label: 'Select next option', description: 'Selects the next option of a dropdown.', service: 'select.select_next' },
     { id: 'select_select_previous', label: 'Select previous option', description: 'Selects the previous option of a dropdown.', service: 'select.select_previous' },

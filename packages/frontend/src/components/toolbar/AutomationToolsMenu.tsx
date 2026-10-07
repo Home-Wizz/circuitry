@@ -1,7 +1,8 @@
-import { Copy, Loader2, Pencil, Play, Power, Tags, Trash2, Wrench } from 'lucide-react';
+import { Copy, Loader2, Pencil, Play, Power, Settings2, Tags, Trash2, Wrench } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import {
   Dialog,
   DialogContent,
@@ -17,8 +18,8 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
+import { NameDialog } from '@/components/ui/name-dialog';
+import { AutomationSettingsPanel } from '@/components/panels/AutomationSettingsPanel';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useHass } from '@/contexts/HassContext';
 import { CategoryFallback, HaCategoryPicker } from '@/ha';
@@ -54,8 +55,11 @@ export function AutomationToolsMenu() {
 
   const [renameOpen, setRenameOpen] = useState(false);
   const [categoryOpen, setCategoryOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
-  const [busyAction, setBusyAction] = useState<'run' | 'toggle' | 'duplicate' | 'delete' | null>(null);
+  const [busyAction, setBusyAction] = useState<'run' | 'toggle' | 'duplicate' | 'delete' | null>(
+    null
+  );
 
   const api = hass ? getHomeAssistantAPI(hass) : null;
   // Resolved fresh on every render from `hass.states` (reactive, no extra
@@ -158,6 +162,10 @@ export function AutomationToolsMenu() {
             <Tags className="mr-2 h-4 w-4" />
             {t('common:toolsMenu.assignCategory')}
           </DropdownMenuItem>
+          <DropdownMenuItem onClick={() => setSettingsOpen(true)}>
+            <Settings2 className="mr-2 h-4 w-4" />
+            {t('common:toolsMenu.settings')}
+          </DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem disabled={!hasTarget || busyAction === 'run'} onClick={handleRun}>
             {busyAction === 'run' ? (
@@ -179,7 +187,10 @@ export function AutomationToolsMenu() {
             {isEnabled ? t('common:toolsMenu.disable') : t('common:toolsMenu.enable')}
           </DropdownMenuItem>
           <DropdownMenuSeparator />
-          <DropdownMenuItem disabled={!automationId || busyAction === 'duplicate'} onClick={handleDuplicate}>
+          <DropdownMenuItem
+            disabled={!automationId || busyAction === 'duplicate'}
+            onClick={handleDuplicate}
+          >
             {busyAction === 'duplicate' ? (
               <Loader2 className="mr-2 h-4 w-4 animate-spin" />
             ) : (
@@ -204,6 +215,17 @@ export function AutomationToolsMenu() {
       </DropdownMenu>
 
       <RenameAutomationDialog open={renameOpen} onOpenChange={setRenameOpen} />
+      {/* The automation's settings (run mode, traces, variables...), which
+          the side panel shows only with nothing selected. */}
+      <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
+        <DialogContent className="max-h-[85vh] max-w-lg overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>{t('common:automationSettings.title')}</DialogTitle>
+            <DialogDescription>{t('common:toolsMenu.settingsDescription')}</DialogDescription>
+          </DialogHeader>
+          <AutomationSettingsPanel inDialog />
+        </DialogContent>
+      </Dialog>
       <DeleteAutomationDialog
         open={deleteOpen}
         onOpenChange={setDeleteOpen}
@@ -212,7 +234,11 @@ export function AutomationToolsMenu() {
         onConfirm={handleDelete}
       />
       {hasTarget && entityId && (
-        <AssignCategoryDialog open={categoryOpen} onOpenChange={setCategoryOpen} entityId={entityId} />
+        <AssignCategoryDialog
+          open={categoryOpen}
+          onOpenChange={setCategoryOpen}
+          entityId={entityId}
+        />
       )}
     </>
   );
@@ -235,23 +261,14 @@ function RenameAutomationDialog({
   const { t } = useTranslation(['common', 'dialogs', 'errors']);
   const { hass } = useHass();
   const { flowName, automationId, setFlowName, updateAutomation } = useFlowStore();
-  const [name, setName] = useState(flowName);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (open) {
-      setName(flowName);
-      setError(null);
-    }
-  }, [open, flowName]);
+    if (open) setError(null);
+  }, [open]);
 
-  const handleSave = async () => {
-    const trimmed = name.trim();
-    if (!trimmed) {
-      setError(t('errors:form.nameRequired'));
-      return;
-    }
+  const handleSave = async (trimmed: string) => {
     setFlowName(trimmed);
     if (!automationId || !hass) {
       // Nothing saved yet — the new name is just local state now, picked up
@@ -273,37 +290,17 @@ function RenameAutomationDialog({
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-sm">
-        <DialogHeader>
-          <DialogTitle>{t('common:toolsMenu.renameDialogTitle')}</DialogTitle>
-          <DialogDescription>{t('common:toolsMenu.renameDialogDescription')}</DialogDescription>
-        </DialogHeader>
-        <div className="space-y-2">
-          <Label htmlFor="automation-rename">{t('dialogs:save.nameLabel')}</Label>
-          <Input
-            id="automation-rename"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            disabled={saving}
-            autoFocus
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') handleSave();
-            }}
-          />
-          {error && <p className="text-destructive text-sm">{error}</p>}
-        </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>
-            {t('common:buttons.cancel')}
-          </Button>
-          <Button onClick={handleSave} disabled={saving || !name.trim()}>
-            {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-            {t('common:buttons.save')}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <NameDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title={t('common:toolsMenu.renameDialogTitle')}
+      description={t('common:toolsMenu.renameDialogDescription')}
+      label={t('dialogs:save.nameLabel')}
+      initialName={flowName}
+      onSave={handleSave}
+      saving={saving}
+      error={error}
+    />
   );
 }
 
@@ -355,7 +352,9 @@ function AssignCategoryDialog({
       <DialogContent className="max-w-sm">
         <DialogHeader>
           <DialogTitle>{t('common:toolsMenu.assignCategory')}</DialogTitle>
-          <DialogDescription>{t('common:toolsMenu.assignCategoryDialogDescription')}</DialogDescription>
+          <DialogDescription>
+            {t('common:toolsMenu.assignCategoryDialogDescription')}
+          </DialogDescription>
         </DialogHeader>
 
         <HaCategoryPicker
@@ -373,7 +372,7 @@ function AssignCategoryDialog({
             />
           }
         />
-        {error && <p className="text-destructive text-sm">{error}</p>}
+        {error && <p className="text-destructive text-sm whitespace-pre-line">{error}</p>}
 
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>
@@ -408,26 +407,15 @@ function DeleteAutomationDialog({
   onConfirm: () => void;
 }) {
   const { t } = useTranslation(['common']);
-
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-sm">
-        <DialogHeader>
-          <DialogTitle>{t('common:toolsMenu.deleteDialogTitle')}</DialogTitle>
-          <DialogDescription>
-            {t('common:toolsMenu.deleteDialogDescription', { name: flowName })}
-          </DialogDescription>
-        </DialogHeader>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>
-            {t('common:buttons.cancel')}
-          </Button>
-          <Button variant="destructive" onClick={onConfirm} disabled={busy}>
-            {busy && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-            {t('common:buttons.delete')}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <ConfirmDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title={t('common:toolsMenu.deleteDialogTitle')}
+      description={t('common:toolsMenu.deleteDialogDescription', { name: flowName })}
+      confirmLabel={t('common:buttons.delete')}
+      onConfirm={onConfirm}
+      busy={busy}
+    />
   );
 }

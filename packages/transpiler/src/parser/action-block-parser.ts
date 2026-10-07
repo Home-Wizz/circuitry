@@ -48,7 +48,9 @@ import {
   transformConditions,
 } from './action-type-guards';
 import { mentionsLoopVariable } from '../analyzer/loop-variable';
+import { opensWithParallel } from '../utils/parallelBranch';
 import {
+  conditionAliases,
   conditionEnabledAsWritten,
   createEdge,
   createOpaqueStepNode,
@@ -328,6 +330,62 @@ export function parseActions(
     }
   };
 
+  // A `sequence:` group, or a frame (#141): a `choose:` or `parallel:`
+  // block's alias held on a marker pair around it, the canvas having no
+  // node for either block. Native writes a frame's alias back onto the one
+  // block inside it (detectSequencePatterns, buildSequenceBlock).
+  const parseGroup = (
+    alias: unknown,
+    ownEnabled: boolean | undefined,
+    steps: (HAAction | HACondition)[],
+    frame: boolean
+  ): void => {
+    const blockEnabled = getNodeEnabled(ownEnabled);
+    const startId = getNextNodeId('sequence_start');
+    nodes.push({
+      id: startId,
+      type: 'sequence_start',
+      position: { x: 0, y: 0 },
+      data: {
+        alias: typeof alias === 'string' ? alias : undefined,
+        enabled: blockEnabled,
+        ...(frame ? { _frame: true } : {}),
+      },
+    });
+    createEdgesFromCurrent(startId);
+
+    const nestedResult = parseActions(steps, {
+      warnings,
+      previousNodeIds: [startId],
+      getNextNodeId,
+      conditionNodeIds: localConditionNodeIds,
+      inheritedEnabled: blockEnabled,
+      nested: true,
+    });
+    nodes.push(...nestedResult.nodes);
+    edges.push(...nestedResult.edges);
+    // Propagate any condition nodes created inside so the edge into the
+    // end marker below (via createEdgesFromCurrent) uses the correct
+    // true/false handle (mirrors how repeat bodies propagate this).
+    for (const n of nestedResult.nodes) {
+      if (n.type === 'condition') localConditionNodeIds.add(n.id);
+    }
+    // Bug #31 (2026-09-26, found by yaml-shapes-fuzz): ...and the ones
+    // whose way OUT is their false handle -- a `repeat: count`/`while`
+    // test, an else-less if -- must say so, or the edge into the end
+    // marker hangs off the true handle. A group ending in a count loop
+    // then ended the whole automation after the loop (bug #11's class:
+    // the nested parse already knows which terminals exit on false).
+    for (const id of nestedResult.falsePathTerminalNodeIds) falsePathConditionIds.add(id);
+
+    const endId = getNextNodeId('sequence_end');
+    nodes.push({ id: endId, type: 'sequence_end', position: { x: 0, y: 0 }, data: {} });
+    currentNodeIds =
+      nestedResult.terminalNodeIds.length > 0 ? nestedResult.terminalNodeIds : [startId];
+    createEdgesFromCurrent(endId);
+    currentNodeIds = [endId];
+  };
+
   // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: large dispatch switch, refactoring deferred
   actions.forEach((action, index) => {
     if (restTakenByConditionStep) return;
@@ -376,7 +434,12 @@ export function parseActions(
       isConditionShorthandAction(action);
 
     // Handle different action types
-    if (isConditionStep && (nested || followsBlockYesExit())) {
+    if ((isChooseAction(action) || isParallelAction(action)) && typeof action.alias === 'string') {
+      // A named `choose:` or `parallel:`: framed (#141). The block itself,
+      // without its alias, is the frame's one step.
+      const { alias, ...block } = action;
+      parseGroup(alias, undefined, [block as HAAction], true);
+    } else if (isConditionStep && (nested || followsBlockYesExit())) {
       // A condition step in a nested list ends only that list when it
       // doesn't pass, so it is an if around the rest of the list, with no
       // else (bug #78; see ParseOptions.nested). Its own alias and
@@ -428,7 +491,8 @@ export function parseActions(
         position: { x: 0, y: 0 },
         data: {
           alias: typeof act.alias === 'string' ? act.alias : undefined,
-          variables: (act.variables as Record<string, unknown>) || {},
+          // A mapping: anything else is kept as written (isStepKeptAsWritten).
+          variables: act.variables as Record<string, unknown>,
           enabled: getNodeEnabled(stepEnabledAsWritten(act.enabled)),
         },
       };
@@ -646,8 +710,7 @@ export function parseActions(
           // A and B only, and was read back as L running twice. Parsed as
           // the `sequence:` group HA treats it as, the group's markers
           // keep the boundary.
-          const opensWithParallel = parallelItem.length > 1 && isParallelAction(parallelItem[0]);
-          const branchActions = opensWithParallel
+          const branchActions = opensWithParallel(parallelItem)
             ? [{ sequence: parallelItem } as Record<string, unknown>]
             : (parallelItem as Record<string, unknown>[]);
           const seqResult = parseActions(branchActions, {
@@ -797,7 +860,8 @@ export function parseActions(
         // - a loop with nothing in its body, which the canvas can't draw:
         //   decomposed, its test was left with no loop to belong to (an
         //   until loop's test became a condition on the whole automation;
-        //   bug #84);
+        //   bug #84; a body of steps that do nothing, an empty `parallel:`
+        //   among them, is an empty one by then: withoutNoOpSteps, #138);
         // - a loop whose test or body reads HA's loop variable
         //   (`repeat.index`, ...): the state machine writes a decomposed
         //   loop as states of its own dispatch loop, whose `repeat` that
@@ -818,9 +882,8 @@ export function parseActions(
             whileConditions[ci],
             'repeat while'
           );
-          if (ci === 0 && blockAlias) {
-            parsedData.alias = blockAlias;
-          }
+          // The loop's alias on its first test, the test's own beside it.
+          Object.assign(parsedData, conditionAliases(ci === 0, blockAlias, parsedData.alias));
           // Bug #32: keep the condition's own `enabled: false`.
           // (A disabled loop never gets here -- it's kept whole, bug #33.)
           parsedData.enabled = conditionEnabledAsWritten(whileConditions[ci], false);
@@ -1019,9 +1082,10 @@ export function parseActions(
             untilConditions[ci],
             'repeat until'
           );
-          if (ci === 0 && blockAlias && bodyResult.nodes.length === 0) {
-            parsedData.alias = blockAlias;
-          }
+          // The loop's alias, held on its first test as a while loop's is
+          // (#140: with anything in the body it was dropped), the test's
+          // own beside it.
+          Object.assign(parsedData, conditionAliases(ci === 0, blockAlias, parsedData.alias));
           // Bug #32: keep the condition's own `enabled: false`.
           // (A disabled loop never gets here -- it's kept whole, bug #33.)
           parsedData.enabled = conditionEnabledAsWritten(untilConditions[ci], false);
@@ -1332,52 +1396,12 @@ export function parseActions(
       // a user creates via the canvas's Sequence block, rather than
       // silently flattening it away.
       const act = action as Record<string, unknown>;
-      const blockEnabled = getNodeEnabled(
-        typeof act.enabled === 'boolean' ? act.enabled : undefined
+      parseGroup(
+        act.alias,
+        typeof act.enabled === 'boolean' ? act.enabled : undefined,
+        act.sequence as (HAAction | HACondition)[],
+        false
       );
-      const startId = getNextNodeId('sequence_start');
-      nodes.push({
-        id: startId,
-        type: 'sequence_start',
-        position: { x: 0, y: 0 },
-        data: {
-          alias: typeof act.alias === 'string' ? act.alias : undefined,
-          enabled: blockEnabled,
-        },
-      });
-      createEdgesFromCurrent(startId);
-
-      const nestedSequence = act.sequence as (HAAction | HACondition)[];
-      const nestedResult = parseActions(nestedSequence, {
-        warnings,
-        previousNodeIds: [startId],
-        getNextNodeId,
-        conditionNodeIds: localConditionNodeIds,
-        inheritedEnabled: blockEnabled,
-        nested: true,
-      });
-      nodes.push(...nestedResult.nodes);
-      edges.push(...nestedResult.edges);
-      // Propagate any condition nodes created inside so the edge into the
-      // end marker below (via createEdgesFromCurrent) uses the correct
-      // true/false handle (mirrors how repeat bodies propagate this).
-      for (const n of nestedResult.nodes) {
-        if (n.type === 'condition') localConditionNodeIds.add(n.id);
-      }
-      // Bug #31 (2026-09-26, found by yaml-shapes-fuzz): ...and the ones
-      // whose way OUT is their false handle -- a `repeat: count`/`while`
-      // test, an else-less if -- must say so, or the edge into the end
-      // marker hangs off the true handle. A group ending in a count loop
-      // then ended the whole automation after the loop (bug #11's class:
-      // the nested parse already knows which terminals exit on false).
-      for (const id of nestedResult.falsePathTerminalNodeIds) falsePathConditionIds.add(id);
-
-      const endId = getNextNodeId('sequence_end');
-      nodes.push({ id: endId, type: 'sequence_end', position: { x: 0, y: 0 }, data: {} });
-      currentNodeIds =
-        nestedResult.terminalNodeIds.length > 0 ? nestedResult.terminalNodeIds : [startId];
-      createEdgesFromCurrent(endId);
-      currentNodeIds = [endId];
     } else {
       // A step this parser doesn't know (`scene:`, the legacy
       // `service_template:`, a step type HA adds later): kept exactly as
@@ -1514,8 +1538,7 @@ export function parseChooseBlock(
           type: 'condition',
           position: { x: 0, y: 0 },
           data: {
-            // Only first condition in first choice gets the alias
-            alias: i === 0 ? choice.alias : undefined,
+            ...conditionAliases(i === 0, choice.alias, condition.alias),
             condition: conditionType,
             conditions: transformConditions(condition.conditions),
             // Preserve id for trigger conditions
@@ -1547,7 +1570,7 @@ export function parseChooseBlock(
         // Build object with alias override for first condition
         const looseObj = {
           ...condition,
-          alias: i === 0 ? (choice.alias ?? condition?.alias) : condition?.alias,
+          ...conditionAliases(i === 0, choice.alias, condition?.alias),
           condition: conditionType,
           enabled: conditionEnabled(condition),
         };
@@ -1902,8 +1925,7 @@ export function parseIfBlock(
         type: 'condition',
         position: { x: 0, y: 0 },
         data: {
-          // Only first condition gets the alias from ifAction
-          alias: i === 0 ? ifAction.alias : undefined,
+          ...conditionAliases(i === 0, ifAction.alias, condition.alias),
           condition: conditionType,
           conditions: transformConditions(condition.conditions),
           enabled: conditionEnabled(condition),
@@ -1925,8 +1947,7 @@ export function parseIfBlock(
       // Use Zod looseObject for normalization and type safety
       const looseObj = {
         ...condition,
-        // Only first condition gets the alias from ifAction
-        alias: i === 0 ? (ifAction.alias ?? condition?.alias) : condition?.alias,
+        ...conditionAliases(i === 0, ifAction.alias, condition?.alias),
         condition: conditionType,
         enabled: conditionEnabled(condition),
       };

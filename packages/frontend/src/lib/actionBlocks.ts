@@ -45,12 +45,33 @@ import type { CompoundBlockKey } from '@/lib/block-factories';
  *  data — the same shape YamlParser.ts's fallback "opaque repeat" branch
  *  already produces when importing a for_each block from existing YAML.
  */
+/** The blocks, by key. Their names and descriptions are Home Assistant's
+ * (`nodes:blocks.<key>`, from HA's own translations: "If-then", "Run in
+ * parallel", "Define variables", ...), except Wait for…, Circuitry's one
+ * row for HA's three waits (named as HA names them in its column). */
+export type ActionBlockKey =
+  | 'if_else'
+  | 'choose'
+  | 'repeat_count'
+  | 'repeat_while'
+  | 'repeat_until'
+  | 'repeat_for_each'
+  | 'parallel'
+  | 'wait_for'
+  | 'stop'
+  | 'set_variables'
+  | 'test_condition'
+  | 'fire_event'
+  | 'sequence';
+
 export interface ActionBlock {
-  key: string;
-  label: string;
-  description: string;
+  key: ActionBlockKey;
   commit:
-    | { kind: 'node'; type: string; data: Record<string, unknown> }
+    | {
+        kind: 'node';
+        type: 'action' | 'set_variables' | 'condition';
+        data: Record<string, unknown>;
+      }
     | { kind: 'compound'; compoundKey: CompoundBlockKey }
     // Doesn't commit anything itself — pushes a further column in the
     // dialog instead. Currently only 'wait_for' uses this, to offer
@@ -63,38 +84,26 @@ export interface ActionBlock {
 export const ACTION_BLOCKS: ActionBlock[] = [
   {
     key: 'if_else',
-    label: 'If / Else',
-    description: 'Branches into a "then" path and an "else" path based on a condition.',
     commit: { kind: 'compound', compoundKey: 'if_else' },
   },
   {
     key: 'choose',
-    label: 'Choose',
-    description: 'Runs the sequence under the first case whose conditions all pass, or a default sequence if none do.',
     commit: { kind: 'compound', compoundKey: 'choose' },
   },
   {
     key: 'repeat_count',
-    label: 'Repeat N×',
-    description: 'Runs a sequence of actions a fixed number of times.',
     commit: { kind: 'compound', compoundKey: 'repeat_count' },
   },
   {
     key: 'repeat_while',
-    label: 'Repeat while',
-    description: 'Repeats a sequence of actions for as long as a condition keeps passing.',
     commit: { kind: 'compound', compoundKey: 'repeat_while' },
   },
   {
     key: 'repeat_until',
-    label: 'Repeat until',
-    description: 'Repeats a sequence of actions at least once, until a condition passes.',
     commit: { kind: 'compound', compoundKey: 'repeat_until' },
   },
   {
     key: 'repeat_for_each',
-    label: 'Repeat for each',
-    description: 'Runs a sequence of actions once per item in a list, exposing each as the repeat.item variable.',
     // Opaque single-node form (like the 'stop' block below), not a compound
     // block — for_each has no natural per-iteration graph shape the way
     // count/while/until's condition-driven loops do, so it round-trips as a
@@ -130,14 +139,10 @@ export const ACTION_BLOCKS: ActionBlock[] = [
   },
   {
     key: 'parallel',
-    label: 'Parallel',
-    description: 'Runs multiple sequences of actions at the same time.',
     commit: { kind: 'compound', compoundKey: 'parallel' },
   },
   {
     key: 'wait_for',
-    label: 'Wait for…',
-    description: 'Pauses the automation — for a trigger to fire, a template to become true, or simply a fixed amount of time.',
     // Pushes a further column (template / trigger / time to pass) instead
     // of committing directly — consolidates what used to be three separate
     // top-level cards (Wait for trigger, Wait for template, Delay) into one.
@@ -146,8 +151,6 @@ export const ACTION_BLOCKS: ActionBlock[] = [
   },
   {
     key: 'stop',
-    label: 'Stop',
-    description: 'Stops the automation from running any further.',
     // Other action-shape fields explicitly cleared to undefined, not just
     // omitted — this commit can land on a node that already has data (e.g. an
     // If/Else branch placeholder from block-factories.ts, which defaults to
@@ -175,14 +178,10 @@ export const ACTION_BLOCKS: ActionBlock[] = [
   },
   {
     key: 'set_variables',
-    label: 'Set variables',
-    description: 'Sets one or more variables for use later in the automation.',
     commit: { kind: 'node', type: 'set_variables', data: { variables: {} } },
   },
   {
     key: 'test_condition',
-    label: 'Test a condition',
-    description: 'Stops the sequence right here unless a condition passes — reuses the same condition node as the AND dialog.',
     // A plain condition node with no "false" edge attached already transpiles
     // to an inline `condition:` guard step (see native.ts's buildCondition
     // usage for non-branching condition nodes) — no separate action-side
@@ -192,8 +191,6 @@ export const ACTION_BLOCKS: ActionBlock[] = [
   },
   {
     key: 'fire_event',
-    label: 'Fire an event',
-    description: "Fires a custom event on Home Assistant's event bus.",
     // service/target/data/stop explicitly cleared — same stale-placeholder-
     // field bug as 'stop' and 'repeat_for_each' above (see their comments):
     // this commit can merge onto a node that already carries a placeholder
@@ -219,8 +216,6 @@ export const ACTION_BLOCKS: ActionBlock[] = [
   },
   {
     key: 'sequence',
-    label: 'Sequence',
-    description: 'Bundles a chain of actions into one named group — useful for labeling a branch inside Parallel, or just for readability.',
     commit: { kind: 'compound', compoundKey: 'sequence' },
   },
 ];

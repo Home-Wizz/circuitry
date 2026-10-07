@@ -1,4 +1,9 @@
-import type { AutomationMode, MaxExceeded } from '@circuitry/shared';
+import {
+  type AutomationMode,
+  AutomationModeSchema,
+  type MaxExceeded,
+  MaxExceededSchema,
+} from '@circuitry/shared';
 import { Plus, Trash2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { FormField } from '@/components/forms/FormField';
@@ -17,11 +22,17 @@ import { Textarea } from '@/components/ui/textarea';
 import { HaSelect, HaSelector, HaSwitch } from '@/ha';
 import { useFlowStore } from '@/store/flow-store';
 
-const AUTOMATION_MODES: AutomationMode[] = ['single', 'restart', 'queued', 'parallel'];
-const MAX_EXCEEDED_OPTIONS: MaxExceeded[] = ['silent', 'critical', 'error', 'warning', 'info', 'debug'];
+const AUTOMATION_MODES: readonly AutomationMode[] = AutomationModeSchema.options;
+const MAX_EXCEEDED_OPTIONS: readonly MaxExceeded[] = MaxExceededSchema.options;
 const MODES_WITH_MAX = new Set<AutomationMode>(['queued', 'parallel']);
 
-export function AutomationSettingsPanel() {
+/**
+ * The automation's own settings: its name, description, initial state,
+ * run mode, traces and variables. Shown in the side panel when no step is
+ * selected, and in the Tools menu's Settings dialog (`inDialog`: no title
+ * of its own, no panel padding).
+ */
+export function AutomationSettingsPanel({ inDialog = false }: { inDialog?: boolean } = {}) {
   const { t } = useTranslation('common');
   const flowName = useFlowStore((s) => s.flowName);
   const flowDescription = useFlowStore((s) => s.flowDescription);
@@ -110,10 +121,12 @@ export function AutomationSettingsPanel() {
   };
 
   return (
-    <div className="h-full flex-1 space-y-4 overflow-y-auto p-4">
-      <h3 className="mt-1.5 font-semibold text-foreground text-sm">
-        {t('automationSettings.title')}
-      </h3>
+    <div className={inDialog ? 'space-y-4' : 'h-full flex-1 space-y-4 overflow-y-auto p-4'}>
+      {!inDialog && (
+        <h3 className="mt-1.5 font-semibold text-foreground text-sm">
+          {t('automationSettings.title')}
+        </h3>
+      )}
 
       <FormField label={t('labels.automationName')}>
         <Input
@@ -158,7 +171,10 @@ export function AutomationSettingsPanel() {
         <HaSelect
           value={mode}
           onChange={(v) => handleModeChange(String(v))}
-          options={AUTOMATION_MODES.map((m) => ({ value: m, label: t(`automationSettings.modes.${m}`) }))}
+          options={AUTOMATION_MODES.map((m) => ({
+            value: m,
+            label: t(`automationSettings.modes.${m}`),
+          }))}
           fallback={
             <Select value={mode} onValueChange={handleModeChange}>
               <SelectTrigger>

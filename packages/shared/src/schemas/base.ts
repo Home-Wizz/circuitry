@@ -48,9 +48,19 @@ export type AutomationMode = z.infer<typeof AutomationModeSchema>;
  * standard Python logging levels). Previously only `silent`/`warning`/
  * `critical` were representable here — missing `error` (the level right
  * below critical, arguably more commonly reached for than critical) and
- * `info`/`debug`.
+ * `info`/`debug`. `notset` is the logger's lowest level, which HA takes
+ * too (`fatal` and `warn`, its other names for `critical` and `warning`,
+ * are read as those).
  */
-export const MaxExceededSchema = z.enum(['silent', 'critical', 'error', 'warning', 'info', 'debug']);
+export const MaxExceededSchema = z.enum([
+  'silent',
+  'critical',
+  'error',
+  'warning',
+  'info',
+  'debug',
+  'notset',
+]);
 export type MaxExceeded = z.infer<typeof MaxExceededSchema>;
 
 /**

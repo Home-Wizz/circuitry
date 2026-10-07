@@ -18,6 +18,9 @@ export default defineConfig({
     // demand, not part of the initial payload — so the default 500 kB warning
     // is just noise here.
     chunkSizeWarningLimit: 1700,
+    // The step icons (src/assets/emoji) stay files, loaded as they're shown,
+    // instead of being inlined into the scripts as data URLs.
+    assetsInlineLimit: (file) => (file.includes('/assets/emoji/') ? false : undefined),
     rollupOptions: {
       input: {
         // Standalone dev preview only (`yarn dev` / index.html) — the real HA

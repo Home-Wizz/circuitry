@@ -5,7 +5,7 @@ import { FormField } from '@/components/forms/FormField';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { IdList } from '@/components/ui/IdList';
 import { HaSelector } from '@/ha';
-import { cn } from '@/lib/utils';
+import { cn, isRecord } from '@/lib/utils';
 
 export type TargetValue = {
   entity_id?: string | string[];
@@ -21,6 +21,9 @@ const toArray = (v: string | string[] | undefined): string[] =>
 interface NativeTargetFieldProps {
   target: TargetValue;
   onChange: (target: TargetValue) => void;
+  /** The type's described `target` (its entity filters), which the picker
+   * offers by, as HA's own editor does: HA ignores any other entity (#166). */
+  described?: unknown;
 }
 
 /**
@@ -38,7 +41,7 @@ interface NativeTargetFieldProps {
  * and `ha-selector`'s target type already combines all five kinds into one
  * widget.
  */
-export function NativeTargetField({ target, onChange }: NativeTargetFieldProps) {
+export function NativeTargetField({ target, onChange, described }: NativeTargetFieldProps) {
   const { t } = useTranslation(['nodes']);
   // Closed by default: most triggers/conditions arrive here already scoped
   // (picked via WhenTriggerDialog.tsx's "By target" flow, or its "By type"
@@ -83,7 +86,7 @@ export function NativeTargetField({ target, onChange }: NativeTargetFieldProps) 
         </CollapsibleTrigger>
         <CollapsibleContent className="pt-2">
           <HaSelector
-            selector={{ target: {} }}
+            selector={{ target: isRecord(described) ? described : {} }}
             value={target}
             onChange={(v) => onChange((v as TargetValue) ?? {})}
             fallback={

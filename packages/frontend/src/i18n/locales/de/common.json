@@ -36,7 +36,6 @@
     "speed": "Geschwindigkeit",
     "quickHelp": "Schnellhilfe",
     "debugControls": "Debug-Steuerung",
-    "addNode": "Knoten hinzufügen",
     "yamlOutput": "YAML-Ausgabe",
     "automationTrace": "Automatisierungs-Trace",
     "selectTraceRun": "Trace-Ausführung wählen:",
@@ -165,6 +164,13 @@
     "enable": "Aktivieren",
     "disable": "Deaktivieren",
     "disconnect": "Trennen",
+    "lineUpRow": "In einer Reihe ausrichten",
+    "lineUpColumn": "In einer Spalte ausrichten",
+    "zoomIn": "Vergrößern",
+    "zoomOut": "Verkleinern",
+    "fitView": "An Bildschirm anpassen",
+    "lock": "Arbeitsfläche sperren",
+    "unlock": "Arbeitsfläche entsperren",
     "alignLeft": "Links ausrichten",
     "alignCenter": "Zentrieren",
     "alignRight": "Rechts ausrichten",
@@ -177,11 +183,19 @@
     "selectAll": "Alles auswählen"
   },
   "contextMenu": {
+    "rename": "Umbenennen…",
+    "renameTitle": "Schritt umbenennen",
+    "renameDescription": "Ein eigener Name, auf der Karte statt des Satzes angezeigt. Leer lassen, um wieder den Satz zu zeigen.",
+    "renameLabel": "Name",
     "loopDeleted": "Schleife entfernt",
     "loopCopied": "Schleife kopiert",
     "loopCut": "Schleife ausgeschnitten",
     "connectionCopied": "Verbindung kopiert",
-    "connectionCut": "Verbindung ausgeschnitten"
+    "connectionCut": "Verbindung ausgeschnitten",
+    "replace": "Ersetzen…",
+    "selectFlow": "Ganzen Ablauf auswählen",
+    "replaceDoesNotFit": "Nicht ersetzt: Der neue Schritt hat keinen Ausgang für eine Verbindung, die von diesem ausgeht",
+    "replaceBlockNeedsEnd": "Nicht ersetzt: Ein Block kann nur einen Schritt ersetzen, nach dem nichts folgt"
   },
   "shortcuts": {
     "cmd": "Cmd",
@@ -223,7 +237,8 @@
       "error": "Fehler",
       "warning": "Warnung",
       "info": "Info",
-      "debug": "Debug"
+      "debug": "Debug",
+      "notset": "Niedrigste Stufe (NOTSET)"
     },
     "initialState": "Anfangszustand",
     "initialStateDescription": "Ob die Automatisierung beim Start von Home Assistant aktiviert oder deaktiviert ist.",
@@ -240,6 +255,8 @@
     "addVariable": "Variable hinzufügen"
   },
   "toolsMenu": {
+    "settings": "Einstellungen…",
+    "settingsDescription": "Wie sie läuft, ihre Traces und Variablen. Wird mit der Automation gespeichert.",
     "rename": "Umbenennen",
     "assignCategory": "Kategorie zuweisen",
     "runActions": "Aktionen ausführen",
@@ -259,5 +276,37 @@
     "renamedToast": "Umbenannt in \"{{name}}\"",
     "categoryAssignedToast": "Kategorie aktualisiert",
     "deletedToast": "\"{{name}}\" gelöscht"
+  },
+  "sidebar": {
+    "backToHa": "Zurück zu Home Assistant",
+    "open": "Öffnen",
+    "more": "Mehr",
+    "searchPlaceholder": "Schritt hinzufügen…",
+    "add": "Hinzufügen",
+    "subs": {
+      "when": "Etwas passiert",
+      "and": "Nur wenn…",
+      "then": "Etwas tun"
+    },
+    "groups": {
+      "branching": "Verzweigung",
+      "repeat": "Wiederholen",
+      "timing": "Zeit und Daten",
+      "structure": "Struktur"
+    },
+    "collapse": "Leiste einklappen",
+    "expand": "Leiste ausklappen"
+  },
+  "tabs": {
+    "closeUnsavedTitle": "„{{name}}“ schließen, ohne zu speichern?",
+    "closeUnsavedDescription": "Dieser Tab hat Änderungen, die noch nicht in Home Assistant gespeichert sind. Beim Schließen gehen sie verloren.",
+    "closeUnsavedConfirm": "Ohne Speichern schließen",
+    "keepEditing": "Weiter bearbeiten"
+  },
+  "emptyCanvas": {
+    "hint": "Jede Automatisierung beginnt mit einem Ereignis",
+    "addTrigger": "Auslöser hinzufügen",
+    "or": "oder",
+    "openExisting": "eine bestehende Automatisierung öffnen"
   }
 }

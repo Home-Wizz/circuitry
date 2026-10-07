@@ -1,4 +1,4 @@
-import { haBoolean } from '@circuitry/shared';
+import { haBoolean, haCoerceAutomation, TRIGGER_KEYS_KEEPING_NULL } from '@circuitry/shared';
 import type { BProgram, BStep } from './behaviorProgram';
 import { normalizeActionData } from './behaviorProgram';
 import { yamlStepToCompiled } from './compiledAction';
@@ -130,18 +130,35 @@ function parallelBranchSteps(branch: unknown): unknown[] {
  * A `choose:` with no options, or with an always-true option (`conditions:
  * []`) followed by another option or a default: nothing after the
  * always-true option ever runs, and the graph keeps such a block as an
- * opaque step (bug #98), so it's compared exactly as written. The gate's
- * own copy of the parser's rule (isStepKeptAsWritten).
+ * opaque step (bug #98), so it's compared exactly as written; and one with
+ * an option that isn't a mapping, which HA refuses (#146). The gate's own
+ * copy of the parser's rule (isStepKeptAsWritten).
  */
 function isChooseKeptAsWritten(step: Record<string, unknown>): boolean {
   if (!('choose' in step) || step.choose === undefined || step.choose === null) return false;
   const options = asArray(step.choose);
   if (options.length === 0) return true;
+  // An option that isn't a mapping (#146).
+  if (
+    !options.every((option) => !!option && typeof option === 'object' && !Array.isArray(option))
+  ) {
+    return true;
+  }
   const always = options.findIndex((option) => {
     if (!option || typeof option !== 'object' || Array.isArray(option)) return false;
     return asArray((option as Record<string, unknown>).conditions).length === 0;
   });
   return always !== -1 && (always < options.length - 1 || asArray(step.default).length > 0);
+}
+
+/**
+ * An `if:` with no conditions (an empty list, or `null`, which HA reads as
+ * one): the graph keeps it as an opaque step (#145), so it's compared
+ * exactly as written. The gate's own copy of the parser's rule
+ * (isStepKeptAsWritten).
+ */
+function isIfKeptAsWritten(step: Record<string, unknown>): boolean {
+  return 'if' in step && step.if !== undefined && asArray(step.if).length === 0;
 }
 
 function containsWaitStep(value: unknown): boolean {
@@ -192,7 +209,12 @@ export function parseActionSequence(steps: unknown[]): BProgram {
   if (step.continue_on_error === true && BLOCK_KEYS.some((key) => key in step)) {
     return [leafStep(step), ...parseActionSequence(tail)];
   }
-  if (isCountKeptAsWritten(step) || isParallelKeptAsWritten(step) || isChooseKeptAsWritten(step)) {
+  if (
+    isCountKeptAsWritten(step) ||
+    isParallelKeptAsWritten(step) ||
+    isChooseKeptAsWritten(step) ||
+    isIfKeptAsWritten(step)
+  ) {
     return [leafStep(step), ...parseActionSequence(tail)];
   }
 
@@ -301,7 +323,7 @@ export function normalizeTrigger(trigger: Record<string, unknown>): Record<strin
   for (const [key, value] of Object.entries(trigger)) {
     if (key.startsWith('_')) continue;
     if (value === undefined) continue; // "" kept (bug #72)
-    if (value === null && key !== 'from' && key !== 'to') continue;
+    if (value === null && !TRIGGER_KEYS_KEEPING_NULL.has(key)) continue;
     cleaned[key] = value;
   }
   if (typeof cleaned.context_user_id === 'string' && cleaned.context_user_id) {
@@ -324,7 +346,10 @@ export function normalizeTrigger(trigger: Record<string, unknown>): Record<strin
  * treatment of a bare mid-sequence condition step -- both reduce to the
  * same shape).
  */
-export function extractFromYamlConfig(config: Record<string, unknown>): YamlExtraction {
+export function extractFromYamlConfig(written: Record<string, unknown>): YamlExtraction {
+  // Values HA coerces read as HA reads them (#144): an `enabled: 0` step is
+  // disabled, a `continue_on_error: "yes"` block catches errors.
+  const config = haCoerceAutomation(written);
   const isScriptMode = !('triggers' in config) && !('trigger' in config);
   const rawTriggers = asArray(config.triggers ?? config.trigger) as Record<string, unknown>[];
   const triggers = rawTriggers.map(normalizeTrigger);

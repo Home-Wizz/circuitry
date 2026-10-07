@@ -16,7 +16,7 @@ import {
   Variable,
 } from 'lucide-react';
 import type { CompoundBlockKey } from '@/lib/block-factories';
-import { NODE_COLORS } from '@/lib/node-colors';
+import type { NodeColorToken } from '@/lib/node-colors';
 
 /**
  * The canonical catalog of simple node types and compound blocks — type,
@@ -30,8 +30,8 @@ export interface NodeTypeConfig {
   type: string;
   labelKey: string;
   icon: React.ComponentType<{ className?: string }>;
-  /** Solid-color button class (NODE_COLORS.*.palette) — NodePalette.tsx renders each row as a solid-colored button in this color, per user request to drop the previous washed-out translucent look. The icon itself sits in a neutral chip overlay (see NodePalette.tsx), not a second token-colored badge, since that would blend into the now-solid button. */
-  color: string;
+  /** Its colour (NODE_COLORS), as its card has it: the side panel tints the row's round icon with it. */
+  tone: NodeColorToken;
   defaultData: Record<string, unknown>;
 }
 
@@ -40,7 +40,7 @@ export const nodeTypes = [
     type: 'start',
     labelKey: 'nodes:types.start',
     icon: Rocket,
-    color: NODE_COLORS.start.palette,
+    tone: 'start',
     defaultData: {
       fields: {},
     },
@@ -52,7 +52,7 @@ export const nodeTypes = [
     // dated; a signal/broadcast glyph reads as "listening for an event"
     // just as clearly with a cleaner, more modern line style.
     icon: Radio,
-    color: NODE_COLORS.trigger.palette,
+    tone: 'trigger',
     // Left empty on purpose: TriggerFields shows the "By target / By type" picker
     // (mirroring HA's own Add Trigger dialog) whenever `trigger` is unset, and
     // fills it in once the user picks something there.
@@ -70,7 +70,7 @@ export const nodeTypes = [
     // longer shares GitBranch/GitMerge's near-identical look at this size
     // (per direct user feedback on the Add Node panel).
     icon: Signpost,
-    color: NODE_COLORS.condition.palette,
+    tone: 'condition',
     defaultData: {
       condition: 'state',
       entity_id: '',
@@ -80,7 +80,7 @@ export const nodeTypes = [
     type: 'action',
     labelKey: 'nodes:types.action',
     icon: Play,
-    color: NODE_COLORS.action.palette,
+    tone: 'action',
     defaultData: {
       service: 'light.turn_on',
     },
@@ -89,7 +89,7 @@ export const nodeTypes = [
     type: 'delay',
     labelKey: 'nodes:types.delay',
     icon: Clock,
-    color: NODE_COLORS.delay.palette,
+    tone: 'delay',
     defaultData: {
       delay: '00:00:05',
     },
@@ -98,7 +98,7 @@ export const nodeTypes = [
     type: 'wait',
     labelKey: 'nodes:types.wait',
     icon: Hourglass,
-    color: NODE_COLORS.wait.palette,
+    tone: 'wait',
     // No template yet (not ""): an unfilled wait stays an error.
     defaultData: {
       timeout: '00:01:00',
@@ -106,21 +106,21 @@ export const nodeTypes = [
   },
   {
     type: 'set_variables',
-    labelKey: 'nodes:types.set_variables',
+    labelKey: 'nodes:blocks.set_variables.label',
     icon: Variable,
-    color: NODE_COLORS.variables.palette,
+    tone: 'variables',
     defaultData: {
       variables: {},
     },
   },
   {
     type: 'join',
-    labelKey: 'nodes:types.join', // renders as "All" — waits for every incoming parallel branch before continuing
+    labelKey: 'nodes:types.join', // "Join": waits for every incoming parallel branch (all paths) before continuing
     // Merge, not GitMerge — a plain lane-merge glyph reads as "multiple
     // paths converge into one" without git's commit-dot styling, and no
     // longer looks near-identical to 'condition' above at this size.
     icon: Merge,
-    color: NODE_COLORS.join.palette,
+    tone: 'join',
     defaultData: {
       mode: 'all',
     },
@@ -131,9 +131,8 @@ export interface CompoundTypeConfig {
   key: CompoundBlockKey;
   labelKey: string;
   icon: React.ComponentType<{ className?: string }>;
-  /** Solid-color button class (NODE_COLORS.*.palette) — see NodeTypeConfig.color's doc comment. */
-  color: string;
-  group: 'branching' | 'loops' | 'parallel' | 'grouping';
+  /** Its colour (NODE_COLORS) — see NodeTypeConfig.tone. */
+  tone: NodeColorToken;
 }
 
 // Icon choices below deliberately mirror Home Assistant's own automation
@@ -149,52 +148,45 @@ export interface CompoundTypeConfig {
 export const compoundTypes = [
   {
     key: 'choose' as CompoundBlockKey,
-    labelKey: 'nodes:compoundBlocks.choose',
+    labelKey: 'nodes:blocks.choose.label',
     icon: Split, // HA: mdiArrowDecision
-    color: NODE_COLORS.condition.palette,
-    group: 'branching',
+    tone: 'condition',
   },
   {
     key: 'if_else' as CompoundBlockKey,
-    labelKey: 'nodes:compoundBlocks.if_else',
+    labelKey: 'nodes:blocks.if_else.label',
     icon: GitFork, // HA: mdiCallSplit
-    color: NODE_COLORS.condition.palette,
-    group: 'branching',
+    tone: 'condition',
   },
   {
     key: 'repeat_while' as CompoundBlockKey,
-    labelKey: 'nodes:compoundBlocks.repeat_while',
+    labelKey: 'nodes:blocks.repeat_while.label',
     icon: Repeat, // HA: mdiRefresh
-    color: NODE_COLORS.condition.palette,
-    group: 'loops',
+    tone: 'condition',
   },
   {
     key: 'repeat_until' as CompoundBlockKey,
-    labelKey: 'nodes:compoundBlocks.repeat_until',
+    labelKey: 'nodes:blocks.repeat_until.label',
     icon: RefreshCcw, // HA: mdiRefresh
-    color: NODE_COLORS.condition.palette,
-    group: 'loops',
+    tone: 'condition',
   },
   {
     key: 'repeat_count' as CompoundBlockKey,
-    labelKey: 'nodes:compoundBlocks.repeat_count',
+    labelKey: 'nodes:blocks.repeat_count.label',
     icon: RotateCw, // HA: mdiRefresh
-    color: NODE_COLORS.delay.palette,
-    group: 'loops',
+    tone: 'delay',
   },
   {
     key: 'parallel' as CompoundBlockKey,
-    labelKey: 'nodes:compoundBlocks.parallel',
+    labelKey: 'nodes:blocks.parallel.label',
     icon: GitCompareArrows, // HA: mdiShuffleDisabled
-    color: NODE_COLORS.action.palette,
-    group: 'parallel',
+    tone: 'action',
   },
   {
     key: 'sequence' as CompoundBlockKey,
-    labelKey: 'nodes:compoundBlocks.sequence',
+    labelKey: 'nodes:blocks.sequence.label',
     icon: ListOrdered, // HA: mdiFormatListNumbered
-    color: NODE_COLORS.join.palette,
-    group: 'grouping',
+    tone: 'join',
   },
 ] as const satisfies readonly CompoundTypeConfig[];
 
@@ -232,4 +224,8 @@ export function getNodeTypeLabelKey(type: string) {
   }
 }
 
-export const compoundGroupOrder = ['branching', 'loops', 'parallel', 'grouping'] as const;
+/** A step's kind colour (its `tone`), for the overview map and the wires
+ * leaving it; a type with none (or none known) is muted. */
+export function stepTone(type: string | undefined): string {
+  return nodeTypes.find((n) => n.type === type)?.tone ?? 'muted-foreground';
+}

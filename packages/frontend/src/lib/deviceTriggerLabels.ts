@@ -1,4 +1,6 @@
 import type { DeviceTrigger } from '@/hooks/useDeviceAutomation';
+import { nameFromEntityId } from '@/lib/entityNames';
+import { prettify } from '@/lib/utils';
 import type { HassEntity } from '@/types/hass';
 
 /**
@@ -41,8 +43,13 @@ function resolvePlaceholders(
 ): string {
   let result = template;
   if (result.includes('{entity_name}')) {
-    const entity = item.entity_id ? entities.find((e) => e.entity_id === item.entity_id) : undefined;
-    const entityName = (entity?.attributes?.friendly_name as string) || deviceName || item.entity_id || '';
+    const entity = item.entity_id
+      ? entities.find((e) => e.entity_id === item.entity_id)
+      : undefined;
+    const entityName =
+      (entity?.attributes?.friendly_name as string) ||
+      deviceName ||
+      (item.entity_id ? nameFromEntityId(item.entity_id) : '');
     result = result.replace(/\{entity_name\}/g, entityName);
   }
   if (result.includes('{subtype}') && subtypeLabel) {
@@ -83,12 +90,18 @@ export function getDeviceAutomationLabel(
   deviceName: string | null
 ): string {
   const typeTemplate =
-    translations[`component.${item.domain}.device_automation.${category}_type.${item.type}`] ?? item.type;
+    translations[`component.${item.domain}.device_automation.${category}_type.${item.type}`] ??
+    prettify(item.type);
 
   let subtypeLabel: string | undefined;
   if (item.subtype) {
     const subtypeKey = `component.${item.domain}.device_automation.${category}_subtype.${item.subtype}`;
-    subtypeLabel = resolvePlaceholders(translations[subtypeKey] ?? item.subtype, item, entities, deviceName);
+    subtypeLabel = resolvePlaceholders(
+      translations[subtypeKey] ?? prettify(item.subtype),
+      item,
+      entities,
+      deviceName
+    );
   }
 
   const typeLabel = resolvePlaceholders(typeTemplate, item, entities, deviceName, subtypeLabel);

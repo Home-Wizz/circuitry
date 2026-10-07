@@ -1,13 +1,6 @@
 import type { JoinNode } from '@circuitry/shared';
-import { useTranslation } from 'react-i18next';
-import { FormField } from '@/components/forms/FormField';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
+import { useIncomingPathCount } from '@/hooks/useIncomingPathCount';
+import { JoinModeChoice } from './JoinModeChoice';
 
 interface JoinFieldsProps {
   node: JoinNode;
@@ -15,36 +8,18 @@ interface JoinFieldsProps {
 }
 
 /**
- * Join ("All") node field component. Only the 'all' mode is selectable
- * today — HA's automation engine has no task-cancellation primitive, so a
- * true race-and-cancel "Any" (race, cancel the losers) can only ever be
- * approximated. That approximation is a deliberate follow-up, not shipped
- * yet — see docs/flow-parity-design.md §3 — so 'any' stays disabled
- * here rather than silently behaving like 'all'.
+ * Join ("All") node field component: the same choice as the card's pill
+ * (JoinModeChoice). Only 'all' is selectable today; 'any' stays disabled
+ * rather than silently behaving like 'all' (see docs/flow-parity-design.md
+ * §3).
  */
 export function JoinFields({ node, onChange }: JoinFieldsProps) {
-  const { t } = useTranslation(['nodes']);
-  const mode = node.data.mode ?? 'all';
-
+  const pathCount = useIncomingPathCount(node.id);
   return (
-    <div className="space-y-4">
-      <FormField
-        label={t('nodes:joinFields.mode')}
-        description={t('nodes:joinFields.modeDescription')}
-      >
-        <Select value={mode} onValueChange={(v) => onChange('mode', v)}>
-          <SelectTrigger>
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">{t('nodes:joinFields.modeAllLabel')}</SelectItem>
-            <SelectItem value="any" disabled>
-              {t('nodes:joinFields.modeAnyLabel')}
-            </SelectItem>
-          </SelectContent>
-        </Select>
-      </FormField>
-      <p className="text-muted-foreground text-xs">{t('nodes:joinFields.note')}</p>
-    </div>
+    <JoinModeChoice
+      mode={node.data.mode ?? 'all'}
+      pathCount={pathCount}
+      onChange={(mode) => onChange('mode', mode)}
+    />
   );
 }

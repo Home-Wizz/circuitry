@@ -296,6 +296,13 @@ function evalExpr(expr: BoolExpr, assignment: ReadonlyMap<string, boolean>): boo
   }
 }
 
+/** What an expression that reads no condition evaluates to -- one built only
+ * from disabled conditions, empty lists and and/or/not around them -- or
+ * undefined when it reads one. */
+export function decidedValue(expr: BoolExpr): boolean | undefined {
+  return collectLeafKeys(expr).size === 0 ? evalExpr(expr, new Map()) : undefined;
+}
+
 /** Above this many distinct leaves, brute-force truth-table enumeration
  * (2^N rows) stops being "cheap" -- no real automation has come close to
  * this in the fixture suite, so hitting it is itself a signal something

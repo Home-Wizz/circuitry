@@ -1,11 +1,15 @@
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { AndConditionDialog } from '@/components/canvas/AndConditionDialog';
 import { ThenActionDialog } from '@/components/canvas/ThenActionDialog';
+import type { PickerKind } from '@/components/canvas/PickerColumns';
 import { WhenTriggerDialog } from '@/components/canvas/WhenTriggerDialog';
 import { getAllConditionFieldNames } from '@/config/conditionFields';
 import { useAddNodeAtCenter } from '@/hooks/useAddNodeAtCenter';
 import { useResolvedEntities } from '@/hooks/useResolvedEntities';
-import { createCompoundBlock } from '@/lib/block-factories';
+import { type CompoundBlockKey, createCompoundBlock } from '@/lib/block-factories';
+import { replacePicker } from '@/lib/canvasEdits';
+import { showErrorToast } from '@/lib/haToast';
 import { useFlowStore } from '@/store/flow-store';
 
 /**
@@ -50,6 +54,12 @@ import { useFlowStore } from '@/store/flow-store';
  *    one of these instead, which opens the AND/THEN dialog exactly as
  *    normal except onCommit calls `updateNodeData(nodeId, data)` on the
  *    existing node in place instead of creating a new one.
+ *  - `openReplaceForNode(nodeId)` — the canvas's right-click Replace…:
+ *    opens the picker for the step's kind (When for a trigger, And for a
+ *    condition, Then for the rest), and the pick replaces the step in place
+ *    through flow-store.ts's `replaceNode`, which keeps its position, links
+ *    and place in its block and refuses a step whose outlets don't fit the
+ *    links. Never the group-append of `openAndForNode`.
  */
 export function useAddNodeDialogs() {
   const [whenOpen, setWhenOpen] = useState(false);
@@ -59,15 +69,100 @@ export function useAddNodeDialogs() {
   const [pendingWaitForTrigger, setPendingWaitForTrigger] = useState(false);
   const [pendingEditConditionNodeId, setPendingEditConditionNodeId] = useState<string | null>(null);
   const [pendingEditActionNodeId, setPendingEditActionNodeId] = useState<string | null>(null);
+  const [pendingReplaceNodeId, setPendingReplaceNodeId] = useState<string | null>(null);
+  // The side panel's "Add a step…" text, the picker opens with it.
+  const [searchQuery, setSearchQuery] = useState('');
+  const { t } = useTranslation(['common']);
   const { addNodeAtCenter, addCompoundAtCenter } = useAddNodeAtCenter();
   const selectNode = useFlowStore((s) => s.selectNode);
   const updateNodeData = useFlowStore((s) => s.updateNodeData);
   const updateNodeTypeAndData = useFlowStore((s) => s.updateNodeTypeAndData);
+  const replaceNode = useFlowStore((s) => s.replaceNode);
   const addCompound = useFlowStore((s) => s.addCompound);
   const removeNode = useFlowStore((s) => s.removeNode);
   const nodes = useFlowStore((s) => s.nodes);
   const edges = useFlowStore((s) => s.edges);
   const entities = useResolvedEntities();
+
+  // A picker opened to add a node may become another one (its When / And /
+  // Then switch); one opened for a pending flow (editing a placeholder,
+  // building a wait's trigger) stays what it is, since the result has
+  // somewhere specific to go.
+  const switchKind = (kind: PickerKind) => {
+    setWhenOpen(kind === 'when');
+    setAndOpen(kind === 'and');
+    setThenOpen(kind === 'then');
+    setThenStartAtWaitFor(false);
+  };
+  // The step a Replace… started from: its picker opens where it is.
+  const replacing = pendingReplaceNodeId
+    ? nodes.find((n) => n.id === pendingReplaceNodeId)
+    : undefined;
+  const plainAdd =
+    !pendingWaitForTrigger &&
+    !pendingEditConditionNodeId &&
+    !pendingEditActionNodeId &&
+    !pendingReplaceNodeId;
+
+  // Replace… : the pick replaces the pending step, or nothing changes and
+  // the toast says why.
+  const commitReplace = (nodeId: string, type: string, data: Record<string, unknown>) => {
+    setPendingReplaceNodeId(null);
+    if (replaceNode(nodeId, type, data)) selectNode(nodeId);
+    else showErrorToast(t('contextMenu.replaceDoesNotFit'));
+  };
+
+  // A compound block in the place of one step (a Then placeholder, or a
+  // replaced step): the block's whole subgraph is added, the edges that
+  // touched the step are re-wired onto it, and the step is removed.
+  const putCompoundInPlaceOf = (nodeId: string, key: CompoundBlockKey) => {
+    const placeholderPosition = nodes.find((n) => n.id === nodeId)?.position ?? {
+      x: 0,
+      y: 0,
+    };
+    const block = createCompoundBlock(key, placeholderPosition.x, placeholderPosition.y);
+
+    // Clone (rather than in-place retarget) every edge that touched
+    // the placeholder, once per entry/exit node — a single sequential
+    // retarget would only rewire the *last* entry when a block has
+    // more than one (e.g. Parallel's two branches), silently leaving
+    // the others unwired. This also fixes the case a plain retarget
+    // can't: outgoing edges. If/Else's branches are dead ends with no
+    // outgoing edge, but repeat_while/repeat_until's body placeholder
+    // has its own structural loop-back edge back to the condition —
+    // without re-sourcing that edge from the new block's exit
+    // node(s), removeNode below would silently delete it and break
+    // the loop. In practice there's exactly one incoming and (for
+    // repeat_while/until) one outgoing edge, but this doesn't assume
+    // that.
+    const incoming = edges.filter((e) => e.target === nodeId);
+    const outgoing = edges.filter((e) => e.source === nodeId);
+    let seq = 0;
+    const rewiredEdges = [
+      ...incoming.flatMap((e) =>
+        block.entryNodeIds.map((entryNodeId) => ({
+          ...e,
+          id: `e-rewire-${e.id}-${entryNodeId}-${++seq}`,
+          target: entryNodeId,
+        }))
+      ),
+      ...outgoing.flatMap((e) =>
+        block.exitNodeIds.map((exitNodeId) => ({
+          ...e,
+          id: `e-rewire-${e.id}-${exitNodeId}-${++seq}`,
+          source: exitNodeId,
+          // The old edge's sourceHandle belonged to the placeholder
+          // (a plain action node has none) — drop it rather than
+          // carry it onto the new exit node, which may have handles
+          // of its own (e.g. a condition node's true/false).
+          sourceHandle: undefined,
+        }))
+      ),
+    ];
+
+    addCompound(block.nodes, [...block.edges, ...rewiredEdges]);
+    removeNode(nodeId);
+  };
 
   const dialogs = (
     <>
@@ -87,12 +182,20 @@ export function useAddNodeDialogs() {
             setPendingWaitForTrigger(false);
             setPendingEditActionNodeId(null);
           }
+          if (!open) setPendingReplaceNodeId(null);
         }}
         entities={entities}
+        onSwitchKind={plainAdd ? switchKind : undefined}
+        initialQuery={plainAdd ? searchQuery : undefined}
+        current={replacing?.type === 'trigger' ? replacing.data : undefined}
         onCommit={(data) => {
           if (pendingWaitForTrigger) {
             setPendingWaitForTrigger(false);
             const waitData = { wait_for_trigger: [data], timeout: '00:01:00' };
+            if (pendingReplaceNodeId) {
+              commitReplace(pendingReplaceNodeId, 'wait', waitData);
+              return;
+            }
             if (pendingEditActionNodeId) {
               // Same bug as ThenActionDialog's onCommit/onCommitCompound —
               // "Wait for a trigger" is a *second* dialog hop (THEN -> this
@@ -115,6 +218,10 @@ export function useAddNodeDialogs() {
             selectNode(id);
             return;
           }
+          if (pendingReplaceNodeId) {
+            commitReplace(pendingReplaceNodeId, 'trigger', data);
+            return;
+          }
           const id = addNodeAtCenter('trigger', data);
           selectNode(id);
         }}
@@ -126,10 +233,18 @@ export function useAddNodeDialogs() {
           setAndOpen(open);
           if (!open) {
             setPendingEditConditionNodeId(null);
+            setPendingReplaceNodeId(null);
           }
         }}
         entities={entities}
+        onSwitchKind={plainAdd ? switchKind : undefined}
+        initialQuery={plainAdd ? searchQuery : undefined}
+        current={replacing?.type === 'condition' ? replacing.data : undefined}
         onCommit={(data) => {
+          if (pendingReplaceNodeId) {
+            commitReplace(pendingReplaceNodeId, 'condition', data);
+            return;
+          }
           if (pendingEditConditionNodeId) {
             const nodeId = pendingEditConditionNodeId;
             setPendingEditConditionNodeId(null);
@@ -203,11 +318,23 @@ export function useAddNodeDialogs() {
           if (!open) {
             setThenStartAtWaitFor(false);
             setPendingEditActionNodeId(null);
+            setPendingReplaceNodeId(null);
           }
         }}
         entities={entities}
         startAtWaitFor={thenStartAtWaitFor}
+        onSwitchKind={plainAdd ? switchKind : undefined}
+        initialQuery={plainAdd ? searchQuery : undefined}
+        current={
+          replacing && replacePicker(replacing.type) === 'then'
+            ? { type: replacing.type ?? '', data: replacing.data }
+            : undefined
+        }
         onCommit={(type, data) => {
+          if (pendingReplaceNodeId) {
+            commitReplace(pendingReplaceNodeId, type, data);
+            return;
+          }
           if (pendingEditActionNodeId) {
             const nodeId = pendingEditActionNodeId;
             setPendingEditActionNodeId(null);
@@ -239,62 +366,26 @@ export function useAddNodeDialogs() {
           selectNode(id);
         }}
         onCommitCompound={(key) => {
+          if (pendingReplaceNodeId) {
+            const nodeId = pendingReplaceNodeId;
+            setPendingReplaceNodeId(null);
+            // A block has no single outlet for the links leaving a step,
+            // so it replaces only a step at the end of its path.
+            if (edges.some((e) => e.source === nodeId)) {
+              showErrorToast(t('contextMenu.replaceBlockNeedsEnd'));
+              return;
+            }
+            putCompoundInPlaceOf(nodeId, key);
+            return;
+          }
           if (pendingEditActionNodeId) {
             const nodeId = pendingEditActionNodeId;
             setPendingEditActionNodeId(null);
             // Same bug as onCommit above, for a Blocks pick that resolves to
             // a *compound* block (If/Else, Choose, a Repeat variant,
             // Parallel, Sequence) instead of a single node — there's no
-            // single node to morph into here, so instead: add the compound
-            // block's whole subgraph, re-wire whatever edges already touched
-            // the placeholder onto the new block, then remove the
-            // now-obsolete placeholder node.
-            const placeholderPosition = nodes.find((n) => n.id === nodeId)?.position ?? {
-              x: 0,
-              y: 0,
-            };
-            const block = createCompoundBlock(key, placeholderPosition.x, placeholderPosition.y);
-
-            // Clone (rather than in-place retarget) every edge that touched
-            // the placeholder, once per entry/exit node — a single sequential
-            // retarget would only rewire the *last* entry when a block has
-            // more than one (e.g. Parallel's two branches), silently leaving
-            // the others unwired. This also fixes the case a plain retarget
-            // can't: outgoing edges. If/Else's branches are dead ends with no
-            // outgoing edge, but repeat_while/repeat_until's body placeholder
-            // has its own structural loop-back edge back to the condition —
-            // without re-sourcing that edge from the new block's exit
-            // node(s), removeNode below would silently delete it and break
-            // the loop. In practice there's exactly one incoming and (for
-            // repeat_while/until) one outgoing edge, but this doesn't assume
-            // that.
-            const incoming = edges.filter((e) => e.target === nodeId);
-            const outgoing = edges.filter((e) => e.source === nodeId);
-            let seq = 0;
-            const rewiredEdges = [
-              ...incoming.flatMap((e) =>
-                block.entryNodeIds.map((entryNodeId) => ({
-                  ...e,
-                  id: `e-rewire-${e.id}-${entryNodeId}-${++seq}`,
-                  target: entryNodeId,
-                }))
-              ),
-              ...outgoing.flatMap((e) =>
-                block.exitNodeIds.map((exitNodeId) => ({
-                  ...e,
-                  id: `e-rewire-${e.id}-${exitNodeId}-${++seq}`,
-                  source: exitNodeId,
-                  // The old edge's sourceHandle belonged to the placeholder
-                  // (a plain action node has none) — drop it rather than
-                  // carry it onto the new exit node, which may have handles
-                  // of its own (e.g. a condition node's true/false).
-                  sourceHandle: undefined,
-                }))
-              ),
-            ];
-
-            addCompound(block.nodes, [...block.edges, ...rewiredEdges]);
-            removeNode(nodeId);
+            // single node to morph into here, so its block goes in its place.
+            putCompoundInPlaceOf(nodeId, key);
             return;
           }
           addCompoundAtCenter(key);
@@ -308,14 +399,25 @@ export function useAddNodeDialogs() {
     </>
   );
 
+  // A plain add: the picker of that kind, opened on the side panel's
+  // search when there is one (every other plain opening clears it).
+  const openPlain = (kind: PickerKind, query = '') => {
+    setSearchQuery(query);
+    switchKind(kind);
+  };
+
   return {
-    openWhen: () => setWhenOpen(true),
-    openAnd: () => setAndOpen(true),
-    openThen: () => setThenOpen(true),
+    openWhen: () => openPlain('when'),
+    openAnd: () => openPlain('and'),
+    openThen: () => openPlain('then'),
     openThenForWait: () => {
+      openPlain('then');
       setThenStartAtWaitFor(true);
-      setThenOpen(true);
     },
+    /** The side panel's search: the When picker for an automation with no
+     * trigger yet, else the Then picker (the switch inside changes it). */
+    openSearch: (query: string) =>
+      openPlain(nodes.some((n) => n.type === 'trigger') ? 'then' : 'when', query),
     openAndForNode: (nodeId: string) => {
       setPendingEditConditionNodeId(nodeId);
       setAndOpen(true);
@@ -323,6 +425,15 @@ export function useAddNodeDialogs() {
     openThenForNode: (nodeId: string) => {
       setPendingEditActionNodeId(nodeId);
       setThenOpen(true);
+    },
+    openReplaceForNode: (nodeId: string) => {
+      const picker = replacePicker(nodes.find((n) => n.id === nodeId)?.type);
+      if (!picker) return;
+      setPendingReplaceNodeId(nodeId);
+      setThenStartAtWaitFor(false);
+      setWhenOpen(picker === 'when');
+      setAndOpen(picker === 'and');
+      setThenOpen(picker === 'then');
     },
     dialogs,
   };

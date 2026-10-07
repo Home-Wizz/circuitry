@@ -272,6 +272,21 @@ function anchorOneParallelUntilBody(flow: FlowGraph): FlowGraph | null {
  * so FlowTranspiler refuses the graph. Null when there's none.
  */
 export function untilLoopingBackToSeveral(flow: FlowGraph): string | null {
+  return untilFalseSideProblem(flow, 'several');
+}
+
+/**
+ * #135: an until test whose false edges go back into the loop and also on
+ * to a step that doesn't lead back (the loop's own test failing both
+ * repeats the body and runs that step). HA's until loop only goes round
+ * again, so the other step was dropped by both strategies and both gates.
+ * FlowTranspiler refuses it. Null when there's none.
+ */
+export function untilFalseSideLeavingTheLoop(flow: FlowGraph): string | null {
+  return untilFalseSideProblem(flow, 'leaves');
+}
+
+function untilFalseSideProblem(flow: FlowGraph, kind: 'several' | 'leaves'): string | null {
   for (const test of flow.nodes) {
     if (test.type !== 'condition' || blockKey(test) !== 'repeat_until') continue;
     const targets = new Set(
@@ -285,7 +300,10 @@ export function untilLoopingBackToSeveral(flow: FlowGraph): string | null {
         )
         .map((e) => e.target)
     );
-    if (targets.size > 1 && [...targets].every((t) => leadsTo(flow, t, test.id))) return test.id;
+    if (targets.size < 2) continue;
+    const back = [...targets].filter((t) => leadsTo(flow, t, test.id));
+    if (kind === 'several' && back.length === targets.size) return test.id;
+    if (kind === 'leaves' && back.length > 0 && back.length < targets.size) return test.id;
   }
   return null;
 }

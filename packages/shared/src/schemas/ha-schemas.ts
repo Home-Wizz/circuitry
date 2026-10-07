@@ -134,6 +134,29 @@ const TimeAtEntrySchema = z.union([
   }),
 ]);
 
+/**
+ * The trigger keys whose `null` Home Assistant gives a meaning of its own,
+ * kept wherever a trigger is written or compared (a `null` on any other key
+ * is dropped): a state trigger's `from:`/`to:` mean "any state", and with
+ * `not_from:`/`not_to:` the trigger no longer fires on attribute-only
+ * changes, as any of the four keys being present turns that off
+ * (triggers/state.py, `match_all`); `attribute: null` makes HA check the
+ * trigger with the schema that takes any value for `from:`/`to:`, though it
+ * then watches the state as without it; a null `note:` or `metadata:` is
+ * kept by HA's validator (its `vol.Remove` drops only text and a mapping)
+ * and passed on, to a device trigger's integration among others.
+ * `not_from: null` failed the import, the others were dropped (#144).
+ */
+export const TRIGGER_KEYS_KEEPING_NULL: ReadonlySet<string> = new Set([
+  'from',
+  'to',
+  'not_from',
+  'not_to',
+  'attribute',
+  'note',
+  'metadata',
+]);
+
 export const HATriggerSchema = z
   .looseObject({
     alias: z.string().optional(),
@@ -167,8 +190,9 @@ export const HATriggerSchema = z
     // StateTriggerFields.tsx), not something this passthrough schema enforces.
     from: z.union([z.string(), z.array(z.string()), z.null()]).optional(),
     to: z.union([z.string(), z.array(z.string()), z.null()]).optional(),
-    not_from: z.union([z.string(), z.array(z.string())]).optional(),
-    not_to: z.union([z.string(), z.array(z.string())]).optional(),
+    // `null` too (HA's `vol.Any(str, [str], None)`; see TRIGGER_KEYS_KEEPING_NULL).
+    not_from: z.union([z.string(), z.array(z.string()), z.null()]).optional(),
+    not_to: z.union([z.string(), z.array(z.string()), z.null()]).optional(),
     for: z
       .union([
         z.string(),
@@ -260,8 +284,8 @@ export interface HATriggerInput {
   entity_id?: string | string[];
   from?: string | string[] | null;
   to?: string | string[] | null;
-  not_from?: string | string[];
-  not_to?: string | string[];
+  not_from?: string | string[] | null;
+  not_to?: string | string[] | null;
   for?: string | { hours?: number; minutes?: number; seconds?: number };
   at?:
     | string
@@ -466,6 +490,8 @@ export const CircuitryMetadataSchema = z.object({
         alias: z.string().optional(),
         enabled: z.boolean().optional(),
         mode: z.enum(['all', 'any']).optional(),
+        // A group marker that frames one named choose or parallel block.
+        _frame: z.boolean().optional(),
       })
     )
     .optional(),

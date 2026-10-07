@@ -13,11 +13,16 @@ import {
 } from '@/components/ui/select';
 import { HaSelect } from '@/ha';
 import { useNativeDescription } from '@/hooks/useNativeDescriptions';
+import { handledConditionOptions } from '@/lib/describedFields';
 import { getConditionEnumField, hasConditionSingleValueField } from '@/lib/conditionEnumField';
 import { MOON_PHASES } from '@/lib/moonPhases';
-import { resolveOptionFields, resolveTargetless, resolveThresholdUnits } from '@/lib/nativeDescriptions';
 import {
-  getConditionThresholdShape,
+  describedThresholdShape,
+  resolveOptionFields,
+  resolveTargetless,
+  resolveThresholdUnits,
+} from '@/lib/nativeDescriptions';
+import {
   getThresholdRange,
   getThresholdUnit,
   type SimpleThreshold,
@@ -25,12 +30,16 @@ import {
 } from '@/lib/nativeThreshold';
 import { getSunPeriodField } from '@/lib/sunPeriodField';
 import { getNodeDataObject, toStringArray } from '@/utils/nodeData';
+import { holdForValue, HoldForField } from '@/components/nodes/holdFor';
+import { BehaviorSegment } from './BehaviorSegment';
+import { DescribedOptionFields } from './DescribedOptionFields';
 import { DurationField, type DurationValue } from './DurationField';
 import { NativeTargetField, type TargetValue } from './NativeTargetField';
 import { OptionSelectField } from './OptionSelectField';
 import { SimpleThresholdField } from './SimpleThresholdField';
 import { ThresholdTypeField } from './ThresholdTypeField';
 import { ThresholdValueField } from './ThresholdValueField';
+import { PanelTargets } from '../PanelSection';
 
 /**
  * Field editor for HA's purpose-specific conditions (2025.12+, e.g.
@@ -63,6 +72,9 @@ interface NativeConditionFieldsProps {
   onChange: (key: string, value: unknown) => void;
   /** The dotted condition type, e.g. `light.is_brightness` or `humidity.is_value` — determines which threshold shape (if any) to render. */
   conditionType: string;
+  /** The card's "+ more": leaves out what the card edits itself (the
+   * target, the threshold, a "for" already set), the behaviour as buttons. */
+  compact?: boolean;
 }
 
 type NativeConditionOptions = {
@@ -84,17 +96,25 @@ type NativeConditionOptions = {
 type TwilightType = 'any' | 'civil' | 'nautical' | 'astronomical';
 const TWILIGHT_TYPES: TwilightType[] = ['any', 'civil', 'nautical', 'astronomical'];
 
-export function NativeConditionFields({ node, onChange, conditionType }: NativeConditionFieldsProps) {
+export function NativeConditionFields({
+  node,
+  onChange,
+  conditionType,
+  compact = false,
+}: NativeConditionFieldsProps) {
   const { t } = useTranslation(['nodes']);
   const target = getNodeDataObject<TargetValue>(node, 'target');
   const options = getNodeDataObject<NativeConditionOptions>(node, 'options');
-  const shape = getConditionThresholdShape(conditionType);
   const unit = getThresholdUnit(conditionType);
   const range = getThresholdRange(conditionType);
   const isSunSingleton = conditionType.startsWith('sun.');
   // Which conditions take `behavior` (any/all) and `for`: what the
   // connected HA describes, else the tables (lib/nativeDescriptions.ts).
   const description = useNativeDescription('condition', conditionType);
+  // The threshold as the connected HA has it: none where it describes the
+  // type without one (an HA from before the threshold rework, whose bounds
+  // are its own fields, below).
+  const shape = describedThresholdShape('condition', conditionType, description);
   const { behavior: behaviorField, hasFor: showFor } = resolveOptionFields(
     'condition',
     conditionType,
@@ -120,7 +140,12 @@ export function NativeConditionFields({ node, onChange, conditionType }: NativeC
   // when this is true, checking their inputs before render would just
   // re-derive the same conditions those JSX blocks already gate on.
   const isBareBoolean =
-    isSunSingleton && shape === 'none' && !enumField && !isSingleValue && !isTwilight && !periodField;
+    isSunSingleton &&
+    shape === 'none' &&
+    !enumField &&
+    !isSingleValue &&
+    !isTwilight &&
+    !periodField;
 
   const updateOptions = (patch: Partial<NativeConditionOptions>) =>
     onChange('options', { ...options, ...patch });
@@ -153,17 +178,32 @@ export function NativeConditionFields({ node, onChange, conditionType }: NativeC
 
   return (
     <>
-      {isBareBoolean && (
+      {!compact && isBareBoolean && (
         <p className="rounded-md border border-dashed bg-muted/40 px-3 py-2 text-muted-foreground text-xs">
           {t('nodes:conditions.native.bareBooleanNotice', { conditionType })}
         </p>
       )}
 
-      {!resolveTargetless('condition', conditionType, description) && (
-        <NativeTargetField target={target} onChange={(v) => onChange('target', v)} />
+      {!compact && !resolveTargetless('condition', conditionType, description) && (
+        <PanelTargets>
+          <NativeTargetField
+            target={target}
+            onChange={(v) => onChange('target', v)}
+            described={description?.target}
+          />
+        </PanelTargets>
       )}
 
-      {behaviorField && (
+      {compact && behaviorField && (
+        <BehaviorSegment
+          kind="condition"
+          values={['any', 'all']}
+          value={options.behavior ?? behaviorField.default}
+          onChange={(behavior) => updateOptions({ behavior })}
+        />
+      )}
+
+      {!compact && behaviorField && (
         <FormField
           label={t('nodes:conditions.native.behaviorLabel')}
           description={t('nodes:conditions.native.behaviorDescription')}
@@ -187,7 +227,7 @@ export function NativeConditionFields({ node, onChange, conditionType }: NativeC
         </FormField>
       )}
 
-      {shape === 'flat' && (
+      {!compact && shape === 'flat' && (
         <FormField
           label={t('nodes:conditions.native.thresholdLabel')}
           description={t('nodes:conditions.native.thresholdDescription')}
@@ -214,7 +254,7 @@ export function NativeConditionFields({ node, onChange, conditionType }: NativeC
         />
       )}
 
-      {shape === 'typed' && (
+      {!compact && shape === 'typed' && (
         <ThresholdTypeField
           threshold={typedThreshold}
           onChange={(next) => updateOptions({ threshold: next })}
@@ -281,7 +321,21 @@ export function NativeConditionFields({ node, onChange, conditionType }: NativeC
           every other shape (flat/flat-simple/none, including plain boolean
           conditions like lock.is_locked or fan.is_on, and the enum/
           single-value ones just above) gets it here instead. */}
-      {shape !== 'typed' && showFor && (
+      {compact &&
+        showFor &&
+        shape !== 'flat' &&
+        shape !== 'typed' &&
+        holdForValue('condition', node.data) === undefined && (
+          <HoldForField
+            kind="condition"
+            data={node.data}
+            onPatch={(patch) => {
+              for (const [key, value] of Object.entries(patch)) onChange(key, value);
+            }}
+          />
+        )}
+
+      {!compact && shape !== 'typed' && showFor && (
         <DurationField
           label={t('nodes:triggers.native.thresholdForLabel')}
           description={t('nodes:triggers.native.thresholdForDescription')}
@@ -300,7 +354,10 @@ export function NativeConditionFields({ node, onChange, conditionType }: NativeC
               label: t(`nodes:conditions.native.twilightTypes.${type}`),
             }))}
             fallback={
-              <Select value={options.type ?? 'any'} onValueChange={(v) => updateOptions({ type: v })}>
+              <Select
+                value={options.type ?? 'any'}
+                onValueChange={(v) => updateOptions({ type: v })}
+              >
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
@@ -316,6 +373,16 @@ export function NativeConditionFields({ node, onChange, conditionType }: NativeC
           />
         </FormField>
       )}
+
+      {/* Whatever else HA describes for it, by HA's own selectors. */}
+      <DescribedOptionFields
+        kind="condition"
+        type={conditionType}
+        description={description}
+        handled={handledConditionOptions(conditionType, description)}
+        options={options}
+        onChange={(key, value) => updateOptions({ [key]: value })}
+      />
     </>
   );
 }

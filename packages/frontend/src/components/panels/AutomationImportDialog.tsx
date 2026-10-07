@@ -18,6 +18,7 @@ import { useTranslation } from 'react-i18next';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import {
   Dialog,
   DialogContent,
@@ -652,54 +653,26 @@ export function AutomationImportDialog({ isOpen, onClose }: AutomationImportDial
         </div>
       </DialogContent>
 
-      <Dialog open={showConfirmDialog} onOpenChange={handleCancelConfirm}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>{t('dialogs:import.discardTitle')}</DialogTitle>
-            <DialogDescription>{t('dialogs:import.discardDescription')}</DialogDescription>
-          </DialogHeader>
-          <div className="flex justify-end gap-2 pt-4">
-            <Button variant="outline" onClick={handleCancelConfirm}>
-              {t('buttons.cancel')}
-            </Button>
-            <Button variant="destructive" onClick={handleConfirm}>
-              {t('dialogs:import.confirmDiscard')}
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
+      <ConfirmDialog
+        open={showConfirmDialog}
+        onOpenChange={handleCancelConfirm}
+        title={t('dialogs:import.discardTitle')}
+        description={t('dialogs:import.discardDescription')}
+        confirmLabel={t('dialogs:import.confirmDiscard')}
+        onConfirm={handleConfirm}
+      />
 
-      <Dialog
+      <ConfirmDialog
         open={automationPendingDelete !== null}
         onOpenChange={(open) => !open && setAutomationPendingDelete(null)}
-      >
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>{t('dialogs:import.deleteTitle')}</DialogTitle>
-            <DialogDescription>
-              {t('dialogs:import.deleteDescription', {
-                name: automationPendingDelete?.friendly_name ?? '',
-              })}
-            </DialogDescription>
-          </DialogHeader>
-          <div className="flex justify-end gap-2 pt-4">
-            <Button
-              variant="outline"
-              onClick={() => setAutomationPendingDelete(null)}
-              disabled={isDeleting}
-            >
-              {t('buttons.cancel')}
-            </Button>
-            <Button
-              variant="destructive"
-              onClick={() => void handleDeleteAutomation()}
-              disabled={isDeleting}
-            >
-              {t('dialogs:import.confirmDelete')}
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
+        title={t('dialogs:import.deleteTitle')}
+        description={t('dialogs:import.deleteDescription', {
+          name: automationPendingDelete?.friendly_name ?? '',
+        })}
+        confirmLabel={t('dialogs:import.confirmDelete')}
+        onConfirm={() => void handleDeleteAutomation()}
+        busy={isDeleting}
+      />
     </Dialog>
   );
 }

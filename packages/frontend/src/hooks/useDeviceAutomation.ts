@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useHass } from '../contexts/HassContext';
 
 /**
@@ -293,4 +293,49 @@ export function useDeviceAutomation() {
     getConditionCapabilities,
     getActionCapabilities,
   };
+}
+
+/** Which kind of a device's own automations: its triggers, conditions or
+ * actions (`device_automation/<kind>/list`). */
+export type DeviceAutomationKind = 'trigger' | 'condition' | 'action';
+
+/**
+ * Which of these devices have any device automations of a kind -- the
+ * devices HA's own Device type can use. Undefined while HA is asked (one
+ * list per device, as HA's editor asks when a device is picked); a device
+ * whose integration has none, or refuses the list, isn't in it.
+ */
+export function useDevicesWithAutomations(
+  kind: DeviceAutomationKind,
+  deviceIds: readonly string[]
+): ReadonlySet<string> | undefined {
+  const { getDeviceTriggers, getDeviceConditions, getDeviceActions } = useDeviceAutomation();
+  const [withAny, setWithAny] = useState<ReadonlySet<string> | undefined>(undefined);
+  const key = deviceIds.join(',');
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `key` stands for deviceIds (a new array every render).
+  useEffect(() => {
+    let cancelled = false;
+    setWithAny(undefined);
+    const list =
+      kind === 'trigger'
+        ? getDeviceTriggers
+        : kind === 'condition'
+          ? getDeviceConditions
+          : getDeviceActions;
+    Promise.allSettled(deviceIds.map((id) => list(id))).then((results) => {
+      if (cancelled) return;
+      setWithAny(
+        new Set(
+          deviceIds.filter((_, i) => {
+            const result = results[i];
+            return result?.status === 'fulfilled' && result.value.length > 0;
+          })
+        )
+      );
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [kind, key, getDeviceTriggers, getDeviceConditions, getDeviceActions]);
+  return withAny;
 }

@@ -17,9 +17,31 @@ import type {
 import { findBackEdges } from '../analyzer/topology';
 import { fanOutHash } from '../utils/fanOutHash';
 import { generateNodeId } from '../utils/generateIds';
+import { withoutLoopBookkeeping } from '../utils/stateMachineLoops';
 import { parseActions } from './action-block-parser';
-import { expandConditionShorthand, normalizeActionLists } from './action-type-guards';
+import { expandConditionShorthand, isMapping, normalizeActionLists } from './action-type-guards';
 import { createEdge, importCondition, importWaitTriggers, parseTriggers } from './parser-shared';
+
+/** The mappings in a list (none when it isn't one): what can be a step.
+ * HA refuses anything else in a step list, and the parser says so when it
+ * reaches it (#57); looking for the state machine's format doesn't. */
+function mappings(list: unknown): Record<string, unknown>[] {
+  return Array.isArray(list) ? list.filter(isMapping) : [];
+}
+
+/** The steps of the state machine's loop: its sequence, and -- with a loop
+ * in the graph -- the inner loop's inside it, where the dispatcher sits one
+ * level down (the run loop, #157; the pass loop an older Circuitry wrote,
+ * #129). */
+function loopSteps(repeat: Record<string, unknown>): unknown[] {
+  const steps = Array.isArray(repeat.sequence) ? repeat.sequence : [];
+  return steps.flatMap((step) => {
+    const inner = (step as Record<string, unknown> | null)?.repeat as
+      | Record<string, unknown>
+      | undefined;
+    return inner && Array.isArray(inner.sequence) ? [step, ...inner.sequence] : [step];
+  });
+}
 
 /**
  * Detect if automation is in state-machine format
@@ -34,29 +56,17 @@ export function detectStateMachineFormat(content: Record<string, unknown>): bool
   let hasCurrentNodeVar = false;
   let hasRepeatChoose = false;
 
-  for (const action of actions) {
-    const actionObj = action as Record<string, unknown>;
-
+  for (const actionObj of mappings(actions)) {
     // Check for variables with current_node
-    if (actionObj.variables) {
-      const vars = actionObj.variables as Record<string, unknown>;
-      if ('current_node' in vars && 'flow_context' in vars) {
-        hasCurrentNodeVar = true;
-      }
+    const vars = actionObj.variables;
+    if (isMapping(vars) && 'current_node' in vars && 'flow_context' in vars) {
+      hasCurrentNodeVar = true;
     }
 
     // Check for repeat with choose
-    if (actionObj.repeat) {
-      const repeat = actionObj.repeat as Record<string, unknown>;
-      const sequence = repeat.sequence as unknown[];
-      if (Array.isArray(sequence)) {
-        for (const seqItem of sequence) {
-          const seqObj = seqItem as Record<string, unknown>;
-          if (Array.isArray(seqObj.choose)) {
-            hasRepeatChoose = true;
-            break;
-          }
-        }
+    if (isMapping(actionObj.repeat)) {
+      if (mappings(loopSteps(actionObj.repeat)).some((seqObj) => Array.isArray(seqObj.choose))) {
+        hasRepeatChoose = true;
       }
     }
   }
@@ -80,7 +90,7 @@ export function parseStateMachineStructure(
   metadataNodeIds: string[],
   fanOuts?: Record<string, { targets: string[]; hash: string }>,
   markers?: Record<string, Record<string, unknown>>
-): { nodes: FlowNode[]; edges: FlowEdge[] } {
+): { nodes: FlowNode[]; edges: FlowEdge[]; unread?: string } {
   const nodes: FlowNode[] = [];
   const edges: FlowEdge[] = [];
 
@@ -92,6 +102,11 @@ export function parseStateMachineStructure(
     warnings.push('No actions found in automation');
     return { nodes, edges };
   }
+
+  // Edited outside Circuitry into something this reader would read only in
+  // part: the caller reads it as the plain YAML it is instead.
+  const unread = unreadStateMachineContent(actions);
+  if (unread !== null) return { nodes, edges, unread };
 
   const { entryNodeId, nodeInfoMap } = collectStates(actions);
 
@@ -215,17 +230,28 @@ export function parseStateMachineStructure(
   // separately would duplicate those branches in the graph.
   const rebuiltNodes: FlowNode[] = [];
   const rebuiltEdges: FlowEdge[] = [];
-  const rebuiltByContent = new Map<string, string[]>();
+  const rebuiltByContent = new Map<string, { to: string; type?: FlowEdge['type'] }[]>();
   const wireThrough = (
     fromIds: string[],
     steps: unknown[],
     target: string | null,
     handle?: 'true' | 'false'
   ): { nodes: FlowNode[]; edges: FlowEdge[] } => {
-    const entryEdges = (entries: string[]): FlowEdge[] =>
-      fromIds.flatMap((from) => entries.map((to) => createEdge(from, to, handle)));
+    // A rebuilt step's edges in, and its visual-only hint edges (the
+    // standard parser draws one from the step before a Choose to each of
+    // its later cases): kept as hints. Rebuilt as ordinary edges, a later
+    // case was a branch of its own, run whatever the cases before it
+    // decided (#149).
+    type Entry = { to: string; type?: FlowEdge['type'] };
+    const entryEdges = (entries: Entry[]): FlowEdge[] =>
+      fromIds.flatMap((from) =>
+        entries.map(({ to, type }) => ({
+          ...createEdge(from, to, handle),
+          ...(type !== undefined ? { type } : {}),
+        }))
+      );
     if (steps.length === 0) {
-      return { nodes: [], edges: target && target !== 'END' ? entryEdges([target]) : [] };
+      return { nodes: [], edges: target && target !== 'END' ? entryEdges([{ to: target }]) : [] };
     }
     const key = `${fanOutHash(steps)}|${target ?? 'END'}`;
     const shared = rebuiltByContent.get(key);
@@ -239,9 +265,14 @@ export function parseStateMachineStructure(
       falsePathConditionIds: new Set(handle === 'false' && onlyFrom ? [onlyFrom] : []),
     });
     const fromSet = new Set(fromIds);
-    const entries = [
-      ...new Set(result.edges.filter((e) => fromSet.has(e.source)).map((e) => e.target)),
-    ];
+    const seenEntries = new Set<string>();
+    const entries: Entry[] = [];
+    for (const e of result.edges) {
+      const entryKey = `${e.target}|${e.type ?? ''}`;
+      if (!fromSet.has(e.source) || seenEntries.has(entryKey)) continue;
+      seenEntries.add(entryKey);
+      entries.push({ to: e.target, ...(e.type !== undefined ? { type: e.type } : {}) });
+    }
     rebuiltNodes.push(...result.nodes);
     rebuiltEdges.push(...result.edges.filter((e) => !fromSet.has(e.source)));
     if (target && target !== 'END') {
@@ -435,39 +466,95 @@ function collectStates(actions: unknown[]): {
   let entryNodeId: string | null = null;
   const nodeInfoMap = new Map<string, ParsedStateBlock>();
 
-  for (const action of actions) {
-    const actionObj = action as Record<string, unknown>;
-
+  for (const actionObj of mappings(actions)) {
     // Find entry node from initial variables
-    if (actionObj.variables) {
-      const vars = actionObj.variables as Record<string, unknown>;
-      if (typeof vars.current_node === 'string' && vars.current_node !== 'END') {
-        entryNodeId = vars.current_node;
-      }
+    const vars = actionObj.variables;
+    if (isMapping(vars) && typeof vars.current_node === 'string' && vars.current_node !== 'END') {
+      entryNodeId = vars.current_node;
     }
 
     // Parse repeat/choose structure
-    if (actionObj.repeat) {
-      const repeat = actionObj.repeat as Record<string, unknown>;
-      const sequence = repeat.sequence as unknown[];
-
-      if (Array.isArray(sequence)) {
-        for (const seqItem of sequence) {
-          const seqObj = seqItem as Record<string, unknown>;
-
-          if (Array.isArray(seqObj.choose)) {
-            for (const chooseBlock of seqObj.choose) {
-              const nodeInfo = parseStateMachineChooseBlock(chooseBlock as Record<string, unknown>);
-              if (nodeInfo) {
-                nodeInfoMap.set(nodeInfo.nodeId, nodeInfo);
-              }
-            }
+    if (isMapping(actionObj.repeat)) {
+      for (const seqObj of mappings(loopSteps(actionObj.repeat))) {
+        for (const chooseBlock of mappings(seqObj.choose)) {
+          // A loop's round count and limit (#157) are the state machine's
+          // own bookkeeping, not steps of the graph.
+          const nodeInfo = parseStateMachineChooseBlock(
+            Array.isArray(chooseBlock.sequence)
+              ? { ...chooseBlock, sequence: withoutLoopBookkeeping(chooseBlock.sequence) }
+              : chooseBlock
+          );
+          if (nodeInfo) {
+            nodeInfoMap.set(nodeInfo.nodeId, nodeInfo);
           }
         }
       }
     }
   }
   return { entryNodeId, nodeInfoMap };
+}
+
+/** The state machine's own variables in its loop: #129's pass loop and
+ * #157's run loop. */
+const LOOP_VARIABLES = new Set(['pass_nodes', 'run_rounds', 'prev_node', 'this_node']);
+
+/**
+ * What this reader would leave out of a state machine edited by hand
+ * (in HA's editor, say), or null when it reads all of it: a step beside
+ * the start variables and the loop, a step in the loop that isn't its
+ * bookkeeping or the dispatcher, a dispatch option with a condition of its
+ * own, a condition state with a step beside its one `if:` (a second
+ * `if:`, a step before it), or a transition that isn't a branch's last
+ * step. Reading those as far as they went lost the rest; read as plain
+ * YAML they're kept, and run as HA runs them.
+ */
+function unreadStateMachineContent(actions: unknown[]): string | null {
+  if (actions.length === 0) return null;
+  const top = mappings(actions);
+  if (top.length !== actions.length) return 'a step that is not a mapping';
+  const isInit = (step: Record<string, unknown>) =>
+    isMapping(step.variables) && 'current_node' in step.variables;
+  const loop = top.filter((step) => isMapping(step.repeat));
+  if (loop.length !== 1 || top.some((step) => !isInit(step) && step !== loop[0])) {
+    return 'steps beside the state machine';
+  }
+  const repeat = loop[0].repeat as Record<string, unknown>;
+  for (const step of loopSteps(repeat)) {
+    if (!isMapping(step)) return 'a step in the loop that is not a mapping';
+    if (isMapping(step.repeat)) continue;
+    if (isMapping(step.variables) && Object.keys(step.variables).every((k) => LOOP_VARIABLES.has(k))) {
+      continue;
+    }
+    if (!Array.isArray(step.choose)) return 'a step in the state machine loop';
+    for (const option of step.choose) {
+      if (!isMapping(option)) return 'a dispatch option that is not a mapping';
+      const reason = unreadState(option);
+      if (reason !== null) return reason;
+    }
+  }
+  return null;
+}
+
+/** See unreadStateMachineContent: for one dispatch option. */
+function unreadState(option: Record<string, unknown>): string | null {
+  const conditions = Array.isArray(option.conditions) ? option.conditions : [];
+  if (conditions.length !== 1) return 'a dispatch option with conditions of its own';
+  const sequence = withoutLoopBookkeeping(Array.isArray(option.sequence) ? option.sequence : []);
+  const endsInOneTransition = (steps: unknown) =>
+    Array.isArray(steps) &&
+    steps.length > 0 &&
+    isTransitionStep(steps[steps.length - 1]) &&
+    steps.filter(isTransitionStep).length === 1;
+  if (sequence.some(isTransitionStep)) {
+    return endsInOneTransition(sequence) ? null : 'a step after a transition';
+  }
+  const only = sequence[0];
+  if (sequence.length !== 1 || !isMapping(only) || !Array.isArray(only.if)) {
+    return 'a condition state with a step beside its test';
+  }
+  return endsInOneTransition(only.then) && endsInOneTransition(unwrapErrorGuard(only.else, only.if))
+    ? null
+    : 'a branch of a condition state that does not end in its transition';
 }
 
 /** A state with no step of its own: see the call site. */
@@ -924,16 +1011,18 @@ export function parseStateMachineChooseBlock(
       // read, so reopening a state edited to `if: [A, B]` dropped B). HA
       // ANDs the list; the node holds one condition, so an `and` group.
       const ifConditions = seqItem.if.map(expandConditionShorthand);
-      Object.assign(
-        data,
-        importCondition(
-          ifConditions.length === 1
-            ? ifConditions[0]
-            : { condition: 'and', conditions: ifConditions },
-          'state-machine condition'
-        )
+      const imported = importCondition(
+        ifConditions.length === 1
+          ? ifConditions[0]
+          : { condition: 'and', conditions: ifConditions },
+        'state-machine condition'
       );
-      if (seqItem.alias) data.alias = seqItem.alias;
+      Object.assign(data, imported);
+      // The if step's alias is the node's (a block's, on its first
+      // condition); one inside the condition is the condition's own, which
+      // the state machine writes there (#143, conditionAliases).
+      data.alias = typeof seqItem.alias === 'string' ? seqItem.alias : undefined;
+      if (typeof imported.alias === 'string') data._conditionAlias = imported.alias;
 
       // Each branch's sequence contains exactly one `variables: {current_node: "id"}`
       // entry (see generateConditionBlock) — find it and read the target back out.
@@ -1062,43 +1151,34 @@ export function parseStateMachineChooseBlock(
 }
 
 /**
- * Parse Jinja condition expression to extract condition data
+ * Parse Jinja condition expression to extract condition data: the test of a
+ * condition state written as a Jinja ternary, by the state machine before
+ * the first public release. Only a test HA's own conditions say exactly is
+ * read as one (#136); anything else stays the template it was, which HA
+ * evaluates as written.
  */
 export function parseJinjaCondition(expr: string): Record<string, unknown> {
-  // is_state('entity', 'state')
-  const isStateMatch = expr.match(/is_state\s*\(\s*['"]([^'"]+)['"]\s*,\s*['"]([^'"]+)['"]\s*\)/);
+  const whole = (pattern: RegExp) => expr.trim().match(pattern);
+  // is_state('entity', 'state'), the whole test. (sun.sun too: a state
+  // condition on it means exactly that; a sun condition's sunrise/sunset
+  // window doesn't.)
+  const isStateMatch = whole(/^is_state\s*\(\s*['"]([^'"]+)['"]\s*,\s*['"]([^'"]+)['"]\s*\)$/);
   if (isStateMatch) {
-    const entityId = isStateMatch[1];
-    const state = isStateMatch[2];
-
-    // Check for sun entity
-    if (entityId === 'sun.sun') {
-      if (state === 'above_horizon') {
-        return { condition: 'sun', after: 'sunrise', before: 'sunset' };
-      } else if (state === 'below_horizon') {
-        return { condition: 'sun', after: 'sunset', before: 'sunrise' };
-      }
-    }
-
-    return { condition: 'state', entity_id: entityId, state };
+    return { condition: 'state', entity_id: isStateMatch[1], state: isStateMatch[2] };
   }
 
-  // states('entity') | float > number
-  const numericMatch = expr.match(
-    /states\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\|\s*float\s*([<>=]+)\s*(\d+(?:\.\d+)?)/
+  // states('entity') | float > number (or <): numeric_state's above and
+  // below are strict, so >=, <= and == aren't one of them.
+  const numericMatch = whole(
+    /^states\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\|\s*float\s*([<>])\s*(\d+(?:\.\d+)?)$/
   );
   if (numericMatch) {
-    const entityId = numericMatch[1];
-    const operator = numericMatch[2];
     const value = parseFloat(numericMatch[3]);
-
-    const result: Record<string, unknown> = {
+    return {
       condition: 'numeric_state',
-      entity_id: entityId,
+      entity_id: numericMatch[1],
+      ...(numericMatch[2] === '>' ? { above: value } : { below: value }),
     };
-    if (operator.includes('>')) result.above = value;
-    if (operator.includes('<')) result.below = value;
-    return result;
   }
 
   // Fallback to template condition

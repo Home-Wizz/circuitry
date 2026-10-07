@@ -2,8 +2,11 @@ import {
   CONDITION_BEHAVIORS,
   conditionIsTargetless,
   conditionOptionFields,
+  getConditionThresholdShape,
   getThresholdUnits,
+  getTriggerThresholdShape,
   type NativeOptionFields,
+  type ThresholdShape,
   TRIGGER_BEHAVIORS,
   triggerIsTargetless,
   triggerOptionFields,
@@ -101,4 +104,24 @@ export function resolveTargetless(
 ): boolean {
   if (!description) return kind === 'trigger' ? triggerIsTargetless(type) : conditionIsTargetless(type);
   return description.target === undefined;
+}
+
+/**
+ * A type's threshold shape, as the connected HA has it: the tables' shape,
+ * unless HA describes the type without a `threshold` field. HA's threshold
+ * rework (2026.5) replaced the climate, humidifier and light triggers'
+ * `above`/`below` and `threshold_type`/`lower_limit`/`upper_limit` with one
+ * `threshold`; an HA from before it describes those fields instead, and
+ * they're set by HA's own selectors (DescribedOptionFields) rather than the
+ * panel's threshold editor, which writes the field such an HA refuses.
+ */
+export function describedThresholdShape(
+  kind: Kind,
+  type: string,
+  description: NativeDescription | null | undefined
+): ThresholdShape {
+  const shape =
+    kind === 'trigger' ? getTriggerThresholdShape(type) : getConditionThresholdShape(type);
+  if (shape === 'none' || !description) return shape;
+  return description.fields && 'threshold' in description.fields ? shape : 'none';
 }

@@ -16,6 +16,7 @@ import {
   useRef,
   useState,
 } from 'react';
+import { readStored, writeStored } from '@/lib/storage';
 import type { HassEntity, HassService, HomeAssistant } from '@/types/hass';
 
 /**
@@ -24,6 +25,21 @@ import type { HassEntity, HassService, HomeAssistant } from '@/types/hass';
 export interface AreaRegistryEntry {
   area_id: string;
   name: string;
+  /** The floor it's on (HA 2024.4 and later), when it's on one. */
+  floor_id?: string | null;
+  /** Its labels: a label targets every entity in an area it's on, as it
+   * does a device's. */
+  labels?: string[];
+}
+
+/**
+ * Floor registry entry from Home Assistant (2024.4 and later): the pickers
+ * list areas under their floors, the way HA's own "Add trigger" dialog does.
+ */
+export interface FloorRegistryEntry {
+  floor_id: string;
+  name: string;
+  level: number | null;
 }
 
 /**
@@ -37,6 +53,9 @@ interface DeviceRegistryEntry {
   model: string | null;
   area_id: string | null;
   labels?: string[];
+  /** `service` for a service (Sun, Backup, a weather service...), not a device. */
+  entry_type?: string | null;
+  disabled_by?: string | null;
 }
 
 /**
@@ -95,12 +114,18 @@ async function loadRegistries(connection: Connection): Promise<{
   devices: Map<string, DeviceRegistryEntry>;
   entities: Map<string, EntityRegistryEntry>;
   labels: Map<string, LabelRegistryEntry>;
+  floors: Map<string, FloorRegistryEntry>;
 }> {
-  const [areaList, deviceList, entityList, labelList] = await Promise.all([
+  const [areaList, deviceList, entityList, labelList, floorList] = await Promise.all([
     connection.sendMessagePromise<AreaRegistryEntry[]>({ type: 'config/area_registry/list' }),
     connection.sendMessagePromise<DeviceRegistryEntry[]>({ type: 'config/device_registry/list' }),
     connection.sendMessagePromise<EntityRegistryEntry[]>({ type: 'config/entity_registry/list' }),
     connection.sendMessagePromise<LabelRegistryEntry[]>({ type: 'config/label_registry/list' }),
+    // An HA from before floors has no floor registry: its areas are listed
+    // without floors, rather than every registry failing with it.
+    connection
+      .sendMessagePromise<FloorRegistryEntry[]>({ type: 'config/floor_registry/list' })
+      .catch((): FloorRegistryEntry[] => []),
   ]);
 
   return {
@@ -108,6 +133,7 @@ async function loadRegistries(connection: Connection): Promise<{
     devices: new Map(deviceList.map((device) => [device.id, device])),
     entities: new Map(entityList.map((entity) => [entity.entity_id, entity])),
     labels: new Map(labelList.map((label) => [label.label_id, label])),
+    floors: new Map(floorList.map((floor) => [floor.floor_id, floor])),
   };
 }
 
@@ -116,7 +142,7 @@ async function loadRegistries(connection: Connection): Promise<{
  */
 function loadConfig(): HassConfig {
   try {
-    const stored = localStorage.getItem(STORAGE_KEY);
+    const stored = readStored(STORAGE_KEY);
     if (stored) {
       return JSON.parse(stored);
     }
@@ -130,11 +156,7 @@ function loadConfig(): HassConfig {
  * Save config to localStorage
  */
 function saveConfig(config: HassConfig): void {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(config));
-  } catch {
-    // Ignore storage errors
-  }
+  writeStored(STORAGE_KEY, JSON.stringify(config));
 }
 
 interface HassContextProps {
@@ -164,10 +186,38 @@ interface HassContextProps {
   getDeviceIdForEntity: (entityId: string) => string | null;
   /** False for `config`/`diagnostic`-category or hidden entities (Identify buttons, signal strength, firmware update, ...) — used to keep trigger/action pickers free of automation-irrelevant noise. */
   isAutomationRelevantEntity: (entityId: string) => boolean;
+  /** Whether an entity is a config or diagnostic one (and not hidden): left
+   * out of the pickers, except for the types HA lets reach them
+   * (`primary_entities_only: false`, the battery's). Optional: a context
+   * without a registry has none. */
+  isSecondaryEntity?: (entityId: string) => boolean;
+  /** A device as the registry has it: its own area, whether it's a service
+   * (`entry_type: service`) and whether it's disabled; null when it isn't
+   * registered. Optional: a context without a registry has none. */
+  getDeviceInfo?: (
+    deviceId: string
+  ) => { areaId: string | null; isService: boolean; isDisabled: boolean } | null;
+  /** Floor registry, by level then name (empty on an HA from before floors). */
+  floors: FloorRegistryEntry[];
   /** Label registry, sorted by name — used by the trigger picker's "Labels" root section, mirroring `areas` above. */
   labels: LabelRegistryEntry[];
   /** An entity's own labels, unioned with its device's labels (HA's own UI treats a device's labels as applying to all its entities too) — deduped. */
   getLabelIdsForEntity: (entityId: string) => string[];
+}
+
+/**
+ * The labels that reach an entity, as a label target does in HA: its own,
+ * its device's, and those of the area it's in (its own area, or else its
+ * device's).
+ */
+export function entityLabelIds(
+  entity: { labels?: string[] },
+  device: { labels?: string[] } | undefined,
+  area: { labels?: string[] } | undefined
+): string[] {
+  return Array.from(
+    new Set([...(entity.labels ?? []), ...(device?.labels ?? []), ...(area?.labels ?? [])])
+  );
 }
 
 const HassContext = createContext<HassContextProps | undefined>(undefined);
@@ -189,6 +239,7 @@ export const HassProvider: FC<
   const [deviceRegistry, setDeviceRegistry] = useState<Map<string, DeviceRegistryEntry>>(new Map());
   const [entityRegistry, setEntityRegistry] = useState<Map<string, EntityRegistryEntry>>(new Map());
   const [labelRegistry, setLabelRegistry] = useState<Map<string, LabelRegistryEntry>>(new Map());
+  const [floorRegistry, setFloorRegistry] = useState<Map<string, FloorRegistryEntry>>(new Map());
   const [isLoading, setIsLoading] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [wsConnection, setWsConnection] = useState<Connection | null>(null);
@@ -209,6 +260,7 @@ export const HassProvider: FC<
     setDeviceRegistry(new Map());
     setEntityRegistry(new Map());
     setLabelRegistry(new Map());
+    setFloorRegistry(new Map());
     setConnectionError(null);
   }, []);
 
@@ -265,11 +317,12 @@ export const HassProvider: FC<
 
         // Fetch device and entity registries
         loadRegistries(connection)
-          .then(({ areas, devices, entities, labels }) => {
+          .then(({ areas, devices, entities, labels, floors }) => {
             setAreaRegistry(areas);
             setDeviceRegistry(devices);
             setEntityRegistry(entities);
             setLabelRegistry(labels);
+            setFloorRegistry(floors);
           })
           .catch((error) => {
             console.error('Circuitry: Failed to fetch registries:', error);
@@ -305,11 +358,12 @@ export const HassProvider: FC<
     if (!externalHass?.connection) return;
 
     loadRegistries(externalHass.connection)
-      .then(({ areas, devices, entities, labels }) => {
+      .then(({ areas, devices, entities, labels, floors }) => {
         setAreaRegistry(areas);
         setDeviceRegistry(devices);
         setEntityRegistry(entities);
         setLabelRegistry(labels);
+        setFloorRegistry(floors);
       })
       .catch((error) => {
         console.error('Circuitry: Failed to fetch registries from externalHass:', error);
@@ -528,14 +582,23 @@ export const HassProvider: FC<
     [labelRegistry]
   );
 
+  const floors = useMemo(
+    () =>
+      Array.from(floorRegistry.values()).sort(
+        (a, b) => (a.level ?? 0) - (b.level ?? 0) || a.name.localeCompare(b.name)
+      ),
+    [floorRegistry]
+  );
+
   const getLabelIdsForEntity = useCallback(
     (entityId: string): string[] => {
       const entry = entityRegistry.get(entityId);
       if (!entry) return [];
-      const deviceLabels = entry.device_id ? (deviceRegistry.get(entry.device_id)?.labels ?? []) : [];
-      return Array.from(new Set([...(entry.labels ?? []), ...deviceLabels]));
+      const device = entry.device_id ? deviceRegistry.get(entry.device_id) : undefined;
+      const areaId = entry.area_id ?? device?.area_id ?? null;
+      return entityLabelIds(entry, device, areaId ? areaRegistry.get(areaId) : undefined);
     },
-    [entityRegistry, deviceRegistry]
+    [entityRegistry, deviceRegistry, areaRegistry]
   );
 
   // Matches HA's own automation editor: entities registered as `config` or
@@ -549,11 +612,38 @@ export const HassProvider: FC<
     (entityId: string): boolean => {
       const entry = entityRegistry.get(entityId);
       if (!entry) return true;
-      if (entry.entity_category === 'config' || entry.entity_category === 'diagnostic') return false;
+      if (entry.entity_category === 'config' || entry.entity_category === 'diagnostic')
+        return false;
       if (entry.hidden_by) return false;
       return true;
     },
     [entityRegistry]
+  );
+
+  const isSecondaryEntity = useCallback(
+    (entityId: string): boolean => {
+      const entry = entityRegistry.get(entityId);
+      return (
+        !!entry &&
+        !entry.hidden_by &&
+        (entry.entity_category === 'config' || entry.entity_category === 'diagnostic')
+      );
+    },
+    [entityRegistry]
+  );
+
+  const getDeviceInfo = useCallback(
+    (deviceId: string) => {
+      const device = deviceRegistry.get(deviceId);
+      return device
+        ? {
+            areaId: device.area_id ?? null,
+            isService: device.entry_type === 'service',
+            isDisabled: !!device.disabled_by,
+          }
+        : null;
+    },
+    [deviceRegistry]
   );
 
   const value: HassContextProps = {
@@ -578,7 +668,10 @@ export const HassProvider: FC<
     getDeviceIdForEntity,
     isAutomationRelevantEntity,
     labels,
+    floors,
     getLabelIdsForEntity,
+    isSecondaryEntity,
+    getDeviceInfo,
   };
 
   return <HassContext.Provider value={value}>{children}</HassContext.Provider>;

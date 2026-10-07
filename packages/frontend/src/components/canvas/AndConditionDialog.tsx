@@ -1,160 +1,186 @@
-import type { FlowNode } from '@circuitry/shared';
-import { Blocks, Clock, Home, Layers, type LucideIcon, Radio, Search, Sun, Tag, Zap } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import {
+  Blocks as BlocksIcon,
+  Clock,
+  Layers,
+  ListTree,
+  type LucideIcon,
+  Moon,
+  Signpost,
+  Sun,
+  Tag,
+  Zap,
+} from 'lucide-react';
+import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
+  conditionPickKey,
+  PickerCurrentProvider,
+  recipeChoiceKey,
+} from '@/components/canvas/pickerCurrent';
+import { searchTypeKey, uniqueSearchTypes } from '@/components/canvas/searchTypes';
+import { NodeConfigColumn } from '@/components/canvas/NodeConfigColumn';
+import {
+  PickerColumnRow,
   MILLER_DIALOG_CONTENT_CLASS,
+  usePickerSize,
   MultiTargetPanel,
   NavColumnList,
   NavColumnSections,
   type NavRow,
   type NavSection,
+  PickerHeader,
+  type PickerKind,
+  PickerKindSwitch,
   ResizableColumn,
   ResultsColumn,
-  type TargetPickerRow,
+  renderStackedColumns,
 } from '@/components/canvas/PickerColumns';
-import { NativeConditionFields } from '@/components/panels/node-fields/NativeConditionFields';
+import { groupSections, headed } from '@/components/canvas/pickerRoot';
+import {
+  deviceEntityRows,
+  devicesSections,
+  homeSections,
+  labelRow,
+  type PlaceColumn,
+  type PlaceLabels,
+  placeRows,
+  searchPlaceSections,
+  entityTargetRows,
+  routeScopePick,
+  unassignedRows,
+  usePickerPlaces,
+} from '@/components/canvas/pickerPlaces';
+import { DeviceAutomationColumn } from '@/components/canvas/DeviceAutomationColumn';
 import { TriggerResultRow } from '@/components/panels/node-fields/TriggerResultRow';
 import {
-  allEntityIds,
-  buildDeviceScope,
-  buildUnassignedGroups,
-  type DeviceGroup,
-  type EntityScope,
-  getEntityName,
-  groupByDevice,
   type SelectedScope,
+  scopeSecondaryEntityIds,
+  scopeTypeEntityIds,
 } from '@/components/panels/node-fields/TriggerTargetPicker';
 import { Button } from '@/components/ui/button';
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Dialog, DialogContent } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { useHass } from '@/contexts/HassContext';
 import { HaSelector } from '@/ha';
 import { type DeviceCondition, useDeviceAutomation } from '@/hooks/useDeviceAutomation';
-import { useStableEntityList } from '@/hooks/useStableEntityList';
+import { useConditionCatalog, useHaOffers } from '@/hooks/useHaCatalog';
+import { usePickNeedsSettings } from '@/hooks/usePickGaps';
 import { useTranslations } from '@/hooks/useTranslations';
-import { buildConditionNodeData } from '@/lib/conditionNodeData';
+import {
+  buildConditionNodeData,
+  conditionRecipeTakesArea,
+  conditionRecipeTakesEntities,
+} from '@/lib/conditionNodeData';
+import { groupRecipesByHeading } from '@/lib/recipeRows';
 import {
   CONDITION_BLOCKS,
-  getConditionBlockIcon,
   type ConditionBlock,
   type ConditionRecipe,
-  ENTITY_CONDITION_CATEGORIES,
   type EntityConditionCategory,
+  getConditionBlockIcon,
   getEntityConditionRecipeGroup,
-  SUN_CONDITIONS,
 } from '@/lib/conditionRecipes';
 import { buildCompositeValue, getDeviceAutomationLabel } from '@/lib/deviceTriggerLabels';
-import { getConditionEnumField, hasConditionSingleValueField } from '@/lib/conditionEnumField';
 import { getDomainColor } from '@/lib/domain-colors';
-import { getDomainIcon } from '@/lib/domain-icons';
-import { getConditionThresholdShape } from '@/lib/nativeThreshold';
+import { entityPickerIcon, getPickerIcon, StepIcon } from '@/components/nodes/StepIcon';
+import { useNativeDescriptions } from '@/hooks/useNativeDescriptions';
+import { categoryEntityDomains } from '@/lib/haCatalog';
+import {
+  entityRecipeGroups,
+  entitiesForType,
+  secondaryEntityCategories,
+} from '@/lib/nativeTargets';
+import {
+  CONDITION_GENERIC_BLOCKS,
+  CONDITION_GROUPED_BLOCKS,
+  CONDITION_LOGIC_BLOCKS,
+  CONDITION_NON_DEVICE_BLOCKS,
+  isIntegrationCategory,
+  TIME_CATEGORY_DOMAINS,
+} from '@/lib/pickerLayout';
+import { prettify } from '@/lib/utils';
+import { entityName } from '@/lib/entityNames';
 import type { HassEntity } from '@/types/hass';
+import { toneStyle } from '@/lib/node-colors';
 
 /**
- * "+Add > And" — the AndConditionDialog equivalent of WhenTriggerDialog.tsx,
- * applying the exact same Miller-column architecture (root sections, card
- * rows, multi-select third panels) to Home Assistant's purpose-specific
- * *conditions* (`condition: light.is_on`, dotted domain.is_* form —
- * confirmed against the live home-assistant.io/conditions/ reference,
- * mirroring the same 2025.12+ mechanism WhenTriggerDialog already uses for
- * triggers) instead of triggers. See lib/conditionRecipes.ts for the
- * catalog and lib/conditionNodeData.ts for the selection -> node-data
- * mapping.
- *
- * The one structural difference from When, per explicit user request: a
- * "Blocks" root section — and/or/not, Template, Time, Trigger (by id) —
- * positioned ABOVE Zones/Device types, covering AND's non-entity-scoped
- * structural conditions. Blocks commit immediately (no target/entity
- * picker step — none of them test a specific entity), the same way When's
- * "Platform triggers" section's time/sun/template entries commit
- * immediately rather than opening a third column.
- *
- * Unlike When, there's no "Platform triggers"-style flat legacy-platform
- * section: every recipe here is already a genuine purpose-specific
- * condition (see conditionRecipes.ts's doc comment for why no legacy
- * state/numeric_state fallback catalog exists), and the structural bits
- * that would've needed one live in Blocks instead. Device rows (both the
- * Zones flow and the "Generic" > "Device" flow below) merge in live
- * `device_automation/condition/list` results alongside the catalog recipes
- * — see ConditionTargetResultsPanel, mirroring how ThenActionDialog's
- * equivalent panel merges live device actions.
+ * "And…": the When picker's (WhenTriggerDialog.tsx) counterpart for Home
+ * Assistant's conditions -- the purpose-specific ones (`condition:
+ * light.is_on`, lib/conditionRecipes.ts) and the classic blocks. Its first
+ * column follows lib/pickerLayout.ts: Blocks (And, Or, Not), Home, Devices,
+ * Device types, Non-device types (Time, Sun, Template, Triggered by) and
+ * Home Assistant (Unassigned, Labels, Generic: Device, State, Numeric
+ * state; Integrations). A device's results merge in its live
+ * `device_automation/condition/list` conditions (ConditionTargetResultsPanel).
+ * A pick that still needs something is set up under the column it was
+ * picked in; a ready one is added at once.
  */
+
+type GroupKey = 'unassigned' | 'labels' | 'generic' | 'integrations';
 
 type NavColumn =
   | { kind: 'root' }
-  | { kind: 'blocks' }
-  | { kind: 'areas' }
-  | { kind: 'areaChildren'; areaLabel: string; scope: EntityScope }
-  | { kind: 'deviceChildren'; group: DeviceGroup }
-  | { kind: 'unassignedOptions' }
-  | { kind: 'targetResults'; scope: SelectedScope }
-  | { kind: 'typeResults'; category: EntityConditionCategory }
-  | { kind: 'recipeEntities'; category: EntityConditionCategory; recipe: ConditionRecipe }
-  | { kind: 'scopeTargets'; label: string; recipe: ConditionRecipe; entityIds: string[] }
-  | { kind: 'recipeConfig'; recipe: ConditionRecipe; draftData: Record<string, unknown> }
-  | { kind: 'labels' }
-  | { kind: 'generic' }
-  // "By type" > "Generic" — real HA's own condition Generic collection is
-  // `{ device: {}, entity: { members: { state: {}, numeric_state: {} } } }`
-  // (home-assistant/frontend's data/condition.ts's CONDITION_COLLECTIONS) —
-  // a flat device list leading to the same live device-condition results
-  // panel the Zones flow already uses, and a two-row State/Numeric State
-  // pick reusing CONDITION_BLOCKS' own entries.
+  | { kind: 'search'; query: string }
+  | PlaceColumn
+  | { kind: 'devices' }
+  | { kind: 'deviceTypes' }
+  | { kind: 'nonDevice' }
+  | { kind: 'group'; key: GroupKey; title: string }
   | { kind: 'genericDevicePick' }
-  | { kind: 'genericEntityPick' }
-  // "By type" > "Sun" — real HA's own Sun category (verified against
-  // home-assistant/core's sun/condition.py) is 8 purpose-built conditions
-  // (is_up, is_set, is_ascending, is_descending, elevation, is_night,
-  // is_morning_twilight, is_evening_twilight), none of which take a target —
-  // the sun is a singleton — so this pushes a flat card list
-  // (lib/conditionRecipes.ts's SUN_CONDITIONS) that commits immediately on
-  // select, the same as the Blocks column, rather than routing through the
-  // entity-target picker every other By-type category uses.
-  | { kind: 'sunOptions' }
-  // "By type" > "Time" pushes a second column instead of committing
-  // immediately: an after/before/weekday window shouldn't silently default
-  // to "always true" the way e.g. Zone's empty entity_id/zone does, since
-  // it reads as a genuine decision rather than a "fill in later"
-  // placeholder.
-  | { kind: 'timeOptions' };
+  // Non-device types › Time: the Time condition (its after/before/weekday
+  // form) and the calendar's and schedule's conditions.
+  | { kind: 'timeGroup' }
+  // The sun's and the moon's conditions: no target (the sun and the moon are
+  // singletons), picked like blocks. The Sun's list also has the classic
+  // Sun condition.
+  | { kind: 'singletonOptions'; key: 'sun' | 'moon' }
+  // A category's conditions, with the classic blocks HA lists beside them
+  // (the Zone condition with the zone conditions).
+  | { kind: 'typeResults'; category: EntityConditionCategory; extraBlocks?: ConditionBlock[] }
+  | { kind: 'recipeEntities'; category: EntityConditionCategory; recipe: ConditionRecipe }
+  | {
+      kind: 'scopeTargets';
+      label: string;
+      recipe: ConditionRecipe;
+      entityIds: string[];
+      /** "Anything in <room>" as the list's first line. */
+      area?: { areaId: string; label: string };
+    }
+  /** A room's State row: its entities, to tick. */
+  | { kind: 'stateTargets'; label: string; entityIds: string[] }
+  // The Time condition's form: an after/before/weekday window is a decision
+  // to make, not a "fill in later" default.
+  | { kind: 'timeOptions' }
+  // The pick's settings, when it still needs something (NodeConfigColumn).
+  | ({ kind: 'configure' } & ConditionDraft);
 
-/**
- * Turns a CONDITION_BLOCKS entry into a NavRow that commits immediately —
- * shared by rootSections' "By type" list and zonesColumnSections' "By
- * target" list below, so Time/Sun (real HA's TIME_LOCATION_GROUPS: shown in
- * both tabs since they have no target) don't need their row-building logic
- * duplicated per call site.
- */
-function blockToNavRow(block: ConditionBlock, icon: LucideIcon, onSelectBlock: (block: ConditionBlock) => void): NavRow {
-  return {
-    key: block.key,
-    label: block.label,
-    icon,
-    color: getDomainColor(block.key),
-    onSelect: () => onSelectBlock(block),
-  };
-}
+/** A pick's draft, waiting for its settings. */
+type ConditionDraft = { pickKey: string; title: string; data: Record<string, unknown> };
 
-/** A device group's icon is its first entity's domain — see WhenTriggerDialog.tsx's identical helper. */
-function deviceGroupIcon(group: DeviceGroup): LucideIcon {
-  const domain = group.entities[0]?.entity_id.split('.')[0];
-  return getDomainIcon(domain, Layers);
-}
-function deviceGroupColor(group: DeviceGroup) {
-  const domain = group.entities[0]?.entity_id.split('.')[0];
-  return getDomainColor(domain);
-}
+/** The columns that set a pick up: shown under the column it was made in. */
+const isSetup = (column: NavColumn) =>
+  column.kind === 'recipeEntities' ||
+  column.kind === 'scopeTargets' ||
+  column.kind === 'stateTargets' ||
+  column.kind === 'timeOptions';
 
-// Opens straight into the "Zones" column, matching WhenTriggerDialog.tsx.
-const INITIAL_COLUMNS: NavColumn[] = [{ kind: 'root' }, { kind: 'areas' }];
-const INITIAL_SELECTED_KEYS: (string | null)[] = ['zones'];
+const INITIAL_COLUMNS: NavColumn[] = [{ kind: 'root' }];
+
+const blockByKey = (key: string): ConditionBlock | undefined =>
+  CONDITION_BLOCKS.find((b) => b.key === key);
 
 interface AndConditionDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   entities: HassEntity[];
   onCommit: (data: Record<string, unknown>) => void;
+  /** Offered when the picker may become the When or Then picker instead. */
+  onSwitchKind?: (kind: PickerKind) => void;
+  /** The condition a Replace… started from: the picker opens where it is,
+   * its row marked "Current". */
+  current?: Record<string, unknown>;
+  /** Text to open the picker's search with (the side panel's "Add a step…"). */
+  initialQuery?: string;
 }
 
 export function AndConditionDialog({
@@ -162,38 +188,37 @@ export function AndConditionDialog({
   onOpenChange,
   entities: allEntities,
   onCommit,
+  onSwitchKind,
+  current,
+  initialQuery,
 }: AndConditionDialogProps) {
   const { t } = useTranslation(['nodes']);
-  const {
-    areas,
-    getAreaIdForEntity,
-    getDeviceIdForEntity,
-    getDeviceNameById,
-    isAutomationRelevantEntity,
-    labels,
-    getLabelIdsForEntity,
-  } = useHass();
-  // Stabilized via useStableEntityList — see its own doc comment — so this
-  // dialog's area/device/label grouping chain below doesn't recompute on
-  // every live entity-state tick (was causing multi-second freezes while
-  // browsing, confirmed from a user screen recording).
-  const stableAllEntities = useStableEntityList(allEntities);
-  const entities = useMemo(
-    () => stableAllEntities.filter((e) => isAutomationRelevantEntity(e.entity_id)),
-    [stableAllEntities, isAutomationRelevantEntity]
-  );
+  const { getDeviceNameById } = useHass();
+  const places = usePickerPlaces(allEntities);
+  const { entities } = places;
 
   const [columns, setColumns] = useState<NavColumn[]>(INITIAL_COLUMNS);
-  const [selectedKeys, setSelectedKeys] = useState<(string | null)[]>(INITIAL_SELECTED_KEYS);
+  const [selectedKeys, setSelectedKeys] = useState<(string | null)[]>([]);
   const [search, setSearch] = useState('');
-  const [searchSelectedEntityId, setSearchSelectedEntityId] = useState<string | null>(null);
 
+  // The condition being replaced, by the key its row is marked with.
+  const currentType = typeof current?.condition === 'string' ? current.condition : undefined;
+  const currentKey = conditionPickKey(currentType);
+
+  // Opened afresh each time; at the condition being replaced when there is one.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: only on opening; the path is read from that render's catalog.
   useEffect(() => {
     if (open) {
-      setColumns(INITIAL_COLUMNS);
-      setSelectedKeys(INITIAL_SELECTED_KEYS);
+      const path = currentType ? pathToCondition(currentType) : null;
+      setColumns(path?.columns ?? INITIAL_COLUMNS);
+      setSelectedKeys(path?.selected ?? []);
       setSearch('');
-      setSearchSelectedEntityId(null);
+      const query = initialQuery?.trim();
+      if (query) {
+        setSearch(initialQuery ?? '');
+        setColumns([{ kind: 'search', query }]);
+        setSelectedKeys([]);
+      }
     }
   }, [open]);
 
@@ -201,729 +226,677 @@ export function AndConditionDialog({
     setColumns((prev) => [...prev.slice(0, atIndex + 1), column]);
     setSelectedKeys((prev) => [...prev.slice(0, atIndex), key]);
   };
-
-  const openAreaResults = (atIndex: number, areaId: string, label: string, scope: EntityScope) =>
-    pushColumn(
-      atIndex,
-      {
-        kind: 'targetResults',
-        scope: {
-          key: `area::${areaId}`,
-          label,
-          deviceIds: scope.deviceGroups.map((g) => g.deviceId),
-          entityIds: allEntityIds(scope),
-        },
-      },
-      areaId
-    );
-
-  const openLabelResults = (atIndex: number, labelId: string, label: string, scope: EntityScope) =>
-    pushColumn(
-      atIndex,
-      {
-        kind: 'targetResults',
-        scope: {
-          key: `label::${labelId}`,
-          label,
-          deviceIds: scope.deviceGroups.map((g) => g.deviceId),
-          entityIds: allEntityIds(scope),
-        },
-      },
-      labelId
-    );
-
-  const openDeviceResults = (atIndex: number, group: DeviceGroup) =>
-    pushColumn(atIndex, { kind: 'targetResults', scope: buildDeviceScope(group.deviceId, group) }, group.deviceId);
-
-  const openEntityResults = (atIndex: number, entity: HassEntity, deviceId: string | null) =>
-    pushColumn(
-      atIndex,
-      {
-        kind: 'targetResults',
-        scope: {
-          key: `entity::${entity.entity_id}`,
-          label: getEntityName(entity),
-          deviceIds: deviceId ? [deviceId] : [],
-          entityIds: [entity.entity_id],
-          singleEntityId: entity.entity_id,
-        },
-      },
-      entity.entity_id
-    );
+  const changeSearch = (value: string) => {
+    setSearch(value);
+    const query = value.trim();
+    setColumns(query ? [{ kind: 'search', query }] : INITIAL_COLUMNS);
+    setSelectedKeys([]);
+  };
 
   const commitAndClose = (data: Record<string, unknown>) => {
     onCommit(data);
     onOpenChange(false);
   };
 
-  const handleSelectBlock = (block: ConditionBlock) => commitAndClose(buildConditionNodeData({ kind: 'block', block }));
-  const handleSelectEntityTarget = (entityId: string) =>
-    commitAndClose(buildConditionNodeData({ kind: 'entityTarget', entityId }));
-  const handleSelectRecipe = (entityIds: string[], recipe: ConditionRecipe) =>
-    commitAndClose(buildConditionNodeData({ kind: 'recipe', entityIds, recipe }));
+  // A pick that's ready (lib/pickGaps.ts) is added at once, its optional
+  // settings at HA's defaults; one that still needs something (an entity's
+  // state, a template, a zone, a threshold, a moon phase, ...) is set up
+  // first, with the property panel's own editors.
+  const pickNeedsSettings = usePickNeedsSettings();
+  const pickerSize = usePickerSize();
+  const configure = (atIndex: number, draft: ConditionDraft) =>
+    pickNeedsSettings('condition', draft.data)
+      ? pushColumn(atIndex, { kind: 'configure', ...draft }, draft.pickKey)
+      : commitAndClose(draft.data);
 
-  // Purpose-specific recipes with a real, non-defaultable decision to make
-  // push one more column instead of committing immediately — the AND-dialog
-  // equivalent of WhenTriggerDialog.tsx's handleSelectRecipeConfigurable,
-  // same "real choice, no sensible silent default" reasoning. Three cases
-  // qualify:
-  //   - a real threshold to configure (illuminance/battery/humidity/
-  //     temperature/light's `is_value`/`is_brightness`/`is_level`
-  //     conditions, ...)
-  //   - a REQUIRED enum field (`climate.is_hvac_mode`, `water_heater.
-  //     is_operation_mode`, `select.is_option_selected` — but NOT
-  //     `humidifier.is_mode`, which HA documents as optional)
-  //   - the single-value field (`text.is_equal_to`'s `value` — always
-  //     required, no list form)
-  // Deliberately NOT triggered by `behavior`/`for` alone — see
-  // WhenTriggerDialog.tsx's identical reasoning. Reuses
-  // NativeConditionFields verbatim (see RecipeConfigForm below) so this
-  // column is never out of sync with the property panel's own editor.
-  //
-  // Only wired into the three Miller-column call sites below — not the flat
-  // search-results path at the bottom of this component, which stays a
-  // one-click commit for speed.
-  const handleSelectRecipeConfigurable = (
+  const blockDraft = (block: ConditionBlock): ConditionDraft => ({
+    pickKey: `block:${block.key}`,
+    title: block.label,
+    data: buildConditionNodeData({ kind: 'block', block }),
+  });
+  /** A block picked: the Time condition's form, or the block itself. */
+  const selectBlock = (block: ConditionBlock, atIndex: number) =>
+    block.key === 'time'
+      ? pushColumn(atIndex, { kind: 'timeOptions' }, 'block:time')
+      : configure(atIndex, blockDraft(block));
+  const entityTargetDraft = (entityIds: string[]): ConditionDraft => ({
+    pickKey: `entity:${entityIds.join(',')}`,
+    title: t('nodes:conditions.types.state'),
+    data: buildConditionNodeData({ kind: 'entityTarget', entityIds }),
+  });
+  const recipeDraft = (
+    entityIds: string[],
+    recipe: ConditionRecipe,
+    areaId?: string
+  ): ConditionDraft => ({
+    pickKey: areaId ? `recipe:${recipe.id}:area:${areaId}` : recipeChoiceKey(recipe.id, entityIds),
+    title: recipe.label,
+    data: buildConditionNodeData({ kind: 'recipe', entityIds, recipe, areaId }),
+  });
+  // A tick list's button says what comes next: "Next: settings" when the
+  // pick still needs its Fill in column (pickNeedsSettings), else Add.
+  const recipeTargetLabels = (recipe: ConditionRecipe, entityIds: string[]) =>
+    pickNeedsSettings('condition', recipeDraft(entityIds, recipe).data)
+      ? { ...multiTargetLabels, commitLabel: () => t('nodes:pickerConfig.nextSettings') }
+      : multiTargetLabels;
+  const selectRecipe = (
     atIndex: number,
     entityIds: string[],
+    recipe: ConditionRecipe,
+    areaId?: string
+  ) => configure(atIndex, recipeDraft(entityIds, recipe, areaId));
+  /** A condition picked from a list of types: its entities first, when it tests some. */
+  const selectTypeRecipe = (
+    atIndex: number,
+    category: EntityConditionCategory,
     recipe: ConditionRecipe
-  ) => {
-    const conditionType = recipe.fields.condition;
-    const needsConfig =
-      getConditionThresholdShape(conditionType) !== 'none' ||
-      getConditionEnumField(conditionType)?.required === true ||
-      hasConditionSingleValueField(conditionType);
-    if (needsConfig) {
-      const draftData = buildConditionNodeData({ kind: 'recipe', entityIds, recipe });
-      pushColumn(atIndex, { kind: 'recipeConfig', recipe, draftData }, recipe.id);
-      return;
-    }
-    handleSelectRecipe(entityIds, recipe);
-  };
-  // Device-specific condition (ZHA/deCONZ "is on"/"is off" checks and other
-  // integration-defined device conditions) fetched live from
-  // device_automation/condition/list — the condition-side sibling of
-  // ThenActionDialog's handleSelectDeviceAction.
-  const handleSelectDeviceCondition = (condition: DeviceCondition) =>
-    commitAndClose(buildConditionNodeData({ kind: 'deviceCondition', condition }));
-  // Time's "after/before/weekday window" — built directly rather than
-  // through buildConditionNodeData's 'block' case, since it carries real
-  // user-picked fields on top of CONDITION_BLOCKS' bare `{ condition: 'time' }`
-  // default.
-  const handleSelectTimeOptions = (after: string, before: string, weekdays: string[]) =>
+  ) =>
+    conditionRecipeTakesEntities(recipe)
+      ? pushColumn(
+          atIndex,
+          { kind: 'recipeEntities', category, recipe },
+          recipeChoiceKey(recipe.id, [])
+        )
+      : selectRecipe(atIndex, [], recipe);
+  // A device's own condition (ZHA/deCONZ "is on"/"is off" checks and other
+  // integration-defined ones), fetched live from device_automation/condition/list.
+  const deviceConditionDraft = (condition: DeviceCondition): ConditionDraft => ({
+    pickKey: `device:${condition.device_id}:${buildCompositeValue(condition)}`,
+    title: getDeviceNameById(condition.device_id) || prettify(condition.type),
+    data: buildConditionNodeData({ kind: 'deviceCondition', condition }),
+  });
+  // The Time form's window, built directly: it carries the picked fields on
+  // top of the block's bare `{ condition: 'time' }`.
+  const commitTimeOptions = (after: string, before: string, weekdays: string[]) =>
     commitAndClose({
       condition: 'time',
       ...(after ? { after } : {}),
       ...(before ? { before } : {}),
       ...(weekdays.length > 0 ? { weekday: weekdays } : {}),
     });
-  // Sun/Time's "By type"/"By target" row — pushes the options column above
-  // instead of committing immediately, at whichever index the caller is
-  // rendering from (root's deviceTypeRows is always index 0; zonesColumn
-  // Sections' timeSunTargetRows is always index 1, same as areaRows/
-  // deviceRows there).
-  const timeSunRow = (kind: 'time' | 'sun', icon: LucideIcon, atIndex: number): NavRow | null => {
-    const block = CONDITION_BLOCKS.find((b) => b.key === kind);
-    if (!block) return null;
+
+  const placeLabels: PlaceLabels = {
+    home: t('nodes:picker.sections.home'),
+    otherAreas: t('nodes:picker.groups.otherAreas'),
+    unassignedOption: (key) => t(`nodes:picker.unassignedOptions.${key}`),
+  };
+
+  const multiTargetLabels = {
+    addAllLabel: t('nodes:conditions.picker.and.addAllTargets'),
+    clearAllLabel: t('nodes:conditions.picker.and.clearAllTargets'),
+    noResultsLabel: t('nodes:conditions.picker.noResults'),
+    selectPromptLabel: t('nodes:conditions.picker.and.selectTargetsPrompt'),
+    commitLabel: (count: number) => t('nodes:conditions.picker.and.addConditionButton', { count }),
+  };
+
+  // The catalog as the connected HA has it (hooks/useHaCatalog.ts), its
+  // categories split: the calendar's and schedule's under Non-device types ›
+  // Time, a new integration's under Integrations, the rest under Device types.
+  const catalog = useConditionCatalog();
+  const conditionDescriptions = useNativeDescriptions('condition');
+  const timeCategories = catalog.categories.filter((c) =>
+    TIME_CATEGORY_DOMAINS.has(c.conditionPrefix)
+  );
+  const integrationCategories = catalog.categories.filter((c) => isIntegrationCategory(c.groupKey));
+  // Every category HA describes, as HA lists them (the calendar's and the
+  // schedule's under Time too).
+  const deviceCategories = catalog.categories.filter((c) => !isIntegrationCategory(c.groupKey));
+  // ---- Rows -----------------------------------------------------------
+
+  const blockRow = (block: ConditionBlock, atIndex: number, icon?: LucideIcon): NavRow => ({
+    key: `block:${block.key}`,
+    label: block.label,
+    icon: icon ?? getConditionBlockIcon(block),
+    color: getDomainColor(block.key),
+    onSelect: () => selectBlock(block, atIndex),
+    pickKey: conditionPickKey(block.data.condition),
+  });
+  const blockRows = (keys: readonly string[], atIndex: number): NavRow[] =>
+    keys
+      .map(blockByKey)
+      .filter((b): b is ConditionBlock => Boolean(b))
+      .map((b) => blockRow(b, atIndex));
+  const categoryRow = (category: EntityConditionCategory, atIndex: number): NavRow => {
     return {
-      key: block.key,
-      label: block.label,
-      icon,
-      color: getDomainColor(block.key),
-      onDrill: () => pushColumn(atIndex, { kind: kind === 'time' ? 'timeOptions' : 'sunOptions' }, block.key),
+      key: category.groupKey,
+      label: category.label,
+      icon: getPickerIcon(category.conditionPrefix, Layers),
+      color: getDomainColor(category.conditionPrefix),
+      onSelect: () => pushColumn(atIndex, categoryColumn(category), category.groupKey),
     };
   };
 
-  const areaGroups = useMemo(() => {
-    return areas
-      .map((area) => {
-        const areaEntities = entities.filter((e) => getAreaIdForEntity(e.entity_id) === area.area_id);
-        const scope = groupByDevice(areaEntities, getDeviceIdForEntity, getDeviceNameById);
-        return { area, ...scope };
-      })
-      .filter((g) => g.deviceGroups.length > 0 || g.standaloneEntities.length > 0);
-  }, [areas, entities, getAreaIdForEntity, getDeviceIdForEntity, getDeviceNameById]);
+  /** The column a category's row opens: its conditions (the Zone
+   * condition beside the zone ones). */
+  function categoryColumn(category: EntityConditionCategory): NavColumn {
+    const zone =
+      category.conditionPrefix === 'zone'
+        ? blockByKey(CONDITION_GROUPED_BLOCKS.zone ?? '')
+        : undefined;
+    return { kind: 'typeResults', category, ...(zone ? { extraBlocks: [zone] } : {}) };
+  }
 
-  const labelGroups = useMemo(() => {
-    return labels
-      .map((label) => {
-        const labelEntities = entities.filter((e) => getLabelIdsForEntity(e.entity_id).includes(label.label_id));
-        const scope = groupByDevice(labelEntities, getDeviceIdForEntity, getDeviceNameById);
-        return { label, ...scope };
-      })
-      .filter((g) => g.deviceGroups.length > 0 || g.standaloneEntities.length > 0);
-  }, [labels, entities, getLabelIdsForEntity, getDeviceIdForEntity, getDeviceNameById]);
+  /** The columns that show a condition's row: its category under Device
+   * types, Non-device types' Time or Sun, the moon's, or the first
+   * column's own rows (And, Or, Not; State, Numeric state). */
+  function pathToCondition(type: string): { columns: NavColumn[]; selected: string[] } | null {
+    const root = { kind: 'root' } as const;
+    const nonDevice = { kind: 'nonDevice' } as const;
+    const dot = type.indexOf('.');
+    const prefix = dot > 0 ? type.slice(0, dot) : type;
+    if (type === 'time' || TIME_CATEGORY_DOMAINS.has(prefix))
+      return { columns: [root, nonDevice, { kind: 'timeGroup' }], selected: ['nonDevice', 'time'] };
+    if (prefix === 'sun')
+      return {
+        columns: [root, nonDevice, { kind: 'singletonOptions', key: 'sun' }],
+        selected: ['nonDevice', 'sun'],
+      };
+    if (prefix === 'moon')
+      return {
+        columns: [root, { kind: 'deviceTypes' }, { kind: 'singletonOptions', key: 'moon' }],
+        selected: ['deviceTypes', 'moon'],
+      };
+    if ((CONDITION_NON_DEVICE_BLOCKS as readonly string[]).includes(type))
+      return { columns: [root, nonDevice], selected: ['nonDevice'] };
+    const integration = integrationCategories.find((c) =>
+      c.recipes.some((r) => r.fields.condition === type)
+    );
+    if (integration)
+      return { columns: [root, categoryColumn(integration)], selected: [integration.groupKey] };
+    const category = deviceCategories.find((c) => c.conditionPrefix === prefix);
+    if (!category) return null;
+    return {
+      columns: [root, { kind: 'deviceTypes' }, categoryColumn(category)],
+      selected: ['deviceTypes', category.groupKey],
+    };
+  }
 
-  const allDeviceGroups = useMemo(
-    () => groupByDevice(entities, getDeviceIdForEntity, getDeviceNameById).deviceGroups,
-    [entities, getDeviceIdForEntity, getDeviceNameById]
-  );
-
-  const groupedDeviceIds = useMemo(() => {
-    const ids = new Set<string>();
-    for (const { deviceGroups } of areaGroups) {
-      for (const group of deviceGroups) ids.add(group.deviceId);
+  /** Device types: every category HA describes (and the moon's), A to Z,
+   * as HA lists them. */
+  const deviceTypeRows = (atIndex: number): NavRow[] => {
+    const rows = deviceCategories.map((category) => categoryRow(category, atIndex));
+    if (catalog.moon.length > 0) {
+      rows.push({
+        key: 'moon',
+        label: t('nodes:picker.groups.moon'),
+        icon: getPickerIcon('moon', Moon),
+        color: getDomainColor('moon'),
+        onSelect: () => pushColumn(atIndex, { kind: 'singletonOptions', key: 'moon' }, 'moon'),
+      });
     }
-    return ids;
-  }, [areaGroups]);
+    return rows.sort((x, y) => x.label.localeCompare(y.label));
+  };
 
-  const { devicesInAreas, ungroupedDevices } = useMemo(() => {
-    const devicesInAreas: DeviceGroup[] = [];
-    const ungroupedDevices: DeviceGroup[] = [];
-    for (const group of allDeviceGroups) {
-      (groupedDeviceIds.has(group.deviceId) ? devicesInAreas : ungroupedDevices).push(group);
+  const nonDeviceSections = (atIndex: number): NavSection[] => [
+    {
+      subtitle: t('nodes:picker.groups.timeAndSun'),
+      rows: [
+        {
+          key: 'time',
+          label: t('nodes:picker.groups.time'),
+          icon: getPickerIcon('time', Clock),
+          color: getDomainColor('time'),
+          onDrill: () => pushColumn(atIndex, { kind: 'timeGroup' }, 'time'),
+        },
+        {
+          key: 'sun',
+          label: t('nodes:picker.groups.sun'),
+          icon: getPickerIcon('sun', Sun),
+          color: getDomainColor('sun'),
+          onDrill: () => pushColumn(atIndex, { kind: 'singletonOptions', key: 'sun' }, 'sun'),
+        },
+      ],
+    },
+    { rows: blockRows(CONDITION_NON_DEVICE_BLOCKS, atIndex) },
+  ];
+
+  const groupHead = (key: GroupKey) =>
+    ({
+      unassigned: {
+        key,
+        label: t('nodes:picker.rows.unassigned'),
+        icon: getPickerIcon('unassigned', ListTree),
+      },
+      labels: {
+        key,
+        label: t('nodes:picker.groups.labels'),
+        icon: getPickerIcon('tag', Tag),
+        color: getDomainColor('labels'),
+      },
+      generic: {
+        key,
+        label: t('nodes:picker.groups.generic'),
+        icon: getPickerIcon('generic', BlocksIcon),
+      },
+      integrations: {
+        key,
+        label: t('nodes:picker.groups.integrations'),
+        icon: getPickerIcon('integration', Layers),
+      },
+    })[key];
+  const groupRows = (key: GroupKey, atIndex: number): NavRow[] => {
+    switch (key) {
+      case 'unassigned':
+        return unassignedRows(places, atIndex, pushColumn, placeLabels);
+      case 'labels':
+        return places.labelGroups.map((g) => labelRow(g, atIndex, pushColumn));
+      case 'generic':
+        return [
+          {
+            key: 'g:device',
+            label: t('nodes:picker.groups.device'),
+            icon: getPickerIcon('devices', Layers),
+            color: getDomainColor('devices'),
+            onDrill: () => pushColumn(atIndex, { kind: 'genericDevicePick' }, 'g:device'),
+          },
+          ...blockRows(CONDITION_GENERIC_BLOCKS, atIndex),
+        ];
+      case 'integrations':
+        return integrationCategories.map((c) => categoryRow(c, atIndex));
     }
-    return { devicesInAreas, ungroupedDevices };
-  }, [allDeviceGroups, groupedDeviceIds]);
+  };
+  const groupSectionsAt = (key: GroupKey) =>
+    groupSections(groupHead(key), groupRows(key, 0), () =>
+      pushColumn(0, { kind: 'group', key, title: groupHead(key).label }, key)
+    );
 
-  const unassignedStandaloneEntities = useMemo(
-    () =>
-      groupByDevice(entities, getDeviceIdForEntity, getDeviceNameById).standaloneEntities.filter(
-        (e) => !getAreaIdForEntity(e.entity_id)
-      ),
-    [entities, getDeviceIdForEntity, getDeviceNameById, getAreaIdForEntity]
-  );
+  const rootSections = (): NavSection[] => [
+    { title: t('nodes:picker.sections.blocks'), rows: blockRows(CONDITION_LOGIC_BLOCKS, 0) },
+    ...homeSections(places, 0, pushColumn, placeLabels),
+    {
+      separate: true,
+      rows: [
+        {
+          key: 'devices',
+          label: t('nodes:picker.rows.devices'),
+          icon: getPickerIcon('devices', Layers),
+          color: getDomainColor('devices'),
+          onDrill: () => pushColumn(0, { kind: 'devices' }, 'devices'),
+        },
+        {
+          key: 'deviceTypes',
+          label: t('nodes:picker.rows.deviceTypes'),
+          icon: getPickerIcon('device_types', Layers),
+          onDrill: () => pushColumn(0, { kind: 'deviceTypes' }, 'deviceTypes'),
+        },
+        {
+          key: 'nonDevice',
+          label: t('nodes:picker.rows.nonDeviceTypes'),
+          icon: getPickerIcon('non_device', Clock),
+          onDrill: () => pushColumn(0, { kind: 'nonDevice' }, 'nonDevice'),
+        },
+      ],
+    },
+    ...headed(t('nodes:picker.sections.homeAssistant'), [
+      ...groupSectionsAt('unassigned'),
+      ...groupSectionsAt('labels'),
+      ...groupSectionsAt('generic'),
+      ...groupSectionsAt('integrations'),
+    ]),
+  ];
 
-  // Split into Entities/Helpers/Devices/Services subcategories — see
-  // buildUnassignedGroups' doc comment and WhenTriggerDialog.tsx's identical
-  // usage for what each of the four covers.
-  const unassignedGroups = useMemo(
-    () => buildUnassignedGroups(entities, ungroupedDevices, unassignedStandaloneEntities),
-    [entities, ungroupedDevices, unassignedStandaloneEntities]
-  );
-
-  const multiTargetLabels = useMemo(
-    () => ({
-      addAllLabel: t('nodes:conditions.picker.and.addAllTargets'),
-      clearAllLabel: t('nodes:conditions.picker.and.clearAllTargets'),
-      noResultsLabel: t('nodes:conditions.picker.noResults'),
-      selectPromptLabel: t('nodes:conditions.picker.and.selectTargetsPrompt'),
-      commitLabel: (count: number) => t('nodes:conditions.picker.and.addConditionButton', { count }),
-    }),
-    [t]
-  );
-
-  const normalizedSearch = search.trim().toLowerCase();
-  const searchResults = useMemo(() => {
-    if (!normalizedSearch) return null;
-    return entities
-      .filter(
-        (e) =>
-          getEntityName(e).toLowerCase().includes(normalizedSearch) ||
-          e.entity_id.toLowerCase().includes(normalizedSearch)
-      )
-      .slice(0, 100)
-      .sort((a, b) => getEntityName(a).localeCompare(getEntityName(b)));
-  }, [entities, normalizedSearch]);
-
-  // ---- Row builders -------------------------------------------------------
-
-  const rootSections = useMemo((): NavSection[] => {
-    const blocksRow: NavRow = {
-      key: 'blocks',
-      label: t('nodes:conditions.picker.and.blocksRootLabel'),
-      icon: Blocks,
-      color: getDomainColor('blocks'),
-      onDrill: () => pushColumn(0, { kind: 'blocks' }, 'blocks'),
-    };
-
-    const zonesRow: NavRow = {
-      key: 'zones',
-      label: t('nodes:conditions.picker.and.zonesRootLabel'),
-      onDrill: () => pushColumn(0, { kind: 'areas' }, 'zones'),
-    };
-
-    // Every condition category is already its own row — unlike
-    // WhenTriggerDialog's domain-nested categories (several trigger
-    // categories can share one domain, e.g. binary_sensor's many device
-    // classes), conditionRecipes.ts's categories are one-per-prefix, so no
-    // intermediate "domainCategories" column is needed here at all.
-    //
-    // "Time", "Sun", and "Trigger" are also folded into this same "By type"
-    // list — matching real HA's own "Add condition" dialog, which lists them
-    // as browsable entries alongside Light/Switch/etc. (home-assistant/
-    // frontend's data/condition.ts's CONDITION_COLLECTIONS first collection:
-    // dynamicGroups/time/sun/helpers/template/trigger) rather than nesting
-    // them under "Blocks" (previously the only way to reach them here,
-    // buried among and/or/not/state/numeric_state/zone/template/trigger —
-    // easy to miss since none of those read as their own device type).
-    // "Zone" gets the same treatment for the same reason (device_tracker/
-    // person "is inside a zone" reads like its own type, not a structural
-    // block). Reuses CONDITION_BLOCKS' own entries rather than duplicating
-    // their data, and commits immediately on select like every other Blocks
-    // entry (none of these four need a target/entity picker step).
-    const blockAsRow = (key: string, icon: LucideIcon): NavRow | null => {
-      const block = CONDITION_BLOCKS.find((b) => b.key === key);
-      return block ? blockToNavRow(block, icon, handleSelectBlock) : null;
-    };
-    const extraTypeRows: NavRow[] = [
-      timeSunRow('time', Clock, 0),
-      timeSunRow('sun', Sun, 0),
-      blockAsRow('zone', Home),
-      blockAsRow('trigger', Radio), // matches nodeTypeCatalog.ts's own 'trigger' node icon
-    ].filter((row): row is NavRow => row !== null);
-
-    // "Generic" — real HA's own condition Generic collection is Device +
-    // Entity (state/numeric_state on any single entity), listed as one more
-    // browsable "By type" entry rather than a separate root section — see
-    // the NavColumn type's doc comment.
-    const genericRow: NavRow = {
-      key: 'generic',
-      label: t('nodes:conditions.picker.and.genericRootLabel'),
-      icon: getDomainIcon('generic', Layers),
-      color: getDomainColor('generic'),
-      onDrill: () => pushColumn(0, { kind: 'generic' }, 'generic'),
-    };
-
-    const deviceTypeRows: NavRow[] = [
-      ...ENTITY_CONDITION_CATEGORIES.map((category) => ({
-        key: category.groupKey,
-        label: category.label,
-        icon: getDomainIcon(category.conditionPrefix, Layers),
+  /** Search: the condition types whose names match, then the places. */
+  const searchSections = (query: string): NavSection[] => {
+    const q = query.toLowerCase();
+    const matches = (...texts: (string | undefined)[]) =>
+      texts.some((s) => s?.toLowerCase().includes(q));
+    const typeRows: NavRow[] = [
+      ...CONDITION_BLOCKS.filter((b) => matches(b.label)).map((b) => blockRow(b, 0)),
+      ...[...catalog.sun, ...catalog.moon]
+        .filter((b) => matches(b.label))
+        .map((b) => blockRow(b, 0)),
+      ...uniqueSearchTypes(
+        catalog.categories.flatMap((category) =>
+          category.recipes
+            .filter((recipe) => matches(recipe.label, recipe.description, category.label))
+            .map((recipe) => ({
+              key: searchTypeKey(recipe.fields.condition, category.groupKey, recipe.id),
+              label: recipe.label,
+              group: category.label,
+              category,
+              recipe,
+            }))
+        )
+      ).map(({ category, recipe, shown }) => ({
+        key: `recipe:${category.groupKey}:${recipe.id}`,
+        label: shown,
+        icon: getPickerIcon(category.conditionPrefix, Layers),
         color: getDomainColor(category.conditionPrefix),
-        onSelect: () => pushColumn(0, { kind: 'typeResults', category }, category.groupKey),
+        onSelect: () => selectTypeRecipe(0, category, recipe),
+        pickKey: conditionPickKey(recipe.fields.condition),
       })),
-      ...extraTypeRows,
-      genericRow,
-    ].sort((a, b) => a.label.localeCompare(b.label));
-
-    const unassignedRow: NavRow = {
-      key: 'unassigned',
-      label: t('nodes:conditions.picker.unassigned'),
-      onDrill: () => pushColumn(0, { kind: 'unassignedOptions' }, 'unassigned'),
-    };
-
-    const labelsRow: NavRow = {
-      key: 'labels',
-      label: t('nodes:conditions.picker.and.labelsRootLabel'),
-      icon: Tag,
-      color: getDomainColor('labels'),
-      onDrill: () => pushColumn(0, { kind: 'labels' }, 'labels'),
-    };
-
-    const sections: NavSection[] = [
-      { title: t('nodes:conditions.picker.and.sections.blocks'), rows: [blocksRow] },
-      { title: t('nodes:conditions.picker.and.sections.zones'), rows: [zonesRow] },
-      { title: t('nodes:conditions.picker.and.sections.deviceTypes'), rows: deviceTypeRows },
-      { title: t('nodes:conditions.picker.unassigned'), rows: [unassignedRow] },
-    ];
-    if (labelGroups.length > 0) {
-      sections.push({ title: t('nodes:conditions.picker.and.sections.labels'), rows: [labelsRow] });
-    }
-    return sections;
-  }, [t, labelGroups.length]);
-
-  // The four rows shown when drilling into "Unassigned" — see
-  // WhenTriggerDialog.tsx's identical helper.
-  const unassignedOptionRows = useMemo((): NavRow[] => {
-    const makeRow = (key: 'entities' | 'helpers' | 'devices' | 'services', scope: EntityScope): NavRow => ({
-      key,
-      label: t(`nodes:conditions.picker.unassignedOptions.${key}`),
-      icon: getDomainIcon(key, Layers),
-      color: getDomainColor(key),
-      onDrill: () =>
-        pushColumn(
-          1,
-          { kind: 'areaChildren', areaLabel: t(`nodes:conditions.picker.unassignedOptions.${key}`), scope },
-          key
-        ),
-    });
+    ].slice(0, 60);
     return [
-      makeRow('entities', unassignedGroups.entities),
-      makeRow('helpers', unassignedGroups.helpers),
-      makeRow('devices', unassignedGroups.devices),
-      makeRow('services', unassignedGroups.services),
+      { subtitle: t('nodes:picker.search.types'), rows: typeRows },
+      ...searchPlaceSections(places, query, 0, pushColumn, {
+        areas: t('nodes:picker.search.areas'),
+        devices: t('nodes:picker.search.devices'),
+        entities: t('nodes:picker.search.entities'),
+      }),
     ];
-  }, [t, unassignedGroups]);
+  };
 
-  const areaRows = useMemo((): NavRow[] => {
-    return areaGroups.map(({ area, deviceGroups, standaloneEntities }) => ({
-      key: area.area_id,
-      label: area.name,
-      icon: Home,
-      color: getDomainColor('zones'),
-      onSelect: () => openAreaResults(1, area.area_id, area.name, { deviceGroups, standaloneEntities }),
-      onDrill: () =>
-        pushColumn(
-          1,
-          { kind: 'areaChildren', areaLabel: area.name, scope: { deviceGroups, standaloneEntities } },
-          area.area_id
-        ),
-    }));
-  }, [areaGroups]);
-
-  const labelRows = useMemo((): NavRow[] => {
-    return labelGroups.map(({ label, deviceGroups, standaloneEntities }) => ({
-      key: label.label_id,
-      label: label.name,
-      icon: Tag,
-      color: getDomainColor('labels'),
-      onSelect: () => openLabelResults(1, label.label_id, label.name, { deviceGroups, standaloneEntities }),
-      onDrill: () =>
-        pushColumn(
-          1,
-          { kind: 'areaChildren', areaLabel: label.name, scope: { deviceGroups, standaloneEntities } },
-          label.label_id
-        ),
-    }));
-  }, [labelGroups]);
-
-  const toDeviceRows = (groups: DeviceGroup[]): NavRow[] =>
-    groups.map((group) => ({
-      key: group.deviceId,
-      label: group.name,
-      icon: deviceGroupIcon(group),
-      color: deviceGroupColor(group),
-      onSelect: () => openDeviceResults(1, group),
-      onDrill: () => openDeviceResults(1, group),
-    }));
-
-  const deviceRows = useMemo(() => toDeviceRows(devicesInAreas), [devicesInAreas]);
-
-  // Time/Sun surfaced a second time here in "By target" — real HA's own
-  // dialog does the same (TIME_LOCATION_GROUPS), since neither has a
-  // target/entity to scope by; picking one here commits immediately, same
-  // as the "By type" copy above.
-  const timeSunTargetRows = useMemo((): NavRow[] => {
-    return [timeSunRow('time', Clock, 1), timeSunRow('sun', Sun, 1)].filter((row): row is NavRow => row !== null);
-  }, []);
-
-  const zonesColumnSections = useMemo(
-    (): NavSection[] => [
-      { title: t('nodes:conditions.picker.and.sections.zones'), rows: areaRows },
-      { title: t('nodes:conditions.picker.and.sections.devices'), rows: deviceRows },
-      { title: t('nodes:conditions.picker.and.sections.timeAndSun'), rows: timeSunTargetRows },
-    ],
-    [t, areaRows, deviceRows, timeSunTargetRows]
-  );
-
-  // ---- Column renderer ------------------------------------------------
+  // ---- Columns ----------------------------------------------------------
 
   function renderColumn(column: NavColumn, index: number) {
     switch (column.kind) {
       case 'root':
-        return <NavColumnSections key={index} sections={rootSections} selectedKey={selectedKeys[index]} />;
+        return (
+          <NavColumnSections
+            key={index}
+            sections={rootSections()}
+            selectedKey={selectedKeys[index]}
+          />
+        );
 
-      case 'blocks':
-        return <BlocksColumn key={index} blocks={CONDITION_BLOCKS} onSelectBlock={handleSelectBlock} />;
+      case 'search':
+        return (
+          <NavColumnSections
+            key={index}
+            sections={searchSections(column.query)}
+            selectedKey={selectedKeys[index]}
+          />
+        );
 
-      case 'generic': {
-        // Real HA's own condition Generic collection is Device + Entity —
-        // see the NavColumn type's doc comment.
-        const deviceRow: NavRow = {
-          key: 'device',
-          label: t('nodes:conditions.picker.and.genericDeviceLabel'),
-          icon: getDomainIcon('devices', Layers),
-          color: getDomainColor('devices'),
-          onDrill: () => pushColumn(index, { kind: 'genericDevicePick' }, 'device'),
-        };
-        const entityRow: NavRow = {
-          key: 'entity',
-          label: t('nodes:conditions.picker.and.genericEntityLabel'),
-          icon: getDomainIcon('entities', Layers),
-          color: getDomainColor('entities'),
-          onDrill: () => pushColumn(index, { kind: 'genericEntityPick' }, 'entity'),
-        };
+      case 'devices':
+        return (
+          <NavColumnSections
+            key={index}
+            title={t('nodes:picker.rows.devices')}
+            sections={devicesSections(places, index, pushColumn)}
+            selectedKey={selectedKeys[index]}
+          />
+        );
+
+      case 'deviceTypes': {
+        const rows = deviceTypeRows(index);
         return (
           <NavColumnList
             key={index}
-            title={t('nodes:conditions.picker.and.genericRootLabel')}
-            rows={[deviceRow, entityRow]}
+            title={t('nodes:picker.rows.deviceTypes')}
+            rows={rows}
             selectedKey={selectedKeys[index]}
           />
         );
       }
 
-      case 'genericDevicePick': {
-        const rows: NavRow[] = allDeviceGroups.map((group) => ({
-          key: group.deviceId,
-          label: group.name,
-          icon: deviceGroupIcon(group),
-          color: deviceGroupColor(group),
-          onSelect: () => openDeviceResults(index, group),
-        }));
+      case 'nonDevice':
+        return (
+          <NavColumnSections
+            key={index}
+            title={t('nodes:picker.rows.nonDeviceTypes')}
+            sections={nonDeviceSections(index)}
+            selectedKey={selectedKeys[index]}
+          />
+        );
+
+      case 'group':
         return (
           <NavColumnList
             key={index}
-            title={t('nodes:conditions.picker.and.genericDeviceLabel')}
-            rows={rows}
+            title={column.title}
+            rows={groupRows(column.key, index)}
+            selectedKey={selectedKeys[index]}
+          />
+        );
+
+      case 'genericDevicePick':
+        return (
+          <DeviceAutomationColumn
+            key={index}
+            kind="condition"
+            places={places}
+            atIndex={index}
+            push={pushColumn}
             selectedKey={selectedKeys[index]}
             emptyLabel={t('nodes:conditions.picker.noResults')}
           />
         );
-      }
 
-      case 'genericEntityPick': {
-        // Real HA's generic "Entity" group offers exactly two members: State
-        // and Numeric State (a generic test on any single entity, filled in
-        // afterward via the property panel) — reuses CONDITION_BLOCKS' own
-        // 'state'/'numeric_state' entries rather than duplicating their data.
-        const stateBlock = CONDITION_BLOCKS.find((block) => block.key === 'state');
-        const numericStateBlock = CONDITION_BLOCKS.find((block) => block.key === 'numeric_state');
-        const rows: NavRow[] = [];
-        if (stateBlock) {
-          rows.push({
-            key: 'state',
-            label: stateBlock.label,
-            icon: getDomainIcon('entities', Layers),
-            color: getDomainColor('entities'),
-            onSelect: () => handleSelectBlock(stateBlock),
-          });
-        }
-        if (numericStateBlock) {
-          rows.push({
-            key: 'numeric_state',
-            label: numericStateBlock.label,
-            icon: getDomainIcon('entities', Layers),
-            color: getDomainColor('entities'),
-            onSelect: () => handleSelectBlock(numericStateBlock),
-          });
-        }
+      case 'timeGroup':
         return (
           <NavColumnList
             key={index}
-            title={t('nodes:conditions.picker.and.genericEntityLabel')}
-            rows={rows}
+            title={t('nodes:picker.groups.time')}
+            rows={[
+              ...blockRows([CONDITION_GROUPED_BLOCKS.time ?? 'time'], index),
+              ...timeCategories.map((c) => categoryRow(c, index)),
+            ]}
             selectedKey={selectedKeys[index]}
           />
         );
-      }
 
-      case 'sunOptions':
+      case 'singletonOptions': {
+        const classic =
+          column.key === 'sun' ? blockByKey(CONDITION_GROUPED_BLOCKS.sun ?? 'sun') : undefined;
         return (
           <BlocksColumn
             key={index}
-            blocks={SUN_CONDITIONS}
-            icon={Sun}
-            color={getDomainColor('sun')}
-            onSelectBlock={handleSelectBlock}
+            blocks={
+              column.key === 'sun' ? [...catalog.sun, ...(classic ? [classic] : [])] : catalog.moon
+            }
+            icon={column.key === 'sun' ? Sun : Moon}
+            color={getDomainColor(column.key)}
+            onSelectBlock={(block) => selectBlock(block, index)}
           />
         );
+      }
 
       case 'timeOptions':
         return (
-          <ResultsColumn key={index} title={t('nodes:conditions.types.time')}>
-            <ConditionTimeOptionsForm onCommit={handleSelectTimeOptions} />
+          <ResultsColumn
+            key={index}
+            title={t('nodes:conditions.types.time')}
+            chosenKey={selectedKeys[index]}
+          >
+            <ConditionTimeOptionsForm onCommit={commitTimeOptions} />
           </ResultsColumn>
         );
 
-      case 'unassignedOptions':
+      case 'areaChildren':
         return (
           <NavColumnList
             key={index}
-            title={t('nodes:conditions.picker.unassigned')}
-            rows={unassignedOptionRows}
-            selectedKey={selectedKeys[index]}
-          />
-        );
-
-      case 'areas':
-        return (
-          <NavColumnSections key={index} sections={zonesColumnSections} selectedKey={selectedKeys[index]} />
-        );
-
-      case 'labels':
-        return (
-          <NavColumnList
-            key={index}
-            title={t('nodes:conditions.picker.and.sections.labels')}
-            rows={labelRows}
+            title={column.areaLabel}
+            rows={placeRows(column, index, pushColumn)}
             selectedKey={selectedKeys[index]}
             emptyLabel={t('nodes:conditions.picker.noResults')}
           />
         );
 
-      case 'areaChildren': {
-        const rows: NavRow[] = [
-          ...column.scope.deviceGroups.map((group) => ({
-            key: group.deviceId,
-            label: group.name,
-            icon: deviceGroupIcon(group),
-            color: deviceGroupColor(group),
-            onSelect: () => openDeviceResults(index, group),
-            onDrill: () => pushColumn(index, { kind: 'deviceChildren', group }, group.deviceId),
-          })),
-          ...column.scope.standaloneEntities.map((entity) => ({
-            key: entity.entity_id,
-            label: getEntityName(entity),
-            icon: getDomainIcon(entity.entity_id.split('.')[0], Layers),
-            color: getDomainColor(entity.entity_id.split('.')[0]),
-            onSelect: () => openEntityResults(index, entity, null),
-          })),
-        ];
-        return <NavColumnList key={index} title={column.areaLabel} rows={rows} selectedKey={selectedKeys[index]} />;
-      }
-
-      case 'deviceChildren': {
-        const rows: NavRow[] = column.group.entities.map((entity) => ({
-          key: entity.entity_id,
-          label: getEntityName(entity),
-          icon: getDomainIcon(entity.entity_id.split('.')[0], Layers),
-          color: getDomainColor(entity.entity_id.split('.')[0]),
-          onSelect: () => openEntityResults(index, entity, column.group.deviceId),
-        }));
-        return <NavColumnList key={index} title={column.group.name} rows={rows} selectedKey={selectedKeys[index]} />;
-      }
+      case 'deviceChildren':
+        return (
+          <NavColumnList
+            key={index}
+            title={column.group.name}
+            rows={deviceEntityRows(column.group, index, pushColumn)}
+            selectedKey={selectedKeys[index]}
+          />
+        );
 
       case 'targetResults':
         return (
-          <ResultsColumn key={index} title={column.scope.label}>
+          <ResultsColumn key={index} title={column.scope.label} chosenKey={selectedKeys[index]}>
             <ConditionTargetResultsPanel
               selected={column.scope}
-              entities={entities}
-              onSelectEntityTarget={handleSelectEntityTarget}
-              onSelectRecipe={(entityIds, recipe) =>
-                entityIds.length > 1
-                  ? pushColumn(index, { kind: 'scopeTargets', label: recipe.label, recipe, entityIds }, recipe.id)
-                  : handleSelectRecipeConfigurable(index, entityIds, recipe)
+              // Every entity, config and diagnostic ones too: a room's battery
+              // level is looked up here (#177).
+              entities={allEntities}
+              onSelectEntityTarget={(entityId) => configure(index, entityTargetDraft([entityId]))}
+              onSelectStateTargets={(entityIds) =>
+                pushColumn(
+                  index,
+                  { kind: 'stateTargets', label: t('nodes:conditions.types.state'), entityIds },
+                  'state'
+                )
               }
-              onSelectDeviceCondition={handleSelectDeviceCondition}
+              onSelectRecipe={(entityIds, recipe) =>
+                routeScopePick(column.scope, entityIds, conditionRecipeTakesArea(recipe), {
+                  pick: (ids) => selectRecipe(index, ids, recipe),
+                  tick: (ids, areaId) =>
+                    pushColumn(
+                      index,
+                      {
+                        kind: 'scopeTargets',
+                        label: recipe.label,
+                        recipe,
+                        entityIds: ids,
+                        area: areaId ? { areaId, label: column.scope.label } : undefined,
+                      },
+                      recipeChoiceKey(recipe.id, ids)
+                    ),
+                })
+              }
+              onSelectDeviceCondition={(condition) =>
+                configure(index, deviceConditionDraft(condition))
+              }
             />
           </ResultsColumn>
         );
 
       case 'typeResults':
         return (
-          <ResultsColumn key={index} title={column.category.label}>
+          <ResultsColumn key={index} title={column.category.label} chosenKey={selectedKeys[index]}>
             <ConditionTypeResultsPanel
               category={column.category}
-              onSelectRecipe={(recipe) =>
-                pushColumn(index, { kind: 'recipeEntities', category: column.category, recipe }, recipe.id)
-              }
+              onSelectRecipe={(recipe) => selectTypeRecipe(index, column.category, recipe)}
             />
+            {column.extraBlocks && column.extraBlocks.length > 0 && (
+              <div className="mt-1.5 space-y-1.5">
+                {column.extraBlocks.map((block) => (
+                  <TriggerResultRow
+                    key={block.key}
+                    icon={getConditionBlockIcon(block)}
+                    color={getDomainColor(block.key)}
+                    label={block.label}
+                    description={block.description}
+                    onSelect={() => selectBlock(block, index)}
+                    pickKey={conditionPickKey(block.data.condition)}
+                  />
+                ))}
+              </div>
+            )}
           </ResultsColumn>
         );
 
       case 'recipeEntities': {
-        const domainPrefix = `${column.category.entityDomain}.`;
-        const rows: TargetPickerRow[] = entities
-          .filter((e) => e.entity_id.startsWith(domainPrefix))
-          .sort((a, b) => getEntityName(a).localeCompare(getEntityName(b)))
-          .map((entity) => ({
-            entityId: entity.entity_id,
-            label: getEntityName(entity),
-            icon: getDomainIcon(column.category.conditionPrefix, Layers),
-            color: getDomainColor(column.category.conditionPrefix),
-          }));
+        // The entities of the domains the category acts on (its own, or for
+        // one discovered from HA's descriptions, its target's).
+        // (#166: by the type's description, as HA keeps them.)
+        const rows = entityTargetRows(
+          entitiesForType(
+            entities,
+            'condition',
+            column.recipe.fields.condition,
+            conditionDescriptions[column.recipe.fields.condition],
+            {
+              domains: categoryEntityDomains(column.category, column.category.entityDomain),
+              domain: column.category.entityDomain,
+              deviceClass: column.category.deviceClass,
+            }
+          )
+        );
         return (
           <MultiTargetPanel
             key={index}
             title={column.recipe.label}
             rows={rows}
-            labels={multiTargetLabels}
-            onCommit={(entityIds) => handleSelectRecipeConfigurable(index, entityIds, column.recipe)}
+            labels={recipeTargetLabels(
+              column.recipe,
+              rows.map((r) => r.entityId)
+            )}
+            onCommit={(entityIds) => selectRecipe(index, entityIds, column.recipe)}
           />
         );
       }
 
       case 'scopeTargets': {
-        const rows: TargetPickerRow[] = column.entityIds
-          .map((id) => entities.find((e) => e.entity_id === id))
-          .filter((e): e is HassEntity => Boolean(e))
-          .sort((a, b) => getEntityName(a).localeCompare(getEntityName(b)))
-          .map((entity) => ({
-            entityId: entity.entity_id,
-            label: getEntityName(entity),
-            icon: getDomainIcon(entity.entity_id.split('.')[0], Layers),
-            color: getDomainColor(entity.entity_id.split('.')[0]),
-          }));
+        const rows = entityTargetRows(
+          column.entityIds
+            .map((id) => allEntities.find((e) => e.entity_id === id))
+            .filter((e): e is HassEntity => Boolean(e))
+        );
         return (
           <MultiTargetPanel
             key={index}
             title={column.label}
             rows={rows}
-            labels={multiTargetLabels}
-            onCommit={(entityIds) => handleSelectRecipeConfigurable(index, entityIds, column.recipe)}
+            labels={recipeTargetLabels(column.recipe, column.entityIds)}
+            onCommit={(entityIds) => selectRecipe(index, entityIds, column.recipe)}
+            wholeArea={
+              column.area && {
+                label: t('nodes:picker.rows.anythingIn', { name: column.area.label }),
+                onSelect: () =>
+                  selectRecipe(index, column.entityIds, column.recipe, column.area?.areaId),
+              }
+            }
           />
         );
       }
 
-      case 'recipeConfig':
+      case 'stateTargets':
         return (
-          <ResultsColumn key={index} title={column.recipe.label}>
-            <RecipeConfigForm
-              recipe={column.recipe}
-              draftData={column.draftData}
-              onCommit={commitAndClose}
-            />
-          </ResultsColumn>
+          <MultiTargetPanel
+            key={index}
+            title={column.label}
+            rows={entityTargetRows(
+              column.entityIds
+                .map((id) => entities.find((e) => e.entity_id === id))
+                .filter((e): e is HassEntity => Boolean(e))
+            )}
+            labels={multiTargetLabels}
+            onCommit={(entityIds) => configure(index, entityTargetDraft(entityIds))}
+          />
         );
 
-      default:
-        return null;
+      case 'configure':
+        return (
+          <NodeConfigColumn
+            key={`${index}:${column.pickKey}`}
+            onBack={() => {
+              setColumns((prev) => prev.slice(0, index));
+              setSelectedKeys((prev) => prev.slice(0, index));
+            }}
+            title={column.title}
+            nodeType="condition"
+            initialData={column.data}
+            entities={entities}
+            commitLabel={t('nodes:pickerConfig.addCondition')}
+            onCommit={commitAndClose}
+          />
+        );
     }
   }
 
-  const searchSelectedScope: SelectedScope | null = useMemo(() => {
-    if (!searchSelectedEntityId) return null;
-    const entity = entities.find((e) => e.entity_id === searchSelectedEntityId);
-    return {
-      key: `entity::${searchSelectedEntityId}`,
-      label: entity ? getEntityName(entity) : searchSelectedEntityId,
-      deviceIds: [],
-      entityIds: [searchSelectedEntityId],
-      singleEntityId: searchSelectedEntityId,
-    };
-  }, [searchSelectedEntityId, entities]);
-
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className={MILLER_DIALOG_CONTENT_CLASS}>
-        <DialogHeader className="border-b px-6 py-4">
-          <DialogTitle>{t('nodes:conditions.picker.and.title')}</DialogTitle>
-        </DialogHeader>
-
-        <div className="flex items-center gap-2 border-b px-6 py-3">
-          <Search className="h-4 w-4 shrink-0 text-muted-foreground" />
-          <input
-            autoFocus
-            value={search}
-            onChange={(e) => {
-              setSearch(e.target.value);
-              setSearchSelectedEntityId(null);
-            }}
-            placeholder={t('nodes:conditions.picker.and.searchPlaceholder')}
-            className="h-8 w-full bg-transparent text-base outline-none placeholder:text-muted-foreground"
+      <DialogContent
+        className={MILLER_DIALOG_CONTENT_CLASS}
+        // Its kind's colour, for the "Anything in" line's edge (index.css).
+        style={{ ...toneStyle('condition'), ...pickerSize.style }}
+      >
+        {pickerSize.grip}
+        <PickerCurrentProvider value={currentKey}>
+          <PickerHeader
+            title={t('nodes:conditions.picker.and.title')}
+            icon={<StepIcon tone="condition" icon={Signpost} size="md" />}
+            search={search}
+            onSearchChange={changeSearch}
+            placeholder={t('nodes:picker.search.placeholder')}
+            kindSwitch={onSwitchKind && <PickerKindSwitch current="and" onSwitch={onSwitchKind} />}
           />
-        </div>
-
-        <div className="flex min-h-0 flex-1 divide-x overflow-x-auto">
-          {searchResults ? (
-            <>
-              <NavColumnList
-                title={t('nodes:conditions.picker.and.sections.zones')}
-                rows={searchResults.map((entity) => ({
-                  key: entity.entity_id,
-                  label: getEntityName(entity),
-                  onSelect: () => setSearchSelectedEntityId(entity.entity_id),
-                }))}
-                selectedKey={searchSelectedEntityId}
-                emptyLabel={t('nodes:conditions.picker.noResults')}
-              />
-              {searchSelectedScope && (
-                <ResultsColumn title={searchSelectedScope.label}>
-                  <ConditionTargetResultsPanel
-                    selected={searchSelectedScope}
-                    entities={entities}
-                    onSelectEntityTarget={handleSelectEntityTarget}
-                    onSelectRecipe={handleSelectRecipe}
-                    onSelectDeviceCondition={handleSelectDeviceCondition}
-                  />
-                </ResultsColumn>
-              )}
-            </>
-          ) : (
-            columns.map((column, index) => renderColumn(column, index))
-          )}
-        </div>
+          <PickerColumnRow columnCount={columns.length}>
+            {renderStackedColumns(columns, isSetup, renderColumn)}
+          </PickerColumnRow>
+        </PickerCurrentProvider>
       </DialogContent>
     </Dialog>
   );
 }
 
-// Flat card list, no grouping needed — both CONDITION_BLOCKS and
-// SUN_CONDITIONS (the "By type" > "Sun" category, see the NavColumn type's
-// doc comment) are short, flat lists, unlike PlatformsColumn's
+// Flat card list, no grouping needed — CONDITION_BLOCKS, SUN_CONDITIONS and
+// MOON_CONDITIONS (the "By type" > "Sun"/"Moon" categories, see the
+// NavColumn type's doc comment) are short, flat lists, unlike PlatformsColumn's
 // TYPE_GROUPS-grouped ~20 platforms. `icon`/`color` default to the Blocks
 // section's own styling; the Sun category passes its own so its cards read
 // as sun-related rather than the generic Blocks purple.
@@ -951,6 +924,7 @@ function BlocksColumn({
               label={block.label}
               description={block.description}
               onSelect={() => onSelectBlock(block)}
+              pickKey={conditionPickKey(block.data.condition)}
             />
           ))}
         </div>
@@ -968,18 +942,24 @@ function ConditionTypeResultsPanel({
 }) {
   const { t } = useTranslation(['nodes']);
   if (category.recipes.length === 0) {
-    return <p className="p-2 text-center text-muted-foreground text-xs">{t('nodes:conditions.picker.noResults')}</p>;
+    return (
+      <p className="p-2 text-center text-muted-foreground text-xs">
+        {t('nodes:conditions.picker.noResults')}
+      </p>
+    );
   }
   return (
     <div className="space-y-1.5">
       {category.recipes.map((recipe) => (
         <TriggerResultRow
           key={recipe.id}
-          icon={getDomainIcon(category.conditionPrefix, Layers)}
+          icon={getPickerIcon(category.conditionPrefix, Layers)}
           color={getDomainColor(category.conditionPrefix)}
           label={recipe.label}
           description={recipe.description}
           onSelect={() => onSelectRecipe(recipe)}
+          pickKey={conditionPickKey(recipe.fields.condition)}
+          choiceKey={recipeChoiceKey(recipe.id, [])}
         />
       ))}
     </div>
@@ -1002,12 +982,15 @@ function ConditionTargetResultsPanel({
   selected,
   entities,
   onSelectEntityTarget,
+  onSelectStateTargets,
   onSelectRecipe,
   onSelectDeviceCondition,
 }: {
   selected: SelectedScope | null;
   entities: HassEntity[];
   onSelectEntityTarget: (entityId: string) => void;
+  /** A room's State row: its entities, to tick. */
+  onSelectStateTargets?: (entityIds: string[]) => void;
   onSelectRecipe: (entityIds: string[], recipe: ConditionRecipe) => void;
   onSelectDeviceCondition: (condition: DeviceCondition) => void;
 }) {
@@ -1015,6 +998,10 @@ function ConditionTargetResultsPanel({
   const { getDeviceConditions } = useDeviceAutomation();
   const { translations } = useTranslations();
   const { getDeviceNameById } = useHass();
+  // Only the types the connected HA offers (hooks/useHaCatalog.ts).
+  const haOffers = useHaOffers('condition');
+  const conditionCategories = useConditionCatalog().categories;
+  const conditionDescriptions = useNativeDescriptions('condition');
   const [deviceConditions, setDeviceConditions] = useState<DeviceCondition[]>([]);
   const [loading, setLoading] = useState(false);
 
@@ -1040,7 +1027,9 @@ function ConditionTargetResultsPanel({
         if (cancelled) return;
         const all = results.flatMap((r) => (r.status === 'fulfilled' ? r.value : []));
         const entityIds = new Set(selected.entityIds);
-        const scoped = all.filter((c) => (c.entity_id ? entityIds.has(c.entity_id) : !selected.singleEntityId));
+        const scoped = all.filter((c) =>
+          c.entity_id ? entityIds.has(c.entity_id) : !selected.singleEntityId
+        );
         setDeviceConditions(scoped);
       })
       .catch(() => {
@@ -1065,27 +1054,36 @@ function ConditionTargetResultsPanel({
   const singleEntity = selected.singleEntityId
     ? entities.find((e) => e.entity_id === selected.singleEntityId)
     : undefined;
-  const singleEntityLabel = singleEntity ? getEntityName(singleEntity) : selected.singleEntityId;
-  const singleEntityIcon = getDomainIcon(selected.singleEntityId?.split('.')[0], Zap);
+  const singleEntityLabel = selected.singleEntityId
+    ? entityName(singleEntity, selected.singleEntityId)
+    : undefined;
+  const singleEntityIcon = entityPickerIcon(singleEntity, Zap);
   const singleEntityColor = getDomainColor(selected.singleEntityId?.split('.')[0]);
 
-  const recipesByHeading = new Map<string, Map<string, { recipes: ConditionRecipe[]; entityIds: string[] }>>();
-  for (const entityId of selected.entityIds) {
-    const entity = entities.find((e) => e.entity_id === entityId);
-    const category = getEntityConditionRecipeGroup(entityId, entity);
-    if (!category) continue;
-    let byGroupKey = recipesByHeading.get(category.heading);
-    if (!byGroupKey) {
-      byGroupKey = new Map();
-      recipesByHeading.set(category.heading, byGroupKey);
-    }
-    const existing = byGroupKey.get(category.groupKey);
-    if (existing) {
-      existing.entityIds.push(entityId);
-    } else {
-      byGroupKey.set(category.groupKey, { recipes: category.recipes, entityIds: [entityId] });
-    }
-  }
+  // The types HA keeps each entity for (#166).
+  // The types each entity offers; a config or diagnostic one (a battery
+  // level) only the types that reach it (#177).
+  const secondary = new Set(scopeSecondaryEntityIds(selected));
+  const typeOf = (r: ConditionRecipe) => r.fields.condition;
+  const recipesByHeading = groupRecipesByHeading(
+    [...scopeTypeEntityIds(selected), ...secondary],
+    (entityId) => {
+      const entity = entities.find((e) => e.entity_id === entityId);
+      const describe = (type: string) => conditionDescriptions[type];
+      const groups = entityRecipeGroups(
+        entity,
+        getEntityConditionRecipeGroup(entityId, entity),
+        conditionCategories,
+        'condition',
+        typeOf,
+        haOffers,
+        describe
+      );
+      return secondary.has(entityId) ? secondaryEntityCategories(groups, typeOf, describe) : groups;
+    },
+    undefined,
+    typeOf
+  );
 
   const deviceConditionsByHeading = new Map<string, DeviceCondition[]>();
   for (const condition of deviceConditions) {
@@ -1095,15 +1093,24 @@ function ConditionTargetResultsPanel({
     else deviceConditionsByHeading.set(heading, [condition]);
   }
 
-  const allHeadings = new Set<string>([...recipesByHeading.keys(), ...deviceConditionsByHeading.keys()]);
+  const allHeadings = new Set<string>([
+    ...recipesByHeading.keys(),
+    ...deviceConditionsByHeading.keys(),
+  ]);
   const sortedHeadings = Array.from(allHeadings).sort((a, b) => a.localeCompare(b));
 
   return (
     <div className="space-y-3">
-      {loading && <p className="px-1.5 text-muted-foreground text-xs">{t('nodes:triggers.picker.loadingTriggers')}</p>}
+      {loading && (
+        <p className="px-1.5 text-muted-foreground text-xs">
+          {t('nodes:triggers.picker.loadingTriggers')}
+        </p>
+      )}
 
       {!loading && sortedHeadings.length === 0 && !selected.singleEntityId && (
-        <p className="px-1.5 text-muted-foreground text-xs">{t('nodes:conditions.picker.noResults')}</p>
+        <p className="px-1.5 text-muted-foreground text-xs">
+          {t('nodes:conditions.picker.noResults')}
+        </p>
       )}
 
       {sortedHeadings.map((heading) => {
@@ -1114,22 +1121,28 @@ function ConditionTargetResultsPanel({
             <div className="space-y-1.5">
               {recipeGroups.map(({ recipes, entityIds }) => {
                 const domain = entityIds[0]?.split('.')[0];
+                const icon = entityPickerIcon(
+                  entities.find((e) => e.entity_id === entityIds[0]),
+                  Zap
+                );
                 return recipes.map((recipe) => (
                   <TriggerResultRow
                     key={`${recipe.id}::${entityIds.join(',')}`}
-                    icon={getDomainIcon(domain, Zap)}
+                    icon={icon}
                     color={getDomainColor(domain)}
                     label={recipe.label}
                     description={recipe.description}
                     chip={selected.label}
                     onSelect={() => onSelectRecipe(entityIds, recipe)}
+                    pickKey={conditionPickKey(recipe.fields.condition)}
+                    choiceKey={recipeChoiceKey(recipe.id, entityIds)}
                   />
                 ));
               })}
               {(deviceConditionsByHeading.get(heading) ?? []).map((condition) => (
                 <TriggerResultRow
                   key={`device::${buildCompositeValue(condition)}`}
-                  icon={getDomainIcon(condition.entity_id?.split('.')[0] ?? condition.domain, Zap)}
+                  icon={getPickerIcon(condition.entity_id?.split('.')[0] ?? condition.domain, Zap)}
                   color={getDomainColor(condition.entity_id?.split('.')[0] ?? condition.domain)}
                   label={getDeviceAutomationLabel(
                     'condition',
@@ -1158,6 +1171,19 @@ function ConditionTargetResultsPanel({
             label={t('nodes:conditions.types.state')}
             chip={singleEntityLabel ?? null}
             onSelect={() => onSelectEntityTarget(selected.singleEntityId as string)}
+          />
+        </div>
+      )}
+      {selected.room && onSelectStateTargets && selected.entityIds.length > 0 && (
+        <div>
+          <h4 className="px-1.5 py-1 font-semibold text-muted-foreground text-xs">
+            {t('nodes:conditions.picker.groups.entity')}
+          </h4>
+          <TriggerResultRow
+            icon={Zap}
+            label={t('nodes:conditions.types.state')}
+            chip={selected.label}
+            onSelect={() => onSelectStateTargets(selected.entityIds)}
           />
         </div>
       )}
@@ -1214,13 +1240,21 @@ function ConditionTimeOptionsForm({
           value={after}
           onChange={(v) => setAfter(typeof v === 'string' ? v : '')}
           fallback={
-            <Input id="condition-time-after" type="time" value={after} onChange={(e) => setAfter(e.target.value)} />
+            <Input
+              id="condition-time-after"
+              type="time"
+              value={after}
+              onChange={(e) => setAfter(e.target.value)}
+            />
           }
         />
       </div>
 
       <div className="space-y-1.5">
-        <label className="font-medium text-muted-foreground text-xs" htmlFor="condition-time-before">
+        <label
+          className="font-medium text-muted-foreground text-xs"
+          htmlFor="condition-time-before"
+        >
           {t('nodes:conditionFields.time.before')}
         </label>
         <HaSelector
@@ -1228,13 +1262,20 @@ function ConditionTimeOptionsForm({
           value={before}
           onChange={(v) => setBefore(typeof v === 'string' ? v : '')}
           fallback={
-            <Input id="condition-time-before" type="time" value={before} onChange={(e) => setBefore(e.target.value)} />
+            <Input
+              id="condition-time-before"
+              type="time"
+              value={before}
+              onChange={(e) => setBefore(e.target.value)}
+            />
           }
         />
       </div>
 
       <div className="space-y-1.5">
-        <span className="font-medium text-muted-foreground text-xs">{t('nodes:conditionFields.time.weekday')}</span>
+        <span className="font-medium text-muted-foreground text-xs">
+          {t('nodes:conditionFields.time.weekday')}
+        </span>
         <div className="flex flex-wrap gap-1">
           {TIME_WEEKDAYS.map((day) => (
             <Button
@@ -1251,45 +1292,6 @@ function ConditionTimeOptionsForm({
       </div>
 
       <Button className="w-full" onClick={() => onCommit(after, before, weekdays)}>
-        {t('nodes:conditionFields.time.addCondition')}
-      </Button>
-    </div>
-  );
-}
-
-/**
- * Threshold/behavior/`for` configuration step for a purpose-specific recipe
- * whose condition has a real threshold (see handleSelectRecipeConfigurable)
- * — e.g. picking "Illuminance is value" now lands here instead of
- * committing a bare `{type: 'above', value: {number: 0}}` default straight
- * onto the canvas. The AND-dialog equivalent of WhenTriggerDialog.tsx's
- * RecipeConfigForm — reuses NativeConditionFields verbatim against a small
- * local draft, same as the property panel's own condition editor, so this
- * column is never a second, out-of-sync copy of that form. Local `data`
- * state is throwaway, matching ConditionTimeOptionsForm above.
- */
-function RecipeConfigForm({
-  recipe,
-  draftData,
-  onCommit,
-}: {
-  recipe: ConditionRecipe;
-  draftData: Record<string, unknown>;
-  onCommit: (data: Record<string, unknown>) => void;
-}) {
-  const { t } = useTranslation(['nodes']);
-  const [data, setData] = useState<Record<string, unknown>>(draftData);
-  const handleChange = (key: string, value: unknown) =>
-    setData((prev) => ({ ...prev, [key]: value }));
-  // NativeConditionFields only ever reads `node.data` — a real FlowNode's
-  // other fields (position, type, ...) don't exist yet for a still-being-
-  // configured node, so a minimal stand-in is enough here.
-  const draftNode = { id: 'draft', data } as unknown as FlowNode;
-
-  return (
-    <div className="flex flex-col gap-4 p-4">
-      <NativeConditionFields node={draftNode} onChange={handleChange} conditionType={recipe.fields.condition} />
-      <Button className="w-full" onClick={() => onCommit(data)}>
         {t('nodes:conditionFields.time.addCondition')}
       </Button>
     </div>

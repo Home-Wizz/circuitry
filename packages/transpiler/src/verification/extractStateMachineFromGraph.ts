@@ -3,6 +3,7 @@ import { isStartNode } from '@circuitry/shared';
 import { findBackEdges } from '../analyzer/topology';
 import type { BProgram, BStep } from './behaviorProgram';
 import { type BoolExpr, parseConditionExpr } from './boolean';
+import { loopLimitStep, loopRoundsStep } from '../utils/stateMachineLoops';
 import {
   buildTrigger,
   extractGraphParallelBranches,
@@ -135,6 +136,19 @@ function outgoingEdges(ctx: Ctx, nodeId: string): FlowEdge[] {
 
 function forwardOutgoing(ctx: Ctx, nodeId: string): FlowEdge[] {
   return outgoingEdges(ctx, nodeId).filter((e) => !ctx.backEdgeIds.has(e.id));
+}
+
+/** `starts` and everything after them, forward edges. */
+function forwardReachFrom(ctx: Ctx, starts: string[]): Set<string> {
+  const seen = new Set<string>();
+  const queue = [...starts];
+  while (queue.length > 0) {
+    const id = queue.shift()!;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    for (const e of forwardOutgoing(ctx, id)) queue.push(e.target);
+  }
+  return seen;
 }
 
 /**
@@ -300,11 +314,19 @@ function resolveTransition(ctx: Ctx, rawTargetIds: string[], midFlow: boolean): 
   if (targetIds.length === 1) return { kind: 'single', target: targetIds[0] };
 
   let convergenceSet = findConvergenceSet(ctx, targetIds);
+  // Decision D4: a branch stops at where the branches meet and at anything
+  // after it (a step after the meeting point it runs into runs once, after
+  // it; the strategy refuses the graph when that isn't always so). Not for
+  // a loop's test the branches go back to: everything is after that.
+  let boundSet: Set<string> | null =
+    convergenceSet.length > 0 ? forwardReachFrom(ctx, convergenceSet) : null;
   if (convergenceSet.length === 0 && midFlow) {
     const loopBack = findLoopBackConvergence(ctx, targetIds);
-    if (loopBack) convergenceSet = [loopBack];
+    if (loopBack) {
+      convergenceSet = [loopBack];
+      boundSet = new Set(convergenceSet);
+    }
   }
-  const boundSet = convergenceSet.length > 0 ? new Set(convergenceSet) : null;
   // Branches that meet before the boundary when not all of them do are
   // one branch (#99).
   const branchPrograms = extractGraphParallelBranches(ctx.flow, targetIds, boundSet);
@@ -573,4 +595,118 @@ export function extractStateMachineFromGraph(flow: FlowGraph): StateMachineGraph
   }
 
   return { isEmpty: false, triggers, states, parallelEntries, entry };
+}
+
+/**
+ * #157: the loop bookkeeping each state should carry, read from the graph:
+ * by state, the steps at its start (a loop head's round count, and for any
+ * loop but a while its limit) and at the start of its yes side (a while
+ * loop's limit, on its condition list's last member). The same loops in
+ * the same order as the strategy (heads sorted; a loop whose back edges
+ * all close count loops -- a test with no `_blockKey` looping back on its
+ * yes side -- has none), derived here on its own.
+ */
+export function expectedLoopBookkeeping(flow: FlowGraph): {
+  states: Map<string, { head: unknown[]; inThen: unknown[] }>;
+  loops: number;
+} {
+  const ctx = buildCtx(flow);
+  const nodes = new Map(ctx.flow.nodes.map((n) => [n.id, n]));
+  const back = ctx.flow.edges.filter((e) => ctx.backEdgeIds.has(e.id));
+  const blockKey = (n: FlowNode | undefined) =>
+    (n?.data as Record<string, unknown> | undefined)?._blockKey;
+  const states = new Map<string, { head: unknown[]; inThen: unknown[] }>();
+  const at = (id: string) => {
+    const entry = states.get(id) ?? { head: [], inThen: [] };
+    states.set(id, entry);
+    return entry;
+  };
+  let loops = 0;
+  for (const head of [...new Set(back.map((e) => e.target))].sort()) {
+    const into = back.filter((e) => e.target === head);
+    const headNode = nodes.get(head);
+    // A back edge's loop, by the conventions (2.4, bug #22): from a step to
+    // a condition, a while; from a condition, its own until (a
+    // `repeat_until` head's no side) or count (a plain test's yes side), or
+    // a body exit into the enclosing while (any other construct head, or
+    // into a `repeat_while` head).
+    const isWhile = into.some((e) => {
+      const source = nodes.get(e.source);
+      if (source?.type !== 'condition') return headNode?.type === 'condition';
+      const ownUntil = e.sourceHandle === 'false' && blockKey(source) === 'repeat_until';
+      return (
+        !ownUntil &&
+        headNode?.type === 'condition' &&
+        (typeof blockKey(source) === 'string' || blockKey(headNode) === 'repeat_while')
+      );
+    });
+    const allCount = into.every((e) => {
+      const source = nodes.get(e.source);
+      return (
+        source?.type === 'condition' &&
+        e.sourceHandle === 'true' &&
+        blockKey(source) === undefined &&
+        blockKey(headNode) !== 'repeat_while'
+      );
+    });
+    if (allCount) continue;
+    loops++;
+    // The states inside the loop: on a way from the head to a back edge.
+    const fromHead = new Set<string>();
+    const queue = [head];
+    while (queue.length > 0) {
+      const id = queue.shift()!;
+      if (fromHead.has(id)) continue;
+      fromHead.add(id);
+      for (const e of forwardOutgoing(ctx, id)) queue.push(e.target);
+    }
+    const region = new Set(into.map((e) => e.source));
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const e of ctx.flow.edges) {
+        if (ctx.backEdgeIds.has(e.id) || region.has(e.source) || !region.has(e.target)) continue;
+        if (!fromHead.has(e.source)) continue;
+        region.add(e.source);
+        grew = true;
+      }
+    }
+    at(head).head.push(loopRoundsStep(loops, [...region].sort()));
+    if (isWhile) at(whileListEnd(ctx, head)).inThen.push(loopLimitStep(loops));
+    else at(head).head.push(loopLimitStep(loops));
+  }
+  return { states, loops };
+}
+
+/** A while loop's condition list's last member (see extractFromGraph.ts's
+ * loopConditionChain, the while rule). */
+function whileListEnd(ctx: Ctx, head: string): string {
+  const exitKey = (targets: string[]) => [...new Set(targets)].sort().join('\u0000');
+  const headExits = exitKey(
+    forwardOutgoing(ctx, head)
+      .filter((e) => e.sourceHandle === 'false')
+      .map((e) => e.target)
+  );
+  const seen = [head];
+  let current = head;
+  while (true) {
+    const yes = forwardOutgoing(ctx, current).filter((e) => e.sourceHandle === 'true');
+    if (yes.length !== 1) break;
+    const next = ctx.flow.nodes.find((n) => n.id === yes[0].target);
+    if (next?.type !== 'condition' || seen.includes(next.id)) break;
+    if (typeof (next.data as Record<string, unknown>)._blockKey === 'string') break;
+    const waysIn = ctx.flow.edges.filter((e) => e.target === next.id && !ctx.backEdgeIds.has(e.id));
+    if (waysIn.length !== 1) break;
+    const no = outgoingEdges(ctx, next.id).filter((e) => e.sourceHandle === 'false');
+    const noForward = no.filter((e) => !ctx.backEdgeIds.has(e.id));
+    const foldable =
+      no.length === 0 ||
+      (headExits !== '' &&
+        noForward.length === no.length &&
+        exitKey(noForward.map((e) => e.target)) === headExits);
+    if (!foldable) break;
+    seen.push(next.id);
+    current = next.id;
+  }
+  return current;
 }

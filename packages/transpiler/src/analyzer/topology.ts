@@ -300,9 +300,32 @@ export function analyzeTopology(flow: FlowGraph): TopologyAnalysis {
   // that here: if a node anchoring a repeat loop receives more than one
   // edge in the forward view, the loop body branches, same conclusion as
   // hasBranchingRepeatBody above.
-  const hasConvergenceAtLoopCondition = [...loopConditionNodeIds].some(
-    (nodeId) => forwardEdges.filter((e) => e.target === nodeId).length > 1
-  );
+  //
+  // Unless the loop is a while loop (its test a back-edge target, where
+  // the steps before the loop arrive) and those edges all come from before
+  // it, as the branches of one block meeting again -- an if/else, a choose
+  // or a parallel right before the loop: the convergence
+  // detectConvergingPaths accepts anywhere else. Native writes the block,
+  // then the loop; it went to the state machine (#148). An until loop whose
+  // body ends in such a block stays with the state machine: native rebuilds
+  // an until body from one branch of a parallel opening it (bug #14).
+  const forwardOutgoing = new Map<string, string[]>();
+  for (const e of forwardEdges) {
+    forwardOutgoing.set(e.source, [...(forwardOutgoing.get(e.source) ?? []), e.target]);
+  }
+  const hasConvergenceAtLoopCondition = [...loopConditionNodeIds].some((nodeId) => {
+    const incoming = forwardEdges.filter((e) => e.target === nodeId);
+    if (incoming.length <= 1) return false;
+    const sources = [...new Set(incoming.map((e) => e.source))];
+    const allFromBefore =
+      targetRoleCounts.has(nodeId) &&
+      sources.every((source) => !bodyEntryReachableSet(nodeId).has(source));
+    return !(
+      allFromBefore &&
+      sources.length > 1 &&
+      checkParallelConvergence(filteredFlow, sources, forwardOutgoing, nodeId)
+    );
+  });
 
   // Build the graph (excluding back-edges)
   for (const node of flow.nodes) {
@@ -337,11 +360,23 @@ export function analyzeTopology(flow: FlowGraph): TopologyAnalysis {
     }
   }
 
+  // Cross-links and converging paths are read with the `sequence:` group
+  // markers spliced out (#141): a marker is a name and a boundary, not a
+  // step, and the extra level and merge it adds read as a cross-link and a
+  // convergence of their own, so a group holding an if (or a framed
+  // choose) inside an if's branch went to the state machine though native
+  // writes it.
+  const unmarked = withoutGroupMarkers(filteredFlow);
+  const gUnmarked = new Graph({ directed: true });
+  for (const node of unmarked.nodes) gUnmarked.setNode(node.id, node);
+  for (const edge of unmarked.edges) gUnmarked.setEdge(edge.source, edge.target, edge);
+  const unmarkedOrder = alg.isAcyclic(gUnmarked) ? alg.topsort(gUnmarked) : null;
+
   // Check for cross-links (edges that skip levels) - use filtered flow
-  const hasCrossLinks = detectCrossLinks(g, filteredFlow, topologicalOrder);
+  const hasCrossLinks = detectCrossLinks(gUnmarked, unmarked, unmarkedOrder);
 
   // Check for converging paths (multiple edges pointing to same node) - use filtered flow
-  const hasConvergingPaths = detectConvergingPaths(filteredFlow);
+  const hasConvergingPaths = detectConvergingPaths(unmarked);
 
   // Check for divergent trigger paths (different triggers → different actions)
   const hasDivergentTriggerPaths = detectDivergentTriggerPaths(g, filteredFlow);
@@ -377,6 +412,33 @@ export function analyzeTopology(flow: FlowGraph): TopologyAnalysis {
     topologicalOrder,
     recommendedStrategy,
   };
+}
+
+/**
+ * The graph without its `sequence_start`/`sequence_end` markers: each way
+ * into a marker joined to each way out of it, keeping the way in's handle
+ * (and marking the joined edge a loop-back if either part was one).
+ */
+function withoutGroupMarkers(flow: FlowGraph): FlowGraph {
+  let edges = flow.edges;
+  const markers = flow.nodes.filter((n) => n.type === 'sequence_start' || n.type === 'sequence_end');
+  for (const marker of markers) {
+    const ins = edges.filter((e) => e.target === marker.id && e.source !== marker.id);
+    const outs = edges.filter((e) => e.source === marker.id && e.target !== marker.id);
+    const joined = ins.flatMap((into) =>
+      outs.map(
+        (out): FlowEdge => ({
+          ...into,
+          id: `${into.id}>${out.id}`,
+          target: out.target,
+          ...(out.type === 'loop-back' ? { type: 'loop-back' } : {}),
+        })
+      )
+    );
+    edges = [...edges.filter((e) => e.source !== marker.id && e.target !== marker.id), ...joined];
+  }
+  const markerIds = new Set(markers.map((m) => m.id));
+  return { ...flow, nodes: flow.nodes.filter((n) => !markerIds.has(n.id)), edges };
 }
 
 /**
@@ -460,6 +522,10 @@ function detectCrossLinks(
     }
   }
 
+  // One (empty) outgoing map for every convergence check below, so they
+  // share ancestorChain's cache.
+  const noReachCheck = new Map<string, string[]>();
+
   // Check for edges that skip more than one level
   for (const edge of flow.edges) {
     const sourceLevel = levelMap.get(edge.source);
@@ -506,7 +572,7 @@ function detectCrossLinks(
         const uniqueIncomingSources = [...new Set(incomingToTarget.map((e) => e.source))];
         if (
           uniqueIncomingSources.length > 1 &&
-          checkParallelConvergence(flow, uniqueIncomingSources, new Map(), edge.target)
+          checkParallelConvergence(flow, uniqueIncomingSources, noReachCheck, edge.target)
         ) {
           continue;
         }
@@ -683,7 +749,8 @@ function checkParallelConvergence(
   flow: FlowGraph,
   convergingSources: string[],
   outgoingEdges: Map<string, string[]>,
-  convergenceTargetId: string
+  convergenceTargetId: string,
+  depth = 0
 ): boolean {
   // Reject outright if any converging source can reach ANOTHER converging
   // source via ordinary forward edges (found 2026-09-06, empirical audit --
@@ -800,19 +867,16 @@ function checkParallelConvergence(
   // that node has EXACTLY one incoming edge in the WHOLE graph, so there
   // is no other path into it from some unrelated branch this trace could
   // be wrongly conflating.
-  const buildAncestorChain = (nodeId: string): string[] => {
-    const chain: string[] = [];
-    const seen = new Set<string>();
-    let current: string | null = nodeId;
-    while (current !== null && !seen.has(current)) {
-      seen.add(current);
-      chain.push(current);
-      const incomingEdges = flow.edges.filter((e) => e.target === current);
-      if (incomingEdges.length !== 1) break; // 0 (true root) or 2+ (unresolved) -- chain ends here, inclusive
-      current = incomingEdges[0].source;
-    }
-    return chain;
-  };
+  //
+  // A node with 2+ incoming edges that is itself a convergence of this same
+  // kind -- the branches of an inner if/else or parallel meeting again --
+  // is climbed through to the node that opened it (#147): an if/else
+  // inside an outer if's branch, with a step after it, meets the outer
+  // else at the step after the outer if, and that convergence's chain used
+  // to stop at the inner meeting point, so the automation went to the state
+  // machine though native writes it as the nesting it is.
+  const buildAncestorChain = (nodeId: string): Chain =>
+    ancestorChain(flow, nodeId, outgoingEdges, depth);
 
   // Check if all converging sources' ancestor chains share a common node --
   // the NEAREST one, i.e. the first node (in climb order) that appears in
@@ -823,11 +887,27 @@ function checkParallelConvergence(
   // branches fanning out directly from a single condition's true edge --
   // natively representable in HA YAML either way (actions after the
   // if/then/else/choose/parallel block).
+  //
+  //
+  // Not when one source comes after a block that node opened -- its chain
+  // climbed through where that block's branches meet -- and another is
+  // inside that block: native can't write a step inside a block meeting
+  // the steps after it (it ran the meeting step in the branch and again
+  // after the block, #153). See arrivalsConflict.
   const sourceChains = convergingSources.map((sourceId) => buildAncestorChain(sourceId));
-  const sharedAncestorFound = sourceChains[0].some((candidate) =>
-    sourceChains.every((chain) => chain.includes(candidate))
+  const shared = nearestShared(sourceChains.map((chain) => chain.nodes));
+  const arrivals =
+    shared === undefined
+      ? []
+      : convergingSources.map((sourceId, i) =>
+          sourceId === shared
+            ? directArrival(flow, shared, convergenceTargetId)
+            : sourceChains[i].arrivals.get(shared)
+        );
+  const conflict = arrivals.some((a, i) =>
+    arrivals.some((b, j) => i < j && (a === undefined || b === undefined || arrivalsConflict(a, b)))
   );
-  if (sharedAncestorFound) {
+  if (shared !== undefined && !conflict) {
     // All branches originate from the same nearest shared ancestor --
     // whether that's a single if/then/else, an N-way choose/elif cascade,
     // or an inner if fully nested inside an outer branch -- this is a
@@ -904,6 +984,132 @@ function checkParallelConvergence(
   // All converging branches must share the same parallel source
   return parallelSources.size === 1;
 }
+
+/** The first node of the first chain that every chain holds. */
+function nearestShared(chains: string[][]): string | undefined {
+  return chains[0].find((candidate) => chains.every((chain) => chain.includes(candidate)));
+}
+
+/** How a chain got to one of its nodes: down one of its edges, or, `jump`,
+ * by climbing through where the branches of a block it opened meet. The
+ * edges (by target) and their handles: the one edge, or those the block's
+ * branches leave it by (a condition's both sides for an if, one side for a
+ * parallel there, a step's edges for its parallel). */
+interface Arrival {
+  jump: boolean;
+  edges: Set<string>;
+  handles: Set<string>;
+}
+
+/** A node's ancestors, nearest first (see ancestorChain), and how it got to
+ * each. */
+interface Chain {
+  nodes: string[];
+  arrivals: Map<string, Arrival>;
+}
+
+/** Down `from`'s edges to `to` (a source that is the shared node itself). */
+function directArrival(flow: FlowGraph, from: string, to: string): Arrival {
+  const handles = flow.edges
+    .filter((e) => e.source === from && e.target === to)
+    .map((e) => e.sourceHandle ?? '');
+  return { jump: false, edges: new Set([to]), handles: new Set(handles) };
+}
+
+/**
+ * #153: whether two sources meeting can be one block's branches, as they
+ * got to the node their chains share. One after a block that node opened
+ * and one inside it (down one of the block's edges) can't; nor can two
+ * after blocks of which one holds the other (the handles overlap but
+ * differ: an if's, and a parallel's on one side of it). Different edges
+ * are branches; two after blocks on the same handles, the steps after one
+ * block meeting again, or after two groups of one parallel's branches.
+ */
+function arrivalsConflict(a: Arrival, b: Arrival): boolean {
+  if (a.jump && b.jump) {
+    const overlap = [...a.handles].some((h) => b.handles.has(h));
+    const same = a.handles.size === b.handles.size && [...a.handles].every((h) => b.handles.has(h));
+    return overlap && !same;
+  }
+  if (!a.jump && !b.jump) return false;
+  const [after, inside] = a.jump ? [a, b] : [b, a];
+  return [...inside.edges].some((target) => after.edges.has(target));
+}
+
+/** How deep ancestorChain climbs through convergences inside convergences. */
+const MAX_REGION_DEPTH = 64;
+
+/**
+ * A node and its single-parented ancestors, nearest first (see
+ * checkParallelConvergence's doc on the shared-ancestor test). The climb
+ * ends, inclusively, at a node with no incoming edge, or at one with
+ * several that isn't a convergence checkParallelConvergence accepts; one it
+ * accepts is climbed through to the nearest node its own sources share --
+ * the if, choose or fan-out whose branches meet there (#147).
+ */
+function ancestorChain(
+  flow: FlowGraph,
+  nodeId: string,
+  outgoingEdges: Map<string, string[]>,
+  depth: number
+): Chain {
+  // Each node's chain once per analysis (the outgoing-edge map is made once
+  // per analysis of a graph): a convergence climbs through the ones inside
+  // it, and every check of each would climb them again.
+  const cache = chainCache.get(outgoingEdges) ?? new Map<string, Chain>();
+  chainCache.set(outgoingEdges, cache);
+  const cached = cache.get(nodeId);
+  if (cached) return cached;
+  // Asked again while its own chain is being built (only a cycle does
+  // that): just the node, so the climb ends there.
+  cache.set(nodeId, { nodes: [nodeId], arrivals: new Map() });
+  const chain: Chain = { nodes: [], arrivals: new Map() };
+  const seen = new Set<string>();
+  let current: string | undefined = nodeId;
+  while (current !== undefined && !seen.has(current)) {
+    seen.add(current);
+    chain.nodes.push(current);
+    const at: string = current;
+    const incomingEdges = flow.edges.filter((e) => e.target === at);
+    if (incomingEdges.length === 1) {
+      current = incomingEdges[0].source;
+      chain.arrivals.set(current, {
+        jump: false,
+        edges: new Set([at]),
+        handles: new Set([incomingEdges[0].sourceHandle ?? '']),
+      });
+      continue;
+    }
+    if (incomingEdges.length < 2 || depth >= MAX_REGION_DEPTH) break;
+    const sources = [...new Set(incomingEdges.map((e) => e.source))];
+    if (sources.length === 1) {
+      // Both edges of one condition meet here: it opened this meeting.
+      current = sources[0];
+      chain.arrivals.set(current, { ...directArrival(flow, current, at), jump: true });
+      continue;
+    }
+    if (!checkParallelConvergence(flow, sources, outgoingEdges, at, depth + 1)) break;
+    const sourceChains = sources.map((source) =>
+      ancestorChain(flow, source, outgoingEdges, depth + 1)
+    );
+    const opener = nearestShared(sourceChains.map((c) => c.nodes));
+    if (opener !== undefined) {
+      const ways = sources.map((source, i) =>
+        source === opener ? directArrival(flow, opener, at) : sourceChains[i].arrivals.get(opener)
+      );
+      chain.arrivals.set(opener, {
+        jump: true,
+        edges: new Set(ways.flatMap((way) => [...(way?.edges ?? [])])),
+        handles: new Set(ways.flatMap((way) => [...(way?.handles ?? [])])),
+      });
+    }
+    current = opener;
+  }
+  cache.set(nodeId, chain);
+  return chain;
+}
+
+const chainCache = new WeakMap<Map<string, string[]>, Map<string, Chain>>();
 
 /**
  * Get the depth of each node from entry points

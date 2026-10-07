@@ -11,12 +11,17 @@ import {
 } from '@/components/ui/select';
 import { HaSelect } from '@/ha';
 import { useNativeDescription } from '@/hooks/useNativeDescriptions';
+import { handledTriggerOptions } from '@/lib/describedFields';
 import { MOON_PHASES } from '@/lib/moonPhases';
-import { resolveOptionFields, resolveTargetless, resolveThresholdUnits } from '@/lib/nativeDescriptions';
+import {
+  describedThresholdShape,
+  resolveOptionFields,
+  resolveTargetless,
+  resolveThresholdUnits,
+} from '@/lib/nativeDescriptions';
 import {
   getThresholdRange,
   getThresholdUnit,
-  getTriggerThresholdShape,
   type TypedThreshold,
   triggerAllowsAnyThreshold,
 } from '@/lib/nativeThreshold';
@@ -29,11 +34,15 @@ import {
   type TriggerOffsetType,
 } from '@/lib/triggerOffsetField';
 import { getNodeDataObject, toStringArray } from '@/utils/nodeData';
+import { holdForValue, HoldForField } from '@/components/nodes/holdFor';
+import { BehaviorSegment } from './BehaviorSegment';
+import { DescribedOptionFields } from './DescribedOptionFields';
 import { DurationField, type DurationValue } from './DurationField';
 import { NativeTargetField, type TargetValue } from './NativeTargetField';
 import { OptionSelectField } from './OptionSelectField';
 import { ThresholdTypeField } from './ThresholdTypeField';
 import { ThresholdValueField } from './ThresholdValueField';
+import { PanelTargets } from '../PanelSection';
 
 /**
  * Field editor for HA's purpose-specific triggers (2025.12+, e.g.
@@ -61,6 +70,9 @@ interface NativeTriggerFieldsProps {
   onChange: (key: string, value: unknown) => void;
   /** The dotted trigger type, e.g. `light.brightness_crossed_threshold` or `illuminance.crossed_threshold` — determines which threshold shape (if any) to render. */
   triggerType: string;
+  /** The card's "+ more": leaves out what the card edits itself (the
+   * target, the threshold, a "for" already set), the behaviour as buttons. */
+  compact?: boolean;
 }
 
 // moon.phase_changed's `phase`: `any` (its default: every change) or one
@@ -95,17 +107,29 @@ type NativeTriggerOptions = {
   [key: string]: unknown;
 };
 
-export function NativeTriggerFields({ node, onChange, triggerType }: NativeTriggerFieldsProps) {
+export function NativeTriggerFields({
+  node,
+  onChange,
+  triggerType,
+  compact = false,
+}: NativeTriggerFieldsProps) {
   const { t } = useTranslation(['nodes']);
   const target = getNodeDataObject<TargetValue>(node, 'target');
   const options = getNodeDataObject<NativeTriggerOptions>(node, 'options');
-  const shape = getTriggerThresholdShape(triggerType);
   const unit = getThresholdUnit(triggerType);
   const range = getThresholdRange(triggerType);
   // What the connected HA describes for this trigger, else the tables
   // (lib/nativeDescriptions.ts): the same fields either way on HA 2026.9.
   const description = useNativeDescription('trigger', triggerType);
-  const { behavior: behaviorField, hasFor: showFor } = resolveOptionFields('trigger', triggerType, description);
+  // The threshold as the connected HA has it: none where it describes the
+  // type without one (an HA from before the threshold rework, whose bounds
+  // are its own fields, below).
+  const shape = describedThresholdShape('trigger', triggerType, description);
+  const { behavior: behaviorField, hasFor: showFor } = resolveOptionFields(
+    'trigger',
+    triggerType,
+    description
+  );
   // A value the automation already holds that isn't offered (the older
   // `any`/`last` of an imported one, say) is listed too, so the panel shows
   // what the automation does.
@@ -145,9 +169,26 @@ export function NativeTriggerFields({ node, onChange, triggerType }: NativeTrigg
 
   return (
     <>
-      {!isTargetless && <NativeTargetField target={target} onChange={(v) => onChange('target', v)} />}
+      {!isTargetless && !compact && (
+        <PanelTargets>
+          <NativeTargetField
+            target={target}
+            onChange={(v) => onChange('target', v)}
+            described={description?.target}
+          />
+        </PanelTargets>
+      )}
 
-      {behaviorField && behaviors && (
+      {compact && behaviorField && behaviors && (
+        <BehaviorSegment
+          kind="trigger"
+          values={behaviors}
+          value={options.behavior ?? behaviorField.default}
+          onChange={(behavior) => updateOptions({ behavior })}
+        />
+      )}
+
+      {!compact && behaviorField && behaviors && (
         <FormField
           label={t('nodes:triggers.native.behaviorLabel')}
           description={t('nodes:triggers.native.behaviorDescription')}
@@ -204,7 +245,10 @@ export function NativeTriggerFields({ node, onChange, triggerType }: NativeTrigg
                   label: t(`nodes:triggers.native.twilightTypes.${type}`),
                 }))}
                 fallback={
-                  <Select value={options.type ?? 'civil'} onValueChange={(v) => updateOptions({ type: v })}>
+                  <Select
+                    value={options.type ?? 'civil'}
+                    onValueChange={(v) => updateOptions({ type: v })}
+                  >
                     <SelectTrigger>
                       <SelectValue />
                     </SelectTrigger>
@@ -242,7 +286,9 @@ export function NativeTriggerFields({ node, onChange, triggerType }: NativeTrigg
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="before">{t('nodes:triggers.native.offsetTypeBefore')}</SelectItem>
+                <SelectItem value="before">
+                  {t('nodes:triggers.native.offsetTypeBefore')}
+                </SelectItem>
                 <SelectItem value="after">{t('nodes:triggers.native.offsetTypeAfter')}</SelectItem>
               </SelectContent>
             </Select>
@@ -274,7 +320,7 @@ export function NativeTriggerFields({ node, onChange, triggerType }: NativeTrigg
         />
       )}
 
-      {shape === 'flat' && (
+      {!compact && shape === 'flat' && (
         <FormField
           label={t('nodes:triggers.native.thresholdLabel')}
           description={t('nodes:triggers.native.thresholdDescription')}
@@ -291,7 +337,7 @@ export function NativeTriggerFields({ node, onChange, triggerType }: NativeTrigg
         </FormField>
       )}
 
-      {shape === 'typed' && (
+      {!compact && shape === 'typed' && (
         <ThresholdTypeField
           threshold={typedThreshold}
           onChange={(next) => updateOptions({ threshold: next })}
@@ -309,7 +355,23 @@ export function NativeTriggerFields({ node, onChange, triggerType }: NativeTrigg
           ThresholdTypeField above — every other shape (flat/none, including
           plain boolean triggers like lock.locked or door.opened, and the
           enum-mode ones just above) gets it here instead. */}
-      {shape !== 'typed' && showFor && (
+      {/* On the card: the For pill once set, and a threshold pill asks it
+          too; until then, a type without a threshold asks it here. */}
+      {compact &&
+        showFor &&
+        shape !== 'flat' &&
+        shape !== 'typed' &&
+        holdForValue('trigger', node.data) === undefined && (
+          <HoldForField
+            kind="trigger"
+            data={node.data}
+            onPatch={(patch) => {
+              for (const [key, value] of Object.entries(patch)) onChange(key, value);
+            }}
+          />
+        )}
+
+      {!compact && shape !== 'typed' && showFor && (
         <DurationField
           label={t('nodes:triggers.native.thresholdForLabel')}
           description={t('nodes:triggers.native.thresholdForDescription')}
@@ -317,6 +379,16 @@ export function NativeTriggerFields({ node, onChange, triggerType }: NativeTrigg
           onChange={(v) => updateOptions({ for: v })}
         />
       )}
+
+      {/* Whatever else HA describes for it, by HA's own selectors. */}
+      <DescribedOptionFields
+        kind="trigger"
+        type={triggerType}
+        description={description}
+        handled={handledTriggerOptions(triggerType, description)}
+        options={options}
+        onChange={(key, value) => updateOptions({ [key]: value })}
+      />
     </>
   );
 }

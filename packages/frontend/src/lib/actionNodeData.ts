@@ -23,7 +23,15 @@ import type { ActionRecipe } from '@/lib/actionRecipes';
  * comment for why this was missing before.
  */
 export type ActionSelection =
-  | { kind: 'recipe'; entityIds: string[]; recipe: ActionRecipe }
+  | {
+      kind: 'recipe';
+      entityIds: string[];
+      recipe: ActionRecipe;
+      /** A whole area as its target ("Anything in <room>"), instead of
+       * entities: only for a service HA describes a target for (the picker
+       * checks; see serviceHasTarget). */
+      areaId?: string;
+    }
   | { kind: 'deviceAction'; action: DeviceAction };
 
 /**
@@ -54,7 +62,11 @@ export function buildActionNodeData(selection: ActionSelection): Record<string, 
       const { entityIds, recipe } = selection;
       return {
         service: recipe.service,
-        ...(actionRecipeTakesEntities(recipe) ? { target: { entity_id: entityIds } } : {}),
+        ...(actionRecipeTakesEntities(recipe)
+          ? {
+              target: selection.areaId ? { area_id: selection.areaId } : { entity_id: entityIds },
+            }
+          : {}),
       };
     }
     case 'deviceAction': {

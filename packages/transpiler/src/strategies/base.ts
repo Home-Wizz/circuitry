@@ -6,9 +6,10 @@ import type {
   TriggerNode,
   WaitNode,
 } from '@circuitry/shared';
-import { isDeviceAction, isOpaqueStepData } from '@circuitry/shared';
+import { isDeviceAction, isOpaqueStepData, TRIGGER_KEYS_KEEPING_NULL } from '@circuitry/shared';
 import type { TopologyAnalysis } from '../analyzer/topology';
 import { stripDottedOnlyConditionFields } from '../utils/conditionFields';
+import { opensWithParallel } from '../utils/parallelBranch';
 
 /** An and/or/not group, whose `conditions:` HA requires even when empty (bug #71). */
 export function isConditionGroup(condition: unknown): boolean {
@@ -31,6 +32,12 @@ export function bareParallelBranch(steps: unknown[]): unknown {
   const [step] = steps;
   if (!step || typeof step !== 'object' || Array.isArray(step) || !('sequence' in step)) {
     return step;
+  }
+  // An unnamed group that opens with a parallel is the list HA's shorthand
+  // writes, and the import reads that list back as this group (#147).
+  const { sequence } = step as { sequence: unknown };
+  if (Object.keys(step).length === 1 && Array.isArray(sequence) && opensWithParallel(sequence)) {
+    return sequence;
   }
   return Object.keys(step).every((key) => key === 'sequence' || key === 'alias') ? step : undefined;
 }
@@ -195,13 +202,14 @@ export abstract class BaseStrategy implements TranspilerStrategy {
   /**
    * Cleans up a trigger's fields for YAML output: drops `undefined`/`''`
    * (never meaningful in generated YAML), but — unlike a blanket
-   * `v !== null` filter — keeps an explicit `null` on `from`/`to`, since HA's
-   * `state` trigger gives `from: null`/`to: null` real, different-from-unset
-   * meaning ("any state, including the very first ever recorded, ignoring
-   * attribute-only changes" — see home-assistant.io/docs/automation/trigger/
-   * #state-trigger's "Good to know"). Every other field keeps the old
-   * behavior of dropping `null` outright, since HA gives it no meaning there
-   * and it's more likely leftover UI state than an intentional value.
+   * `v !== null` filter — keeps an explicit `null` on the keys HA gives one
+   * a meaning (TRIGGER_KEYS_KEEPING_NULL: a state trigger's `from: null`/
+   * `to: null`, "any state, including the very first ever recorded,
+   * ignoring attribute-only changes" — see home-assistant.io/docs/
+   * automation/trigger/#state-trigger's "Good to know" — and `not_from`/
+   * `not_to`, #144). Every other field keeps the old behavior of dropping
+   * `null` outright, since HA gives it no meaning there and it's more likely
+   * leftover UI state than an intentional value.
    *
    * Shared by both strategies' trigger builders (NativeStrategy's
    * buildTrigger, StateMachineStrategy's extractTriggers) and both
@@ -217,7 +225,7 @@ export abstract class BaseStrategy implements TranspilerStrategy {
         // and dropping it left a trigger without its required key, which HA
         // refused (bug #72). The editor stores a cleared field as unset.
         if (v === undefined) return false;
-        if (v === null) return key === 'from' || key === 'to';
+        if (v === null) return TRIGGER_KEYS_KEEPING_NULL.has(key);
         return true;
       })
     );
@@ -495,10 +503,13 @@ export abstract class BaseStrategy implements TranspilerStrategy {
     if (!data || typeof data !== 'object') return data;
     // Internal Circuitry fields and the legacy `template` key are left out.
     const { condition, conditions, alias, template, ...rest } = this.stripInternalFields(data);
+    // A block's first condition holds the block's alias, written on the
+    // block; its own is `_conditionAlias` (#143, conditionAliases).
+    const ownAlias = dropTopAlias ? data._conditionAlias : alias;
     const out: Record<string, unknown> = {
       condition,
       ...stripDottedOnlyConditionFields(condition, rest),
-      ...(alias && !dropTopAlias ? { alias } : {}),
+      ...(typeof ownAlias === 'string' && ownAlias !== '' ? { alias: ownAlias } : {}),
     };
     // For template conditions, ensure value_template is set from template if needed
     if (condition === 'template' && !rest.value_template && template) {
@@ -535,7 +546,7 @@ export abstract class BaseStrategy implements TranspilerStrategy {
     // doc comment in base.ts).
     const trigger: Record<string, unknown> = this.stripInternalFields(node.data);
 
-    // Clean up undefined/empty values (but keep explicit from/to: null — see cleanTriggerFields)
+    // Clean up undefined/empty values (but keep the nulls HA gives a meaning — see cleanTriggerFields)
     return this.cleanTriggerFields(this.foldEventContextUserId(trigger));
   }
 }

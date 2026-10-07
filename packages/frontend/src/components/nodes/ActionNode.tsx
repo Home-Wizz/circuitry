@@ -1,42 +1,31 @@
 import { isOpaqueStepData } from '@circuitry/shared';
-import { Handle, type NodeProps, Position } from '@xyflow/react';
+import type { NodeProps } from '@xyflow/react';
 import type { TFunction } from 'i18next';
-import {
-  GitCompareArrows,
-  ListTree,
-  Lock,
-  type LucideIcon,
-  OctagonX,
-  Play,
-  RotateCcw,
-} from 'lucide-react';
+import { GitCompareArrows, ListTree, Lock, OctagonX, Play, RotateCcw } from 'lucide-react';
 import { memo, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import { BlockRoleBadge } from '@/components/nodes/BlockRoleBadge';
-import { StepStopsHere } from '@/components/nodes/ConventionMarkers';
 import { TruncatedTooltip } from '@/components/ui/truncated-tooltip';
 import { compoundTypes } from '@/config/nodeTypeCatalog';
 import { useMoreInfo } from '@/hooks/useMoreInfo';
+import { useEditableTargets, useWholeArea } from '@/hooks/useStepTargets';
 import { useNodeCardDisplay } from '@/hooks/useNodeCardDisplay';
 import { useNodeErrors } from '@/hooks/useNodeErrors';
 import { useTraceNodeState } from '@/hooks/useTraceNodeState';
 import { getActionRoleLabel } from '@/lib/block-role-label';
-import { getDomainIcon } from '@/lib/domain-icons';
-import type { NodeColorClasses } from '@/lib/node-colors';
-import { getTraceStateClass, NODE_COLORS, NODE_STATE_CLASSES, SELECTED_NODE_STYLE } from '@/lib/node-colors';
+import { getDomainIcon, iconKeyFor } from '@/lib/domain-icons';
+import { stepIconKey } from '@/lib/emojiIcons';
+import { getTraceStateClass } from '@/lib/node-colors';
 import { opaqueStepKind, opaqueStepSummary, opaqueStepYaml } from '@/lib/opaqueStep';
-import { cn, prettify, singleEntityIdFrom } from '@/lib/utils';
+import { prettify, singleEntityIdFrom } from '@/lib/utils';
 import type { ActionNodeData } from '@/store/flow-store';
 import { useFlowStore } from '@/store/flow-store';
-import { NodeStatusBadge } from './NodeStatusBadge';
+import { actionVerb } from './cardWording';
+import { phraseAfterName, StepFrame } from './StepCard';
+import { ValuePills } from './ValuePills';
+import { CardTargetLine, CardTitle, titleIsTarget } from './TargetPill';
 
-const ACTION_COLORS = NODE_COLORS.action;
-// stop-action reuses the "wait" token, repeat-action reuses "delay" — same
-// visual family already established for those semantics elsewhere.
-const STOP_COLORS = NODE_COLORS.wait;
-const REPEAT_COLORS = NODE_COLORS.delay;
-// A step Circuitry keeps as written (bug #57): the neutral "join" token.
-const OPAQUE_COLORS = NODE_COLORS.join;
+// A Stop has the "wait" colour and a repeat the "delay" one, as elsewhere;
+// a step Circuitry keeps as written (bug #57) the neutral "join" one.
 
 interface ActionNodeProps extends NodeProps {
   data: ActionNodeData;
@@ -50,118 +39,120 @@ interface ActionNodeProps extends NodeProps {
 function getTargetDisplay(
   isStopAction: boolean,
   target: ActionNodeData['target'],
-  t: TFunction<readonly ['nodes']>
+  t: TFunction<readonly ['nodes']>,
+  entityNames: (entityIds: readonly string[]) => string
 ): string | null {
   if (isStopAction || !target) return null;
   const entityId = target.entity_id;
   if (Array.isArray(entityId)) {
     return t('nodes:actions.entitiesSelected', { count: entityId.length });
   }
-  return entityId ?? null;
-}
-
-interface ActionCardFrameProps {
-  colors: NodeColorClasses;
-  selected: boolean;
-  isActive: boolean;
-  isDisabled: boolean;
-  hasErrors: boolean;
-  errorMessages: string[];
-  warningMessages: string[];
-  traceClass: string | undefined;
-  roleLabel: string | null | undefined;
-  icon: LucideIcon;
-  title: string;
-  stepNumber: number | null | undefined;
-  /** False for a step nothing follows (Stop). */
-  hasSourceHandle: boolean;
-  /** For the "Stops here" badge (H4.4). */
-  nodeId: string;
-  children: ReactNode;
+  return entityId ? entityNames([entityId]) : null;
 }
 
 /**
- * The card around a Stop step and a step kept as written: border, state
- * badges, handles, and a title row with icon and step number. One copy
- * for both, so the two can't drift apart.
+ * A device-specific action (device_id/domain/type, no service) -- see
+ * useDeviceAutomation.ts's DeviceAction/actionNodeData.ts's 'deviceAction'
+ * case. Told apart from a plain service call so the card shows a real
+ * label (the device action's `type`, e.g. "identify") instead of falling
+ * all the way through to the generic "Action" placeholder.
  */
-function ActionCardFrame({
-  colors,
-  selected,
-  isActive,
-  isDisabled,
-  hasErrors,
-  errorMessages,
-  warningMessages,
-  traceClass,
-  roleLabel,
-  icon: Icon,
-  title,
-  stepNumber,
-  hasSourceHandle,
-  nodeId,
-  children,
-}: ActionCardFrameProps) {
+function deviceActionOf(
+  data: Readonly<Record<string, unknown>>
+): { deviceId: string; domain: string; type: string } | undefined {
+  const { service, device_id: deviceId, domain, type } = data;
+  return typeof service !== 'string' &&
+    typeof deviceId === 'string' &&
+    typeof domain === 'string' &&
+    typeof type === 'string'
+    ? { deviceId, domain, type }
+    : undefined;
+}
+
+/** An action's verb ("Turn on", a device action's type, else its service),
+ * and what it does after "Then" ("turn on"). */
+function actionWords(
+  t: TFunction<readonly ['nodes']>,
+  language: string,
+  named: string | undefined,
+  deviceActionType: string | undefined,
+  serviceName: string | undefined
+): { verb: string | undefined; doing: string } {
+  const verb = named ?? (deviceActionType ? prettify(deviceActionType) : undefined);
+  return {
+    verb,
+    doing: phraseAfterName(verb || serviceName || t('nodes:types.action'), language),
+  };
+}
+
+/** What an action acts on and how, around its verb: "turn on [Kitchen
+ * light] at [40 %]"; German puts the verb last ("[Küchenlicht] auf [40 %]
+ * einschalten"). */
+function aroundVerb(doing: string, language: string, what: ReactNode, rest: ReactNode) {
+  if (!language.startsWith('de')) {
+    return (
+      <>
+        {`${doing} `}
+        {what}
+        {rest}
+      </>
+    );
+  }
   return (
-    <div
-      // See node-colors.ts's SELECTED_NODE_STYLE doc comment.
-      style={selected ? SELECTED_NODE_STYLE : undefined}
-      className={cn(
-        'relative min-w-[180px] rounded-lg border-2 px-4 py-3',
-        colors.border,
-        colors.bg,
-        'transition-all duration-200',
-        isActive && NODE_STATE_CLASSES.active,
-        isDisabled && 'border-dashed opacity-50 grayscale',
-        hasErrors && NODE_STATE_CLASSES.error,
-        traceClass
-      )}
-    >
-      {roleLabel && <BlockRoleBadge label={roleLabel} />}
-      <NodeStatusBadge
-        errorMessages={errorMessages}
-        warningMessages={warningMessages}
-        isDisabled={isDisabled}
-      />
-      <Handle type="target" position={Position.Left} className={cn('w-3! h-3!', colors.handle)} />
-      <div className="mb-1 flex items-center gap-2">
-        <div className={cn('rounded p-1', colors.chip)}>
-          <Icon className={cn('h-4 w-4', colors.text)} />
-        </div>
-        <span className={cn('font-semibold text-sm', colors.text)}>{title}</span>
-        {stepNumber && (
-          <div
-            className={cn(
-              'ml-auto flex h-5 w-5 items-center justify-center rounded-full font-bold text-xs',
-              colors.badge
-            )}
-          >
-            {stepNumber}
-          </div>
-        )}
-      </div>
-      {children}
-      {hasSourceHandle && (
-        <Handle
-          type="source"
-          position={Position.Right}
-          className={cn('w-3! h-3!', colors.handle)}
-        />
-      )}
-      {hasSourceHandle && <StepStopsHere nodeId={nodeId} />}
-    </div>
+    <>
+      {what}
+      {rest}
+      {` ${doing.charAt(0).toLowerCase()}${doing.slice(1)}`}
+    </>
+  );
+}
+
+/** An action's target by name, when the card can't edit it: a click opens
+ * HA's more-info for one entity. */
+function NamedTarget({
+  name,
+  display,
+  entityId,
+}: {
+  /** Its entity's name, when it names one. */
+  name: string | undefined;
+  /** What it names, in words ("Kitchen light", "2 entities"). */
+  display: string;
+  /** The one entity it names, for HA's more-info. */
+  entityId: string | undefined;
+}) {
+  const openMoreInfo = useMoreInfo();
+  return (
+    <TruncatedTooltip content={display}>
+      <button
+        type="button"
+        className="nodrag max-w-full truncate text-left font-semibold hover:underline"
+        onClick={(e) => {
+          e.stopPropagation();
+          if (entityId) openMoreInfo(entityId);
+        }}
+      >
+        {name ?? display}
+      </button>
+    </TruncatedTooltip>
   );
 }
 
 export const ActionNode = memo(function ActionNode({ id, data, selected }: ActionNodeProps) {
-  const { t } = useTranslation(['nodes']);
+  const { t, i18n } = useTranslation(['nodes']);
   const activeNodeId = useFlowStore((s) => s.activeNodeId);
   const getExecutionStepNumber = useFlowStore((s) => s.getExecutionStepNumber);
   const updateNodeData = useFlowStore((s) => s.updateNodeData);
   const requestNodeEdit = useFlowStore((s) => s.requestNodeEdit);
   const { hasErrors, errorMessages, warningMessages } = useNodeErrors(id);
-  const openMoreInfo = useMoreInfo();
-  const { resolveEntityTarget } = useNodeCardDisplay();
+  // Its entities, edited on the card (TargetPill.tsx).
+  const pillProps = {
+    nodeId: id,
+    nodeType: 'action',
+    data,
+    targets: useEditableTargets('action', data),
+  };
+  const { resolveEntityTarget, resolveDeviceTarget, entityNames } = useNodeCardDisplay();
   const traceState = useTraceNodeState(id);
   const isActive = activeNodeId === id;
   const stepNumber = getExecutionStepNumber(id);
@@ -187,19 +178,12 @@ export const ActionNode = memo(function ActionNode({ id, data, selected }: Actio
 
   const isEventAction = !isStopAction && typeof data.event === 'string' && data.event.trim() !== '';
 
-  // A device-specific action (device_id/domain/type, no service) — see
-  // useDeviceAutomation.ts's DeviceAction/actionNodeData.ts's 'deviceAction'
-  // case. Distinguished from a plain service call so the card shows a real
-  // label (the device action's `type`, e.g. "identify") instead of falling
-  // all the way through to the generic "Action" placeholder.
-  const isDeviceActionData =
-    !isStopAction &&
-    typeof data.service !== 'string' &&
-    typeof data.device_id === 'string' &&
-    typeof data.domain === 'string' &&
-    typeof data.type === 'string';
-  const deviceActionType = isDeviceActionData ? (data.type as string) : undefined;
-  const deviceActionDomain = isDeviceActionData ? (data.domain as string) : undefined;
+  // A device-specific action (deviceActionOf): its type labels the card, its
+  // device is named on it (never its id or integration).
+  const deviceAction = isStopAction ? undefined : deviceActionOf(data);
+  const deviceActionType = deviceAction?.type;
+  const deviceActionDomain = deviceAction?.domain;
+  const deviceActionName = resolveDeviceTarget(deviceAction?.deviceId, deviceActionDomain)?.label;
 
   // Parallel branches, Repeat While/Until's body action, and If/Else's two
   // branches are all added to the canvas immediately with a blank
@@ -228,8 +212,7 @@ export const ActionNode = memo(function ActionNode({ id, data, selected }: Actio
       ? (data.repeat as Record<string, unknown>)
       : null;
   const isForEachRepeat = repeatData !== null && repeatData.for_each !== undefined;
-  const isRepeatAction =
-    repeatData !== null && (repeatData.count !== undefined || isForEachRepeat);
+  const isRepeatAction = repeatData !== null && (repeatData.count !== undefined || isForEachRepeat);
   // Single source of truth: config/nodeTypeCatalog.ts's compoundTypes
   // (repeat_while → Repeat, repeat_until → RefreshCcw, repeat_count →
   // RotateCw). RotateCcw is a defensive fallback only, never the catalog.
@@ -254,7 +237,7 @@ export const ActionNode = memo(function ActionNode({ id, data, selected }: Actio
     !isStopAction && data.target ? singleEntityIdFrom(data.target.entity_id) : undefined;
 
   // Get target entity display
-  const targetDisplay = getTargetDisplay(isStopAction, data.target, t);
+  const targetDisplay = getTargetDisplay(isStopAction, data.target, t, entityNames);
 
   // Device-name-plus-plain-language-phrase card resolution: a single target entity resolves to its
   // device/area/home name for the title, with a plain-language action
@@ -264,22 +247,8 @@ export const ActionNode = memo(function ActionNode({ id, data, selected }: Actio
   // targetless services like scripts/scenes) keep the previous, more
   // technical display since there's no single device to name.
   const target = targetEntityId ? resolveEntityTarget(targetEntityId) : null;
-  const friendlyActionName = serviceName
-    ? t(`nodes:serviceActions.${serviceName}`, { defaultValue: prettify(serviceName) })
-    : undefined;
-  // Plain-language phrase for the common on/off case — "Turned on"/"Turned off"
-  // reads naturally after the device-name title above ("Hallway Light" /
-  // "Turned on"), matching TriggerNode.tsx's cardPhrases.turnedOn/turnedOff
-  // for the equivalent trigger card. Any other service keeps the plain
-  // service-action translation (e.g. "Set temperature") since there's no
-  // universal past-tense phrasing for it.
-  const actionPhrase =
-    serviceName === 'turn_on'
-      ? t('nodes:actions.cardPhrases.turnedOn')
-      : serviceName === 'turn_off'
-        ? t('nodes:actions.cardPhrases.turnedOff')
-        : friendlyActionName;
-
+  const friendlyActionName = actionVerb(t, data.service);
+  const thenKind = t('nodes:picker.kinds.then');
   const frameState = {
     nodeId: id,
     selected: selected ?? false,
@@ -299,101 +268,71 @@ export const ActionNode = memo(function ActionNode({ id, data, selected }: Actio
     const kind = opaqueStepKind(data);
     const summary = opaqueStepSummary(data);
     return (
-      <ActionCardFrame
+      <StepFrame
         {...frameState}
-        colors={OPAQUE_COLORS}
+        tone="join"
         icon={Lock}
-        title={data.alias || (kind ? prettify(kind) : t('nodes:actions.opaqueStepTitle'))}
+        iconKey="kept"
+        sentence={data.alias || (kind ? prettify(kind) : t('nodes:actions.opaqueStepTitle'))}
         hasSourceHandle
       >
-        <div className={cn('text-xs', OPAQUE_COLORS.text)}>
-          <div className="font-medium opacity-70">{t('nodes:actions.opaqueStepKept')}</div>
-          {summary && (
-            <TruncatedTooltip content={opaqueStepYaml(data)}>
-              <div className="max-w-[220px] truncate font-mono opacity-75">{summary}</div>
-            </TruncatedTooltip>
-          )}
-        </div>
-      </ActionCardFrame>
+        <div>{t('nodes:actions.opaqueStepKept')}</div>
+        {summary && (
+          <TruncatedTooltip content={opaqueStepYaml(data)}>
+            <div className="max-w-[220px] truncate font-mono">{summary}</div>
+          </TruncatedTooltip>
+        )}
+      </StepFrame>
     );
   }
 
   if (isStopAction) {
     return (
-      <ActionCardFrame
+      <StepFrame
         {...frameState}
-        colors={STOP_COLORS}
+        tone="wait"
         icon={OctagonX}
-        title={data.alias || t('nodes:types.stop')}
+        iconKey="stop"
+        lead={thenKind}
+        sentence={data.alias || t('nodes:cardWords.stop')}
         hasSourceHandle={false}
       >
-        <div className={cn('text-xs', STOP_COLORS.text)}>
-          <div className="font-medium opacity-70">
-            {isStopError ? t('nodes:actions.stopError') : t('nodes:actions.stopExecution')}
-          </div>
-          {stopMessage && (
-            <TruncatedTooltip content={stopMessage}>
-              <div className="truncate opacity-75 italic">{stopMessage}</div>
-            </TruncatedTooltip>
-          )}
-        </div>
-      </ActionCardFrame>
+        <div>{isStopError ? t('nodes:actions.stopError') : t('nodes:actions.stopExecution')}</div>
+        {stopMessage && (
+          <TruncatedTooltip content={stopMessage}>
+            <div className="truncate italic">{stopMessage}</div>
+          </TruncatedTooltip>
+        )}
+      </StepFrame>
     );
   }
 
   if (isRepeatAction) {
     return (
-      <div
-        style={selected ? SELECTED_NODE_STYLE : undefined}
-        className={cn(
-          'relative min-w-[180px] rounded-lg border-2 px-4 py-3',
-          REPEAT_COLORS.border,
-          REPEAT_COLORS.bg,
-          'transition-all duration-200',
-          isActive && NODE_STATE_CLASSES.active,
-          isDisabled && 'border-dashed opacity-50 grayscale',
-          hasErrors && NODE_STATE_CLASSES.error,
-          getTraceStateClass(traceState)
-        )}
+      <StepFrame
+        {...frameState}
+        tone="delay"
+        // 'for_each' has no compoundTypes entry (repeat_while/until/count
+        // only): ListTree is its own icon.
+        icon={isForEachRepeat ? ListTree : RepeatBlockIcon}
+        iconKey={
+          isForEachRepeat
+            ? 'repeat_for_each'
+            : stepIconKey(data._blockKey as string | undefined, 'repeat_count')
+        }
+        lead={thenKind}
+        sentence={
+          data.alias ||
+          phraseAfterName(
+            isForEachRepeat
+              ? t('nodes:actions.repeatForEachLabel')
+              : t('nodes:actions.repeatCountTitle'),
+            i18n.language
+          )
+        }
+        hasSourceHandle
       >
-        <NodeStatusBadge
-          errorMessages={errorMessages}
-          warningMessages={warningMessages}
-          isDisabled={isDisabled}
-        />
-        <Handle
-          type="target"
-          position={Position.Left}
-          className={cn('w-3! h-3!', REPEAT_COLORS.handle)}
-        />
-        <div className="mb-1 flex items-center gap-2">
-          <div className={cn('rounded p-1', REPEAT_COLORS.chip)}>
-            {isForEachRepeat ? (
-              // 'for_each' has no compoundTypes entry (repeat_while/until/count
-              // only) — ListTree is this variant's own dedicated icon.
-              <ListTree className={cn('h-4 w-4', REPEAT_COLORS.text)} />
-            ) : (
-              <RepeatBlockIcon className={cn('h-4 w-4', REPEAT_COLORS.text)} />
-            )}
-          </div>
-          <span className={cn('font-semibold text-sm', REPEAT_COLORS.text)}>
-            {data.alias ||
-              (isForEachRepeat ? t('nodes:actions.repeatForEachLabel') : t('nodes:actions.repeatCountTitle'))}
-          </span>
-          {stepNumber && (
-            <div
-              className={cn(
-                'ml-auto flex h-5 w-5 items-center justify-center rounded-full font-bold text-xs',
-                REPEAT_COLORS.badge
-              )}
-            >
-              {stepNumber}
-            </div>
-          )}
-        </div>
-        {/* Inline count editor directly on the card, matching DelayNode.tsx's
-            inline duration editor — no need to open the property panel just
-            to change how many times a repeat_count block runs. */}
+        {/* The count is edited on the card, as a delay's duration is. */}
         {!isForEachRepeat && repeatCount !== undefined && (
           <div
             className="nodrag flex items-center gap-1.5"
@@ -404,51 +343,107 @@ export const ActionNode = memo(function ActionNode({ id, data, selected }: Actio
             <input
               type="number"
               min={1}
-              value={typeof repeatCount === 'number' || typeof repeatCount === 'string' ? repeatCount : ''}
+              value={
+                typeof repeatCount === 'number' || typeof repeatCount === 'string'
+                  ? repeatCount
+                  : ''
+              }
               onChange={(e) => {
                 const raw = e.target.value;
                 const parsed = Number.parseInt(raw, 10);
                 const nextCount = raw === '' ? 1 : Number.isNaN(parsed) ? 1 : Math.max(1, parsed);
                 updateNodeData(id, { repeat: { ...repeatData, count: nextCount } });
               }}
-              className={cn('h-6 w-14 rounded border bg-background px-1.5 text-xs', REPEAT_COLORS.text)}
+              className="h-6 w-14 rounded border bg-background px-1.5 text-foreground text-xs"
             />
-            <span className={cn('text-xs opacity-70', REPEAT_COLORS.text)}>
-              {t('nodes:actions.repeatCountInlineSuffix')}
-            </span>
+            <span>{t('nodes:actions.repeatCountInlineSuffix')}</span>
           </div>
         )}
         {isForEachRepeat && forEachCount !== undefined && (
-          <div className={cn('text-xs font-medium opacity-70', REPEAT_COLORS.text)}>
-            {t('nodes:actions.repeatForEachItems', { count: forEachCount })}
-          </div>
+          <div>{t('nodes:actions.repeatForEachItems', { count: forEachCount })}</div>
         )}
         {repeatSeqLength > 0 && (
-          <div className={cn('text-xs font-medium opacity-70', REPEAT_COLORS.text)}>
-            {t('nodes:actions.repeatActions', { count: repeatSeqLength })}
-          </div>
+          <div>{t('nodes:actions.repeatActions', { count: repeatSeqLength })}</div>
         )}
-        <Handle
-          type="source"
-          position={Position.Right}
-          className={cn('w-3! h-3!', REPEAT_COLORS.handle)}
-        />
-        <StepStopsHere nodeId={id} />
-      </div>
+      </StepFrame>
     );
   }
 
-  const ActionTargetIcon = getDomainIcon(target?.domain ?? domain ?? deviceActionDomain, Play);
+  const ActionTargetIcon = getDomainIcon(
+    iconKeyFor(target?.deviceClass, target?.domain, domain, deviceActionDomain),
+    Play
+  );
+
+  const { verb, doing } = actionWords(
+    t,
+    i18n.language,
+    isEventAction ? t('nodes:actions.cardPhrases.fireEvent') : friendlyActionName,
+    deviceActionType,
+    serviceName
+  );
+  const unconfiguredText =
+    data._blockKey === 'if_else'
+      ? data._ifElseBranch === 'else'
+        ? t('nodes:actions.clickToConfigureElse')
+        : t('nodes:actions.clickToConfigureThen')
+      : t('nodes:actions.clickToConfigure');
+  // The card's sentence: "Turn on [Hallway light]" when the step names one
+  // entity, else what it does, its entities as a pill below.
+  const titleIsPill = !data.alias && titleIsTarget(data, pillProps.targets);
+  // "Turn on anything in Hallway": a whole area as its target.
+  const wholeArea = useWholeArea(isStopAction ? undefined : data.target);
+  // Its settings ("with [Brightness 40 %]"), for a service call.
+  const values = serviceName ? <ValuePills nodeId={id} data={data} tone="action" /> : null;
+  // What it acts on and how, around its verb: "turn on [Kitchen light] at
+  // [40 %]"; German puts the verb last ("[Küchenlicht] auf [40 %]
+  // einschalten").
+  const act = (what: ReactNode, rest: ReactNode = null) =>
+    aroundVerb(doing, i18n.language, what, rest);
+  // Its target by name, when the card can't edit it (a device or area with
+  // it, a template, a service HA doesn't describe).
+  const namedTarget =
+    pillProps.targets || !targetDisplay ? null : (
+      <NamedTarget name={target?.label} display={targetDisplay} entityId={targetEntityId} />
+    );
+  const sentence = isActionUnconfigured ? (
+    unconfiguredText
+  ) : data.alias ? (
+    data.alias
+  ) : titleIsPill && target ? (
+    act(<CardTitle {...pillProps} tone="action" title={target.label} />, values)
+  ) : wholeArea ? (
+    act(t('nodes:cardWords.everythingIn', { name: wholeArea.place }), values)
+  ) : pillProps.targets ? (
+    act(<CardTargetLine {...pillProps} tone="action" inline />, values)
+  ) : isEventAction ? (
+    act(<span className="font-semibold text-action">{data.event}</span>)
+  ) : namedTarget ? (
+    act(namedTarget, values)
+  ) : (
+    <>
+      {doing}
+      {values}
+    </>
+  );
 
   return (
-    <div
-      // Single click only selects (React Flow's own click handling already
-      // toggles `selected`, which drives the selection outline below) —
-      // double click opens the miller. Same fix as ConditionNode.tsx's
-      // identical onClick → onDoubleClick change; see that file's comment.
-      // stopPropagation is required so this doesn't ALSO trigger xyflow's
-      // canvas-level onNodeDoubleClick (which toggles the right-side
-      // properties panel) — see ConditionNode.tsx's matching comment.
+    <StepFrame
+      {...frameState}
+      tone="action"
+      icon={data._blockKey === 'parallel' ? ParallelBlockIcon : ActionTargetIcon}
+      iconKey={
+        data._blockKey === 'parallel'
+          ? 'parallel'
+          : stepIconKey(target?.deviceClass, target?.domain, domain, deviceActionDomain, 'action')
+      }
+      lead={thenKind}
+      place={wholeArea?.place ?? target?.area}
+      sentence={sentence}
+      hasSourceHandle
+      isUnconfigured={isActionUnconfigured}
+      className={opensActionMiller ? 'cursor-pointer' : undefined}
+      // Single click only selects; a double click opens the picker (stopped
+      // so xyflow's own double click, the properties panel, doesn't fire).
       onDoubleClick={
         opensActionMiller
           ? (event) => {
@@ -457,117 +452,20 @@ export const ActionNode = memo(function ActionNode({ id, data, selected }: Actio
             }
           : undefined
       }
-      // See node-colors.ts's SELECTED_NODE_STYLE doc comment.
-      style={selected ? SELECTED_NODE_STYLE : undefined}
-      className={cn(
-        'relative min-w-[180px] rounded-lg border-2 px-4 py-3',
-        ACTION_COLORS.border,
-        ACTION_COLORS.bg,
-        'transition-all duration-200',
-        isActive && NODE_STATE_CLASSES.active,
-        isDisabled && 'border-dashed opacity-50 grayscale',
-        hasErrors && NODE_STATE_CLASSES.error,
-        opensActionMiller && 'cursor-pointer',
-        isActionUnconfigured && !isDisabled && 'border-dashed',
-        getTraceStateClass(traceState)
-      )}
     >
-      {roleLabel && <BlockRoleBadge label={roleLabel} />}
-      <NodeStatusBadge
-        errorMessages={errorMessages}
-        warningMessages={warningMessages}
-        isDisabled={isDisabled}
-      />
-      <Handle
-        type="target"
-        position={Position.Left}
-        className={cn('w-3! h-3!', ACTION_COLORS.handle)}
-      />
-
-      <div className="mb-1 flex items-center gap-2">
-        <div className={cn('rounded p-1', ACTION_COLORS.chip)}>
-          {data._blockKey === 'parallel' ? (
-            <ParallelBlockIcon className={cn('h-4 w-4', ACTION_COLORS.text)} />
-          ) : (
-            <ActionTargetIcon className={cn('h-4 w-4', ACTION_COLORS.text)} />
-          )}
+      {!isActionUnconfigured && data.alias && verb && (
+        <div>
+          {verb}
+          {values}
         </div>
-        <span className={cn('font-semibold text-sm', ACTION_COLORS.text)}>
-          {data.alias ||
-            target?.label ||
-            (isEventAction ? data.event : serviceName) ||
-            (deviceActionType ? prettify(deviceActionType) : undefined) ||
-            (isActionUnconfigured
-              ? data._blockKey === 'if_else'
-                ? data._ifElseBranch === 'else'
-                  ? t('nodes:actions.clickToConfigureElse')
-                  : t('nodes:actions.clickToConfigureThen')
-                : t('nodes:actions.clickToConfigure')
-              : undefined) ||
-            t('nodes:types.action')}
-        </span>
-        {stepNumber && (
-          <div
-            className={cn(
-              'ml-auto flex h-5 w-5 items-center justify-center rounded-full font-bold text-xs',
-              ACTION_COLORS.badge
-            )}
-          >
-            {stepNumber}
-          </div>
-        )}
-      </div>
-
-      <div className={cn('space-y-0.5 text-xs', ACTION_COLORS.text)}>
-        {isActionUnconfigured ? null : isEventAction ? (
-          <div className="font-medium">
-            <span className="opacity-60">{t('nodes:actions.fireEvent')}</span>
-          </div>
-        ) : targetEntityId ? (
-          <TruncatedTooltip content={actionPhrase}>
-            <button
-              type="button"
-              className="nodrag truncate text-left font-medium hover:underline"
-              onClick={(e) => {
-                e.stopPropagation();
-                openMoreInfo(targetEntityId);
-              }}
-            >
-              {actionPhrase}
-            </button>
-          </TruncatedTooltip>
-        ) : isDeviceActionData ? (
-          <div className="font-medium">
-            <span className="opacity-60">
-              {deviceActionDomain}
-              {'.'}
-            </span>
-            {deviceActionType}
-          </div>
-        ) : (
-          <>
-            <div className="font-medium">
-              <span className="opacity-60">
-                {domain}
-                {'.'}
-              </span>
-              {serviceName}
-            </div>
-            {targetDisplay && (
-              <TruncatedTooltip content={targetDisplay}>
-                <div className="truncate opacity-75">{targetDisplay}</div>
-              </TruncatedTooltip>
-            )}
-          </>
-        )}
-      </div>
-
-      <Handle
-        type="source"
-        position={Position.Right}
-        className={cn('w-3! h-3!', ACTION_COLORS.handle)}
-      />
-      <StepStopsHere nodeId={id} />
-    </div>
+      )}
+      {!isActionUnconfigured && !titleIsPill && (
+        <>
+          {deviceActionName && <div className="truncate">{deviceActionName}</div>}
+          {data.alias && namedTarget}
+          {data.alias && <CardTargetLine {...pillProps} tone="action" />}
+        </>
+      )}
+    </StepFrame>
   );
 });

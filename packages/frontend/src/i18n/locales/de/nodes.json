@@ -3,40 +3,71 @@
     "trigger": "Auslöser",
     "condition": "Bedingung",
     "action": "Aktion",
-    "stop": "Stopp",
     "delay": "Verzögerung",
     "wait": "Warten auf",
-    "set_variables": "Variablen setzen",
     "node": "Knoten",
-    "choose": "Fallunterscheidung",
-    "if_else": "Wenn / Sonst",
-    "repeat_while": "Wiederholen solange",
-    "repeat_until": "Wiederholen bis",
-    "repeat_count": "N× Wiederholen",
-    "parallel": "Parallel",
     "start": "Start",
-    "join": "Alle",
+    "join": "Zusammenführen",
     "sequence_start": "Sequenz-Start",
     "sequence_end": "Sequenz-Ende"
   },
-  "compoundBlocks": {
-    "sectionLabel": "Ablauf-Steuerung",
-    "groups": {
-      "branching": "Verzweigungen",
-      "loops": "Schleifen",
-      "parallel": "Nebenläufig",
-      "grouping": "Gruppierung"
+  "blocks": {
+    "if_else": {
+      "label": "Wenn-dann",
+      "description": "Etwas nur unter bestimmten Bedingungen tun."
     },
-    "choose": "Fallunterscheidung",
-    "if_else": "Wenn / Sonst",
-    "repeat_while": "Wiederholen solange",
-    "repeat_until": "Wiederholen bis",
-    "repeat_count": "N× Wiederholen",
-    "parallel": "Parallel",
-    "sequence": "Sequenz"
+    "choose": {
+      "label": "Auswählen",
+      "description": "Wählt aus, was aufgrund von Bedingungen zu tun ist (ähnlich wie Wenn-dann, aber leistungsfähiger)."
+    },
+    "repeat_count": {
+      "label": "Wiederholen",
+      "description": "Wiederholt einen Ablauf von Aktionen eine bestimmte Anzahl von Malen."
+    },
+    "repeat_while": {
+      "label": "Wiederholen, solange",
+      "description": "Wiederholt einen Ablauf von Aktionen, solange eine Bedingung erfüllt ist. Die Bedingung wird vor jedem Durchgang überprüft."
+    },
+    "repeat_until": {
+      "label": "Wiederholen, bis",
+      "description": "Wiederholt einen Ablauf von Aktionen, bis eine Bedingung erfüllt ist. Die Bedingung wird nach jedem Durchgang überprüft."
+    },
+    "repeat_for_each": {
+      "label": "Wiederholen für jedes",
+      "description": "Wiederholt einen Ablauf für jedes Element einer Liste."
+    },
+    "parallel": {
+      "label": "Parallel ausführen",
+      "description": "Führt Aktionen parallel aus."
+    },
+    "wait_for": {
+      "label": "Warten auf…",
+      "description": "Pausiert die Automatisierung — bis ein Auslöser auslöst, ein Template wahr wird oder eine feste Zeit vergangen ist."
+    },
+    "stop": {
+      "label": "Stoppen",
+      "description": "Stoppt den Ablauf von Aktionen."
+    },
+    "set_variables": {
+      "label": "Variablen definieren",
+      "description": "Definiert Variablen, die später im Ablauf verwendet werden."
+    },
+    "test_condition": {
+      "label": "Bedingung",
+      "description": "Prüft eine Bedingung (und stoppt den Ablauf, wenn die Bedingung nicht erfüllt ist)."
+    },
+    "fire_event": {
+      "label": "Manuelles Ereignis auslösen",
+      "description": "Löst ein Ereignis manuell aus (Ereignisse sind ein in Home Assistant verwendeter Baustein)."
+    },
+    "sequence": {
+      "label": "Nacheinander ausführen",
+      "description": "Führt eine Gruppe von Aktionen nacheinander aus."
+    }
   },
   "sequenceFields": {
     "startPill": "START",
+    "framePill": "NAME",
     "endPill": "ENDE"
   },
   "quickAdd": {
@@ -55,6 +86,12 @@
     "comingSoon": "Demnächst verfügbar"
   },
   "panel": {
+    "sections": {
+      "targets": "Worauf es wirkt",
+      "settings": "Einstellungen",
+      "name": "Name",
+      "advanced": "Erweitert"
+    },
     "selectNode": "Wählen Sie einen Knoten, um seine Eigenschaften zu bearbeiten",
     "properties": "Eigenschaften",
     "nodeId": "Knoten-ID: {{id}}",
@@ -194,12 +231,6 @@
       "searchTypePlaceholder": "Auslösertypen suchen…",
       "noResults": "Keine Ergebnisse gefunden.",
       "unassigned": "Nicht zugewiesen",
-      "unassignedOptions": {
-        "entities": "Entitäten",
-        "helpers": "Helfer",
-        "devices": "Geräte",
-        "services": "Dienste"
-      },
       "selectTarget": "Ziel auswählen",
       "selectType": "Wählen Sie oben einen Typ, um dessen Auslöser zu sehen",
       "loadingTriggers": "Auslöser werden geladen…",
@@ -213,20 +244,7 @@
         "integrations": "Integrationen"
       },
       "when": {
-        "title": "Wenn…",
-        "searchPlaceholder": "Suchen…",
-        "zonesRootLabel": "Zuhause",
-        "labelsRootLabel": "Labels",
-        "platformsRootLabel": "Plattform-Auslöser",
-        "noAreas": "Keine Bereiche gefunden",
-        "sections": {
-          "zones": "Zuhause",
-          "devices": "Geräte",
-          "other": "Sonstige",
-          "deviceTypes": "Gerätetypen",
-          "platformTriggers": "Plattform-Auslöser",
-          "labels": "Labels"
-        },
+        "title": "Auslöser hinzufügen",
         "addAllTargets": "Alle hinzufügen",
         "clearAllTargets": "Alle entfernen",
         "selectTargetsPrompt": "Ziele auswählen, um fortzufahren",
@@ -235,23 +253,23 @@
       }
     },
     "platforms": {
-      "state": "Zustandsänderung",
-      "numeric_state": "Numerischer Zustand",
-      "time": "Zeit",
-      "time_pattern": "Zeitmuster",
+      "state": "Zustand geändert",
+      "numeric_state": "Numerischer Zustandsschwellenwert überschritten",
+      "time": "Zeitpunkt",
+      "time_pattern": "Zeitschema",
       "sun": "Sonne",
-      "event": "Ereignis",
+      "event": "Manuelles Ereignis empfangen",
       "mqtt": "MQTT",
       "webhook": "Webhook",
       "zone": "Zone",
-      "template": "Vorlage",
+      "template": "Template",
       "homeassistant": "Home Assistant",
       "device": "Gerät",
       "calendar": "Kalender",
-      "geo_location": "Geo-Standort",
+      "geo_location": "Geolokalisierung",
       "tag": "Tag",
-      "conversation": "Konversation",
-      "persistent_notification": "Dauerhafte Benachrichtigung"
+      "conversation": "Satz",
+      "persistent_notification": "Anhaltende Benachrichtigung"
     },
     "platformDescriptions": {
       "state": "Löst aus, wenn sich der Zustand einer Entität ändert.",
@@ -309,7 +327,7 @@
       "zone": "Zone",
       "template": "Vorlage",
       "device": "Gerät",
-      "trigger": "Auslöser",
+      "trigger": "Ausgelöst durch",
       "and": "UND (Alle)",
       "or": "ODER (Beliebige)",
       "not": "NICHT"
@@ -364,39 +382,20 @@
     "elseBranch": "Sonst",
     "cardPhrases": {
       "isOn": "An",
-      "isOff": "Aus"
+      "isOff": "Aus",
+      "isState": "ist {{state}}",
+      "areState": "sind {{state}}",
+      "anyOf": "eines von"
     },
     "entitiesSelected": "{{count}} Entitäten",
     "picker": {
       "noResults": "Keine Ergebnisse gefunden.",
-      "unassigned": "Nicht zugewiesen",
-      "unassignedOptions": {
-        "entities": "Entitäten",
-        "helpers": "Helfer",
-        "devices": "Geräte",
-        "services": "Dienste"
-      },
       "selectTarget": "Ziel auswählen",
       "groups": {
         "entity": "Entität"
       },
       "and": {
-        "title": "Und…",
-        "searchPlaceholder": "Suchen…",
-        "blocksRootLabel": "Bausteine",
-        "zonesRootLabel": "Zuhause",
-        "labelsRootLabel": "Labels",
-        "genericRootLabel": "Allgemein",
-        "genericDeviceLabel": "Gerät",
-        "genericEntityLabel": "Entität",
-        "sections": {
-          "blocks": "Bausteine",
-          "zones": "Zuhause",
-          "devices": "Geräte",
-          "deviceTypes": "Gerätetypen",
-          "labels": "Labels",
-          "timeAndSun": "Zeit & Sonne"
-        },
+        "title": "Bedingung hinzufügen",
         "addAllTargets": "Alle hinzufügen",
         "clearAllTargets": "Alle entfernen",
         "selectTargetsPrompt": "Ziele zum Fortfahren auswählen",
@@ -408,11 +407,11 @@
   "actions": {
     "waitFor": {
       "trigger": "Auf einen Auslöser warten",
-      "triggerDescription": "Wartet, bis einer von mehreren Auslösern ausgelöst wird — öffnet den When-Auswähler dafür.",
-      "template": "Auf eine Vorlage warten",
-      "templateDescription": "Wartet, bis eine Jinja2-Vorlage zu wahr ausgewertet wird.",
-      "delay": "Auf Zeitablauf warten",
-      "delayDescription": "Pausiert für eine feste Zeitdauer.",
+      "triggerDescription": "Wartet auf einen Auslöser, um einen Ablauf von Aktionen auszuführen.",
+      "template": "Auf ein Template warten",
+      "templateDescription": "Wartet darauf, dass ein Template als „wahr“ ausgewertet wird, um einen Ablauf von Aktionen auszuführen.",
+      "delay": "Eine Zeit warten (Verzögerung)",
+      "delayDescription": "Wartet einige Zeit, bevor der Ablauf der Aktionen fortgesetzt wird.",
       "automationOn": "Warten, bis eine Automatisierung aktiviert wird",
       "automationOnDescription": "Wartet, bis eine ausgewählte Automatisierung aktiviert (eingeschaltet) wird.",
       "automationOff": "Warten, bis eine Automatisierung deaktiviert wird",
@@ -424,29 +423,8 @@
     },
     "picker": {
       "noResults": "Keine Ergebnisse gefunden.",
-      "unassigned": "Nicht zugewiesen",
-      "unassignedOptions": {
-        "entities": "Entitäten",
-        "helpers": "Helfer",
-        "devices": "Geräte",
-        "services": "Dienste"
-      },
       "then": {
-        "title": "Dann…",
-        "searchPlaceholder": "Suchen…",
-        "blocksRootLabel": "Bausteine",
-        "zonesRootLabel": "Zuhause",
-        "labelsRootLabel": "Labels",
-        "genericRootLabel": "Allgemein",
-        "genericDeviceLabel": "Gerät",
-        "integrationRootLabel": "Integration",
-        "sections": {
-          "blocks": "Bausteine",
-          "zones": "Zuhause",
-          "devices": "Geräte",
-          "deviceTypes": "Gerätetypen",
-          "labels": "Labels"
-        },
+        "title": "Aktion hinzufügen",
         "addAllTargets": "Alle hinzufügen",
         "clearAllTargets": "Alle entfernen",
         "selectTargetsPrompt": "Ziele zum Fortfahren auswählen",
@@ -456,11 +434,6 @@
     },
     "serviceLabel": "Dienst",
     "actionTypeLabel": "Aktionstyp",
-    "actionTypes": {
-      "service": "Dienst aufrufen",
-      "event": "Ereignis auslösen",
-      "stop": "Ausführung stoppen"
-    },
     "actionLabel": "Aktion",
     "eventNameLabel": "Ereignisname",
     "eventNamePlaceholder": "z.B. pico_subscription",
@@ -490,8 +463,7 @@
     "branchRoleLabel": "Zweig {{index}}",
     "entitiesSelected": "{{count}} Entitäten",
     "cardPhrases": {
-      "turnedOn": "Eingeschaltet",
-      "turnedOff": "Ausgeschaltet"
+      "fireEvent": "Ereignis auslösen"
     },
     "stopExecution": "Ausführung anhalten",
     "stopError": "Als Fehler markieren",
@@ -637,7 +609,7 @@
     "manualDescription": "Aktivieren, um die Antwortdaten dieses Schritts in einer Variablen zu speichern — bei einem Diensteaufruf den Namen einer Variablen eingeben, in der die Antwort gespeichert wird; bei Stopp den Namen einer bereits vorhandenen Variablen eingeben, deren Daten zurückgegeben werden sollen.",
     "useResponseVariable": "Antwortvariable verwenden",
     "placeholder": "z.B. meine_antwort",
-    "currentNodeWarning": "'current_node' ist für die Zustandsautomaten-Strategie reserviert. Die Verwendung dieses Namens kann unerwartetes Verhalten verursachen."
+    "currentNodeWarning": "'{{name}}' ist für die Zustandsautomaten-Strategie reserviert. Die Verwendung dieses Namens kann unerwartetes Verhalten verursachen."
   },
   "serviceDataFields": {
     "heading": "Dienstdaten"
@@ -679,13 +651,25 @@
     "addField": "Feld hinzufügen"
   },
   "joinFields": {
-    "mode": "Verknüpfungsmodus",
-    "modeDescription": "Wartet, bis jeder eingehende Zweig abgeschlossen ist, bevor es weitergeht.",
-    "modeAllLabel": "Alle — auf jeden Zweig warten",
-    "modeAnyLabel": "Beliebig — demnächst verfügbar",
-    "modeAll": "ALLE",
-    "modeAny": "BELIEBIG",
-    "note": "Die Automatisierungs-Engine von Home Assistant kann laufende Zweige nicht abbrechen, daher werden immer alle Zweige vollständig ausgeführt; „Alle“ wartet einfach auf jeden davon — das entspricht direkt der nativen parallel:-Aktion von HA."
+    "mode": "Worauf gewartet wird",
+    "waitFor": "Warten auf",
+    "editMode": "Ändern, worauf gewartet wird",
+    "pathsAll": {
+      "unconnected": "alle Pfade",
+      "two": "beide Pfade",
+      "many": "alle {{count}} Pfade"
+    },
+    "pathsAny": "einen Pfad",
+    "optionAll": "Alle Pfade",
+    "optionAllDescription": {
+      "unconnected": "Weiter, sobald jeder eingehende Pfad fertig ist.",
+      "two": "Weiter, sobald beide eingehenden Pfade fertig sind.",
+      "many": "Weiter, sobald alle {{count}} eingehenden Pfade fertig sind."
+    },
+    "optionAny": "Ein Pfad",
+    "optionAnyDescription": "Weiter, sobald der erste fertig ist.",
+    "soon": "Demnächst",
+    "runsToEnd": "Jeder Pfad läuft immer bis zum Ende. Home Assistant kann keinen mittendrin stoppen."
   },
   "triggerFields": {
     "sun": {
@@ -722,6 +706,7 @@
     }
   },
   "wait": {
+    "changeTrigger": "Diesen Auslöser ändern",
     "nMoreTriggers_one": "+{{count}} weiterer Auslöser",
     "nMoreTriggers_other": "+{{count}} weitere Auslöser",
     "timeoutLabel": "Zeitüberschreitung",
@@ -1018,5 +1003,648 @@
     "andHint": "Mit der Bedingung davor verkettet: Schlägt diese fehl, läuft deren Sonst-Zweig.",
     "stopsHere": "Endet hier",
     "stopsHereHint": "Hier ist nichts verbunden, daher endet die Automation an dieser Stelle."
+  },
+  "pickerConfig": {
+    "addTrigger": "Auslöser hinzufügen",
+    "addAction": "Aktion hinzufügen",
+    "addCondition": "Bedingung hinzufügen",
+    "stillNeeded": "Noch erforderlich",
+    "gaps": {
+      "target": "Wählen Sie aus, worauf es wirkt",
+      "forEach": "Elemente für die Wiederholung hinzufügen"
+    },
+    "fillIn": "Ausfüllen",
+    "level": "Wert",
+    "forAtLeast": "Mindestens (optional)",
+    "moreOptions": "Weitere Optionen",
+    "back": "Zurück",
+    "nextSettings": "Weiter: Einstellungen",
+    "goes": "Schwellenart",
+    "is": "Schwellenart"
+  },
+  "picker": {
+    "sections": {
+      "blocks": "Bausteine",
+      "home": "Zuhause",
+      "homeAssistant": "Home Assistant"
+    },
+    "rows": {
+      "devices": "Geräte",
+      "deviceTypes": "Gerätetypen",
+      "nonDeviceTypes": "Andere Typen",
+      "blocks": "Bausteine",
+      "unassigned": "Nicht zugeordnet",
+      "showMore_one": "{{count}} weiteren anzeigen",
+      "showMore_other": "{{count}} weitere anzeigen",
+      "performAction": "Aktion ausführen",
+      "anythingIn": "Irgendetwas in {{name}}"
+    },
+    "groups": {
+      "labels": "Labels",
+      "generic": "Generisch",
+      "integrations": "Integrationen",
+      "timeAndSun": "Zeit und Sonne",
+      "eventsAndTemplates": "Ereignisse und Templates",
+      "otherAreas": "Andere Bereiche",
+      "noArea": "Kein Bereich",
+      "time": "Zeit",
+      "sun": "Sonne",
+      "device": "Gerät",
+      "moon": "Mond"
+    },
+    "search": {
+      "placeholder": "Typen, Bereiche und Geräte suchen…",
+      "types": "Typen",
+      "areas": "Bereiche",
+      "devices": "Geräte",
+      "entities": "Entitäten"
+    },
+    "kinds": {
+      "when": "Wenn",
+      "and": "Und",
+      "then": "Dann"
+    },
+    "sectionNames": {
+      "when": "Wenn",
+      "and": "Und wenn",
+      "then": "Dann"
+    },
+    "unassignedOptions": {
+      "entities": "Entitäten",
+      "helpers": "Helfer",
+      "devices": "Geräte",
+      "services": "Dienste"
+    },
+    "current": "Aktuell",
+    "loadingDevices": "Geräte werden gesucht…"
+  },
+  "pill": {
+    "upTo": "höchstens",
+    "more": "+ mehr",
+    "moreSettings": "Weitere Einstellungen",
+    "chooseState": "Zustand wählen",
+    "editConditionState": "Ändern, in welchem Zustand es sein muss",
+    "editTargets": "Ändern, worauf es wirkt",
+    "chooseTargets": "Entitäten wählen",
+    "searchEntities": "Entitäten suchen…",
+    "noEntities": "Keine Entitäten",
+    "notActedOn": "Home Assistant ignoriert diese Entität hier",
+    "moreInfo": "Weitere Infos",
+    "entities_one": "{{count}} Entität",
+    "entities_other": "{{count}} Entitäten",
+    "with": "mit",
+    "editValue": "{{field}} ändern",
+    "on": "an",
+    "off": "aus",
+    "moreValues": "+{{count}} weitere",
+    "for": "für",
+    "editFor": "Dauer ändern",
+    "editThreshold": "Schwelle ändern",
+    "editState": "Ändern, worauf es wartet",
+    "changed": "geändert",
+    "at": "auf"
+  },
+  "templateLine": "Die Vorlage ist wahr",
+  "cardWords": {
+    "delay": "warten",
+    "everythingIn": "alles in {{name}}",
+    "stop": "stoppen",
+    "setVariables": "Variablen setzen"
+  },
+  "cardVerbs": {
+    "orWord": "oder",
+    "turnsOn": "eingeschaltet wird",
+    "turnsOff": "ausgeschaltet wird",
+    "isOn": "an",
+    "isOff": "aus",
+    "changesOf": "{{what}} ändert",
+    "changes": "sich ändert",
+    "goesOf": "{{what}} geht",
+    "goes": "geht",
+    "stays": "{{state}} bleibt",
+    "waitUntil": "warten, bis",
+    "waitFor": "warten auf",
+    "binary": {
+      "battery": {
+        "on": "schwach wird",
+        "off": "nicht mehr schwach ist",
+        "isOn": "schwach",
+        "isOff": "normal"
+      },
+      "battery_charging": {
+        "on": "zu laden beginnt",
+        "off": "aufhört zu laden",
+        "isOn": "am Laden",
+        "isOff": "nicht am Laden"
+      },
+      "carbon_monoxide": {
+        "on": "Kohlenmonoxid erkennt",
+        "off": "kein Kohlenmonoxid mehr erkennt",
+        "isOn": "Kohlenmonoxid erkennend",
+        "isOff": "frei"
+      },
+      "cold": {
+        "on": "kalt wird",
+        "off": "nicht mehr kalt ist",
+        "isOn": "kalt",
+        "isOff": "nicht kalt"
+      },
+      "connectivity": {
+        "on": "sich verbindet",
+        "off": "die Verbindung verliert",
+        "isOn": "verbunden",
+        "isOff": "getrennt"
+      },
+      "door": {
+        "on": "sich öffnet",
+        "off": "sich schließt",
+        "isOn": "offen",
+        "isOff": "geschlossen"
+      },
+      "garage_door": {
+        "on": "sich öffnet",
+        "off": "sich schließt",
+        "isOn": "offen",
+        "isOff": "geschlossen"
+      },
+      "gas": {
+        "on": "Gas erkennt",
+        "off": "kein Gas mehr erkennt",
+        "isOn": "Gas erkennend",
+        "isOff": "frei"
+      },
+      "heat": {
+        "on": "heiß wird",
+        "off": "nicht mehr heiß ist",
+        "isOn": "heiß",
+        "isOff": "nicht heiß"
+      },
+      "light": {
+        "on": "Licht erkennt",
+        "off": "kein Licht mehr erkennt",
+        "isOn": "hell",
+        "isOff": "dunkel"
+      },
+      "lock": {
+        "on": "sich entriegelt",
+        "off": "sich verriegelt",
+        "isOn": "entriegelt",
+        "isOff": "verriegelt"
+      },
+      "moisture": {
+        "on": "Feuchtigkeit erkennt",
+        "off": "trocknet",
+        "isOn": "nass",
+        "isOff": "trocken"
+      },
+      "motion": {
+        "on": "Bewegung erkennt",
+        "off": "keine Bewegung mehr erkennt",
+        "isOn": "Bewegung erkennend",
+        "isOff": "frei"
+      },
+      "moving": {
+        "on": "sich zu bewegen beginnt",
+        "off": "stillsteht",
+        "isOn": "in Bewegung",
+        "isOff": "still"
+      },
+      "occupancy": {
+        "on": "jemanden erkennt",
+        "off": "frei ist",
+        "isOn": "belegt",
+        "isOff": "frei"
+      },
+      "opening": {
+        "on": "sich öffnet",
+        "off": "sich schließt",
+        "isOn": "offen",
+        "isOff": "geschlossen"
+      },
+      "plug": {
+        "on": "eingesteckt wird",
+        "off": "ausgesteckt wird",
+        "isOn": "eingesteckt",
+        "isOff": "ausgesteckt"
+      },
+      "power": {
+        "on": "Strom bekommt",
+        "off": "Strom verliert",
+        "isOn": "mit Strom",
+        "isOff": "ohne Strom"
+      },
+      "presence": {
+        "on": "jemanden erkennt",
+        "off": "frei ist",
+        "isOn": "anwesend",
+        "isOff": "frei"
+      },
+      "problem": {
+        "on": "ein Problem erkennt",
+        "off": "kein Problem mehr erkennt",
+        "isOn": "mit Problem",
+        "isOff": "OK"
+      },
+      "running": {
+        "on": "zu laufen beginnt",
+        "off": "aufhört zu laufen",
+        "isOn": "in Betrieb",
+        "isOff": "nicht in Betrieb"
+      },
+      "safety": {
+        "on": "unsicher wird",
+        "off": "sicher wird",
+        "isOn": "unsicher",
+        "isOff": "sicher"
+      },
+      "smoke": {
+        "on": "Rauch erkennt",
+        "off": "keinen Rauch mehr erkennt",
+        "isOn": "Rauch erkennend",
+        "isOff": "frei"
+      },
+      "sound": {
+        "on": "Geräusche erkennt",
+        "off": "keine Geräusche mehr erkennt",
+        "isOn": "Geräusche erkennend",
+        "isOff": "still"
+      },
+      "tamper": {
+        "on": "Manipulation erkennt",
+        "off": "keine Manipulation mehr erkennt",
+        "isOn": "manipuliert",
+        "isOff": "OK"
+      },
+      "update": {
+        "on": "ein Update hat",
+        "off": "aktuell ist",
+        "isOn": "Update verfügbar",
+        "isOff": "aktuell"
+      },
+      "vibration": {
+        "on": "Vibration erkennt",
+        "off": "keine Vibration mehr erkennt",
+        "isOn": "vibrierend",
+        "isOff": "still"
+      },
+      "window": {
+        "on": "sich öffnet",
+        "off": "sich schließt",
+        "isOn": "offen",
+        "isOff": "geschlossen"
+      }
+    },
+    "events": {
+      "activated": "aktiviert wird",
+      "armed": "scharfgeschaltet wird",
+      "armed_away": "abwesend scharfgeschaltet wird",
+      "armed_home": "zu Hause scharfgeschaltet wird",
+      "armed_night": "für die Nacht scharfgeschaltet wird",
+      "armed_vacation": "für den Urlaub scharfgeschaltet wird",
+      "awning_closed": "sich schließt",
+      "awning_opened": "sich öffnet",
+      "became_available": "ein Update hat",
+      "became_low": "schwach wird",
+      "blind_closed": "sich schließt",
+      "blind_opened": "sich öffnet",
+      "block_ended": "einen Block beendet",
+      "block_started": "einen Block beginnt",
+      "blue_hour_ended": "die blaue Stunde beendet",
+      "blue_hour_started": "die blaue Stunde beginnt",
+      "cancelled": "abgebrochen wird",
+      "cleared": "frei ist",
+      "closed": "sich schließt",
+      "co_cleared": "kein Kohlenmonoxid mehr erkennt",
+      "co_detected": "Kohlenmonoxid erkennt",
+      "curtain_closed": "sich schließt",
+      "curtain_opened": "sich öffnet",
+      "dawn": "die Morgendämmerung erreicht",
+      "decremented": "sinkt",
+      "detected": "etwas erkennt",
+      "disarmed": "unscharf geschaltet wird",
+      "dusk": "die Abenddämmerung erreicht",
+      "entered": "betreten wird",
+      "errored": "einen Fehler hat",
+      "event_ended": "einen Termin beendet",
+      "event_started": "einen Termin beginnt",
+      "finished": "abläuft",
+      "gas_cleared": "kein Gas mehr erkennt",
+      "gas_detected": "Gas erkennt",
+      "golden_hour_ended": "die goldene Stunde beendet",
+      "golden_hour_started": "die goldene Stunde beginnt",
+      "idle": "untätig wird",
+      "illuminance__cleared": "dunkel wird",
+      "illuminance__detected": "Licht erkennt",
+      "incremented": "steigt",
+      "item_added": "einen Eintrag hinzugefügt bekommt",
+      "item_completed": "einen Eintrag erledigt bekommt",
+      "item_removed": "einen Eintrag entfernt bekommt",
+      "jammed": "blockiert",
+      "left": "verlassen wird",
+      "listening": "zuzuhören beginnt",
+      "lock__opened": "sich öffnet",
+      "locked": "sich verriegelt",
+      "maximum_reached": "sein Maximum erreicht",
+      "midnight_sun_ended": "die Mitternachtssonne beendet",
+      "midnight_sun_started": "die Mitternachtssonne beginnt",
+      "minimum_reached": "sein Minimum erreicht",
+      "moisture__cleared": "trocknet",
+      "moisture__detected": "Feuchtigkeit erkennt",
+      "motion__cleared": "keine Bewegung mehr erkennt",
+      "motion__detected": "Bewegung erkennt",
+      "muted": "stummgeschaltet wird",
+      "no_longer_low": "nicht mehr schwach ist",
+      "occupancy__cleared": "frei ist",
+      "occupancy__detected": "jemanden erkennt",
+      "occupancy_cleared": "leer wird",
+      "occupancy_detected": "belegt wird",
+      "opened": "sich öffnet",
+      "paused": "pausiert",
+      "paused_cleaning": "die Reinigung pausiert",
+      "paused_mowing": "das Mähen pausiert",
+      "paused_playing": "pausiert",
+      "polar_night_ended": "die Polarnacht beendet",
+      "polar_night_started": "die Polarnacht beginnt",
+      "pressed": "gedrückt wird",
+      "processing": "zu verarbeiten beginnt",
+      "rang": "klingelt",
+      "received": "ein Ereignis empfängt",
+      "remaining_time_reached": "die Restzeit erreicht",
+      "reset": "zurückgesetzt wird",
+      "responding": "zu antworten beginnt",
+      "restarted": "neu startet",
+      "returned_to_dock": "zur Station zurückkehrt",
+      "shade_closed": "sich schließt",
+      "shade_opened": "sich öffnet",
+      "shutter_closed": "sich schließt",
+      "shutter_opened": "sich öffnet",
+      "smoke_cleared": "keinen Rauch mehr erkennt",
+      "smoke_detected": "Rauch erkennt",
+      "solar_midnight": "die Sonnenmitternacht erreicht",
+      "solar_noon": "den Sonnenhöchststand erreicht",
+      "started": "startet",
+      "started_charging": "zu laden beginnt",
+      "started_cleaning": "zu reinigen beginnt",
+      "started_cooling": "zu kühlen beginnt",
+      "started_drying": "zu entfeuchten beginnt",
+      "started_heating": "zu heizen beginnt",
+      "started_humidifying": "zu befeuchten beginnt",
+      "started_mowing": "zu mähen beginnt",
+      "started_playing": "abzuspielen beginnt",
+      "started_returning": "zur Station zurückzukehren beginnt",
+      "stopped_charging": "aufhört zu laden",
+      "stopped_playing": "aufhört abzuspielen",
+      "sunrise": "aufgeht",
+      "sunset": "untergeht",
+      "triggered": "ausgelöst wird",
+      "turned_off": "ausgeschaltet wird",
+      "turned_on": "eingeschaltet wird",
+      "unlocked": "sich entriegelt",
+      "unmuted": "die Stummschaltung aufhebt",
+      "vibration__cleared": "keine Vibration mehr erkennt",
+      "vibration__detected": "Vibration erkennt",
+      "zone__entered": "betreten wird",
+      "zone__left": "verlassen wird"
+    },
+    "changesTo": "zu {{state}} wechselt",
+    "countOf": "{{noun}} · {{count}}",
+    "devices_one": "{{count}} Gerät",
+    "devices_other": "{{count}} Geräte",
+    "nouns": {
+      "automation": "Automationen",
+      "battery": "Batterien",
+      "binary_sensor": "Sensoren",
+      "button": "Tasten",
+      "camera": "Kameras",
+      "carbon_monoxide": "CO-Melder",
+      "climate": "Thermostate",
+      "cover": "Abdeckungen",
+      "device_tracker": "Tracker",
+      "door": "Türen",
+      "energy": "Energiezähler",
+      "fan": "Ventilatoren",
+      "garage_door": "Garagentore",
+      "gas": "Gassensoren",
+      "humidifier": "Luftbefeuchter",
+      "humidity": "Feuchtigkeitssensoren",
+      "illuminance": "Lichtsensoren",
+      "input_boolean": "Schalter",
+      "lawn_mower": "Mähroboter",
+      "light": "Lichter",
+      "lock": "Schlösser",
+      "media_player": "Mediaplayer",
+      "moisture": "Wassermelder",
+      "motion": "Bewegungsmelder",
+      "occupancy": "Präsenzmelder",
+      "opening": "Tür- und Fenstersensoren",
+      "person": "Personen",
+      "power": "Leistungsmesser",
+      "presence": "Präsenzmelder",
+      "remote": "Fernbedienungen",
+      "scene": "Szenen",
+      "script": "Skripte",
+      "sensor": "Sensoren",
+      "siren": "Sirenen",
+      "smoke": "Rauchmelder",
+      "switch": "Schalter",
+      "temperature": "Temperatursensoren",
+      "vacuum": "Staubsauger",
+      "valve": "Ventile",
+      "vibration": "Vibrationssensoren",
+      "water_heater": "Warmwasserbereiter",
+      "window": "Fenster"
+    },
+    "between": "zwischen {{low}} und {{high}}",
+    "outside": "außerhalb {{low}}–{{high}}",
+    "is": "ist"
+  },
+  "durationUnits": {
+    "hours": "Std.",
+    "minutes": "Min.",
+    "seconds": "Sek.",
+    "milliseconds": "ms"
+  },
+  "more": {
+    "behavior": {
+      "trigger": {
+        "label": "Bei mehreren auslösen bei",
+        "each": "Jedem",
+        "first": "Dem ersten",
+        "last": "Dem letzten",
+        "any": "Beliebigem",
+        "all": "Allen",
+        "hints": {
+          "each": "Jeder, der sich ändert, löst aus.",
+          "first": "Nur der erste: wenn noch keiner so war.",
+          "last": "Nur der letzte: wenn alle so sind.",
+          "any": "Jeder, der sich ändert, löst aus.",
+          "all": "Wenn alle so sind."
+        }
+      },
+      "condition": {
+        "label": "Bei mehreren erfüllt, wenn",
+        "any": "Einer",
+        "all": "Alle",
+        "hints": {
+          "any": "Einer von ihnen passt.",
+          "all": "Alle passen."
+        }
+      }
+    },
+    "title": {
+      "trigger": "Mehr zu diesem Auslöser",
+      "condition": "Mehr zu dieser Bedingung",
+      "action": "Mehr zu dieser Aktion",
+      "step": "Mehr zu diesem Schritt"
+    },
+    "sidePanel": "Seitenleiste",
+    "onCard": "Auf der Karte:",
+    "triggerName": "Name für „Ausgelöst durch“",
+    "triggerNameHint": "Damit ein Und-Schritt erkennt, welcher Auslöser die Automation gestartet hat.",
+    "triggerNamePlaceholder": "z. B. Haustür geöffnet",
+    "variables": "Variablen",
+    "variablesNone": "keine",
+    "alsoSet": "Außerdem einstellen",
+    "alsoActOn": "Außerdem wirken auf",
+    "carryOn": "Bei Fehler weitermachen",
+    "carryOnHint": "Die Schritte danach laufen trotzdem.",
+    "attribute": "Stattdessen ein Attribut prüfen",
+    "attributeHint": "Helligkeit, Farbmodus… statt des Zustands.",
+    "response": "Antwort speichern als",
+    "optional": "(optional)",
+    "places": {
+      "area": "Raum",
+      "device": "Gerät",
+      "floor": "Etage",
+      "label": "Label"
+    }
+  },
+  "fillIn": {
+    "remove": "Entfernen",
+    "days": {
+      "short": {
+        "mon": "M",
+        "tue": "D",
+        "wed": "M",
+        "thu": "D",
+        "fri": "F",
+        "sat": "S",
+        "sun": "S"
+      },
+      "long": {
+        "mon": "Montag",
+        "tue": "Dienstag",
+        "wed": "Mittwoch",
+        "thu": "Donnerstag",
+        "fri": "Freitag",
+        "sat": "Samstag",
+        "sun": "Sonntag"
+      },
+      "abbr": {
+        "mon": "Mo",
+        "tue": "Di",
+        "wed": "Mi",
+        "thu": "Do",
+        "fri": "Fr",
+        "sat": "Sa",
+        "sun": "So"
+      },
+      "weekdays": "Werktagen",
+      "weekends": "Wochenenden"
+    },
+    "time": {
+      "at": "Um",
+      "addTime": "Uhrzeit",
+      "orHelper": "Oder ein Datum-/Uhrzeit-Helfer",
+      "noHelpers": "Keine Datum-/Uhrzeit-Helfer",
+      "on": "An",
+      "everyDay": "Keiner gewählt: jeden Tag."
+    },
+    "sun": {
+      "when": "Wenn die Sonne",
+      "rises": "Aufgeht",
+      "sets": "Untergeht",
+      "offset": "Früher oder später (optional)",
+      "minutes": "Minuten",
+      "min": "Min.",
+      "before": "Vorher",
+      "after": "Nachher",
+      "risesWord": "aufgeht",
+      "setsWord": "untergeht",
+      "beforeWord": "{{time}} vorher",
+      "afterWord": "{{time}} danach"
+    },
+    "zone": {
+      "who": "Wer",
+      "tracker": "Geräte-Tracker",
+      "zone": "Zone",
+      "pick": "Zone wählen",
+      "when": "Wenn sie",
+      "enter": "Betreten",
+      "leave": "Verlassen",
+      "entersWord": "betritt",
+      "leavesWord": "verlässt",
+      "someone": "jemand"
+    },
+    "template": {
+      "template": "Template",
+      "hint": "Löst aus, wenn es von falsch zu wahr wechselt."
+    },
+    "sentence": {
+      "time": "Wenn es {{times}} ist",
+      "timeOn": "Wenn es an {{days}} {{times}} ist",
+      "sun": "Wenn die Sonne {{event}}",
+      "sunOffset": "Wenn die Sonne {{event}}, {{offset}}",
+      "zone": "Wenn {{who}} {{zone}} {{event}}",
+      "template": "Wenn sein Template wahr wird",
+      "templateFor": "Wenn sein Template wahr wird, {{for}}",
+      "or": "oder",
+      "pattern": "Alle {{every}}",
+      "calendar": "Wenn ein Termin in {{calendar}} {{event}}",
+      "calendarOffset": "Wenn ein Termin in {{calendar}} {{event}}, {{offset}}",
+      "event": "Wenn das Ereignis {{event}} eintritt",
+      "mqtt": "Wenn {{topic}} eine Nachricht bekommt",
+      "mqttPayload": "Wenn {{topic}} {{payload}} bekommt",
+      "webhook": "Wenn Webhook {{id}} aufgerufen wird",
+      "tag": "Wenn Tag {{tag}} gescannt wird",
+      "conversation": "Wenn jemand {{says}} sagt"
+    },
+    "pattern": {
+      "every": "Alle",
+      "hours": "Stunden",
+      "minutes": "Minuten",
+      "seconds": "Sekunden"
+    },
+    "calendar": {
+      "calendar": "Kalender",
+      "pick": "Kalender wählen",
+      "when": "Wenn ein Termin",
+      "starts": "Beginnt",
+      "ends": "Endet",
+      "startsWord": "beginnt",
+      "endsWord": "endet"
+    },
+    "event": {
+      "type": "Ereignistyp",
+      "placeholder": "z. B. doorbell_pressed"
+    },
+    "mqtt": {
+      "topic": "Topic",
+      "payload": "Nachricht (optional)",
+      "payloadHint": "Leer: jede Nachricht auf dem Topic."
+    },
+    "webhook": {
+      "id": "Webhook-ID",
+      "hint": "Aufgerufen unter /api/webhook/ und dieser ID."
+    },
+    "tag": {
+      "tags": "Tags",
+      "add": "Tag-ID hinzufügen"
+    },
+    "conversation": {
+      "says": "Wenn jemand sagt",
+      "add": "Satz hinzufügen",
+      "placeholder": "z. B. Partyzeit"
+    }
   }
 }

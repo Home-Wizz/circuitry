@@ -222,6 +222,18 @@ relicensing a combined work when used as an unmodified library dependency.
 | `zustand@5.0.15` | MIT | Copyright (c) 2019 Paul Henschel | https://github.com/pmndrs/zustand |
 | `zwitch@2.0.4` | MIT | Copyright (c) 2016 Titus Wormer <tituswormer@gmail.com> | https://github.com/wooorm/zwitch |
 
+## Bundled artwork
+
+The step icons in `packages/frontend/src/assets/emoji/` (80 images, scaled
+to 72 px) are Microsoft's Fluent Emoji, 3D style, taken from the npm
+package `@lobehub/fluent-emoji-3d@1.1.0`, a repackaging of
+https://github.com/microsoft/fluentui-emoji. `custom-fan.webp` is
+Circuitry's own, under Circuitry's license.
+
+| Artwork | License | Copyright | Source |
+|---|---|---|---|
+| Fluent Emoji (3D) | MIT | Copyright (c) Microsoft Corporation. | https://github.com/microsoft/fluentui-emoji |
+
 ## Full license texts
 
 One copy of each distinct license text used above (as published by the

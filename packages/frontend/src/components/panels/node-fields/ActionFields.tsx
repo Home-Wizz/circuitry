@@ -1,11 +1,11 @@
 import type { FlowNode, Target } from '@circuitry/shared';
-import { useEffect, useState } from 'react';
+import type { HassServices } from 'home-assistant-js-websocket';
+import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { FieldError } from '@/components/forms/FieldError';
 import { FormField } from '@/components/forms/FormField';
 import { Combobox } from '@/components/ui/Combobox';
 import { DynamicFieldRenderer } from '@/components/ui/DynamicFieldRenderer';
-import { IdList } from '@/components/ui/IdList';
 import { Input } from '@/components/ui/input';
 import { MultiEntitySelector } from '@/components/ui/MultiEntitySelector';
 import {
@@ -20,12 +20,16 @@ import type { FieldConfig } from '@/config/triggerFields';
 import { useHass } from '@/contexts/HassContext';
 import { HaSelect, HaSelector, HaServicePicker, HaSwitch } from '@/ha';
 import { useNodeErrors } from '@/hooks/useNodeErrors';
+import { entitiesForService } from '@/lib/serviceTargets';
 import { prettify } from '@/lib/utils';
 import type { HassEntity } from '@/types/hass';
 import { getNodeDataObject, getNodeDataString } from '@/utils/nodeData';
 import { ContinueOnErrorField } from './ContinueOnErrorField';
+import { PanelTargets } from '../PanelSection';
+import { ExtraTargets } from './ExtraTargets';
 import { DeviceActionFields } from './DeviceActionFields';
 import { ResponseVariableField } from './ResponseVariableField';
+import { withServiceDataField } from '@/lib/serviceFields';
 import { ServiceDataFields } from './ServiceDataFields';
 
 // Domains where any entity type can be targeted — don't filter
@@ -77,13 +81,20 @@ function toStringArray(value: unknown): string[] {
  * For most services (e.g. scene.turn_on), only entities in the same domain
  * are valid targets. For generic services (homeassistant.*), all entities apply.
  */
-function getTargetEntities(serviceName: string, entities: HassEntity[]): HassEntity[] {
+function getTargetEntities(
+  serviceName: string,
+  entities: HassEntity[],
+  services: HassServices
+): HassEntity[] {
   if (!serviceName || !serviceName.includes('.')) return entities;
   const domain = serviceName.split('.')[0];
-  if (MULTI_DOMAIN_SERVICES.has(domain)) return entities;
-  const filtered = entities.filter((e) => e.entity_id.startsWith(`${domain}.`));
-  // Fall back to all entities if the domain has no matching entities
-  return filtered.length > 0 ? filtered : entities;
+  const filtered = MULTI_DOMAIN_SERVICES.has(domain)
+    ? entities
+    : entities.filter((e) => e.entity_id.startsWith(`${domain}.`));
+  // Fall back to all entities if the domain has no matching entities; then
+  // only those HA takes for the service (#130: one without the features it
+  // needs fails the step).
+  return entitiesForService(services, serviceName, filtered.length > 0 ? filtered : entities);
 }
 
 interface ActionFieldsProps {
@@ -94,7 +105,7 @@ interface ActionFieldsProps {
 
 export function ActionFields({ node, onChange, entities }: ActionFieldsProps) {
   const { t } = useTranslation(['nodes']);
-  const { getAllServices, getServiceDefinition } = useHass();
+  const { getAllServices, getServiceDefinition, services } = useHass();
   const { getFieldError } = useNodeErrors(node.id);
   const serviceName = getNodeDataString(node, 'service');
   const eventName = getNodeDataString(node, 'event');
@@ -121,6 +132,11 @@ export function ActionFields({ node, onChange, entities }: ActionFieldsProps) {
     !!deviceActionType;
 
   const serviceDefinition = getServiceDefinition(serviceName);
+  const targetEntities = useMemo(
+    () => getTargetEntities(serviceName, entities, services),
+    [serviceName, entities, services]
+  );
+  const targetEntityIds = useMemo(() => targetEntities.map((e) => e.entity_id), [targetEntities]);
   const serviceFields = serviceDefinition?.fields || {};
   const currentData = getNodeDataObject(node, 'data', {});
   const responseVariable = getNodeDataString(node, 'response_variable');
@@ -133,8 +149,7 @@ export function ActionFields({ node, onChange, entities }: ActionFieldsProps) {
       ? (nodeData.repeat as Record<string, unknown>)
       : null;
   const isForEachRepeat = repeatData !== null && repeatData.for_each !== undefined;
-  const isRepeatNode =
-    repeatData !== null && (repeatData.count !== undefined || isForEachRepeat);
+  const isRepeatNode = repeatData !== null && (repeatData.count !== undefined || isForEachRepeat);
 
   // Determine action type: stop > event > service. An event step with no
   // name yet is still an event step (bug #74): picking "Fire Event" sets
@@ -193,42 +208,8 @@ export function ActionFields({ node, onChange, entities }: ActionFieldsProps) {
     onChange('target', Object.keys(newTarget).length > 0 ? newTarget : undefined);
   };
 
-  const handleDeviceTargetChange = (value: string[]) => {
-    const currentTarget = getNodeDataObject(node, 'target', {});
-    const newTarget = { ...currentTarget, device_id: value.length > 0 ? value : undefined };
-    if (!newTarget.device_id) delete newTarget.device_id;
-    onChange('target', Object.keys(newTarget).length > 0 ? newTarget : undefined);
-  };
-
-  const handleAreaTargetChange = (value: string[]) => {
-    const currentTarget = getNodeDataObject(node, 'target', {});
-    const newTarget = { ...currentTarget, area_id: value.length > 0 ? value : undefined };
-    if (!newTarget.area_id) delete newTarget.area_id;
-    onChange('target', Object.keys(newTarget).length > 0 ? newTarget : undefined);
-  };
-
-  const handleLabelTargetChange = (value: string[]) => {
-    const currentTarget = getNodeDataObject(node, 'target', {});
-    const newTarget = { ...currentTarget, label_id: value.length > 0 ? value : undefined };
-    if (!newTarget.label_id) delete newTarget.label_id;
-    onChange('target', Object.keys(newTarget).length > 0 ? newTarget : undefined);
-  };
-
-  const handleFloorTargetChange = (value: string[]) => {
-    const currentTarget = getNodeDataObject(node, 'target', {});
-    const newTarget = { ...currentTarget, floor_id: value.length > 0 ? value : undefined };
-    if (!newTarget.floor_id) delete newTarget.floor_id;
-    onChange('target', Object.keys(newTarget).length > 0 ? newTarget : undefined);
-  };
-
-  const handleDataFieldChange = (fieldName: string, value: unknown) => {
-    const newData = { ...currentData, [fieldName]: value === '' ? undefined : value };
-    // Clean up undefined values
-    const cleanedData = Object.fromEntries(
-      Object.entries(newData).filter(([, v]) => v !== undefined && v !== '')
-    );
-    onChange('data', Object.keys(cleanedData).length > 0 ? cleanedData : undefined);
-  };
+  const handleDataFieldChange = (fieldName: string, value: unknown) =>
+    onChange('data', withServiceDataField(currentData, fieldName, value));
 
   const handleResponseVariableChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     onChange('response_variable', e.target.value === '' ? undefined : e.target.value);
@@ -248,16 +229,6 @@ export function ActionFields({ node, onChange, entities }: ActionFieldsProps) {
   };
 
   const targetEntityIdArray = normalizeToArray(target.entity_id);
-  const targetDeviceIdArray = normalizeToArray(target.device_id);
-  const targetAreaIdArray = normalizeToArray(target.area_id);
-  const targetLabelIdArray = normalizeToArray(target.label_id);
-  const targetFloorIdArray = normalizeToArray(target.floor_id);
-
-  // Check if we have any device, area, label or floor targets (to show those fields)
-  const hasDeviceTargets = targetDeviceIdArray.length > 0;
-  const hasAreaTargets = targetAreaIdArray.length > 0;
-  const hasLabelTargets = targetLabelIdArray.length > 0;
-  const hasFloorTargets = targetFloorIdArray.length > 0;
 
   if (isDeviceAction) {
     return <DeviceActionFields node={node} onChange={onChange} entities={entities} />;
@@ -309,9 +280,7 @@ export function ActionFields({ node, onChange, entities }: ActionFieldsProps) {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="list">
-                      {t('nodes:actions.repeatForEachModeList')}
-                    </SelectItem>
+                    <SelectItem value="list">{t('nodes:actions.repeatForEachModeList')}</SelectItem>
                     <SelectItem value="template">
                       {t('nodes:actions.repeatForEachModeTemplate')}
                     </SelectItem>
@@ -369,17 +338,47 @@ export function ActionFields({ node, onChange, entities }: ActionFieldsProps) {
     );
   }
 
+  // What it acts on: its entities, then its rooms, devices, floors and
+  // labels (the ones it has, the rest to add). A service that takes no
+  // target and has none shows nothing.
+  const showTargets =
+    actionType === 'service' &&
+    (Boolean(serviceDefinition?.target) || Object.keys(target).length > 0);
+  const targetsSection = showTargets && (
+    <PanelTargets>
+      {(serviceDefinition?.target || targetEntityIdArray.length > 0) && (
+        <FormField label={t('nodes:actions.targetEntities')}>
+          <HaSelector
+            selector={{ entity: { multiple: true, include_entities: targetEntityIds } }}
+            value={targetEntityIdArray}
+            onChange={(v) => handleEntityTargetChange(toStringArray(v))}
+            fallback={
+              <MultiEntitySelector
+                value={targetEntityIdArray}
+                onChange={handleEntityTargetChange}
+                entities={targetEntities}
+                placeholder={t('nodes:actions.selectTargetEntities')}
+              />
+            }
+          />
+        </FormField>
+      )}
+      <ExtraTargets target={target} onChange={onChange} />
+    </PanelTargets>
+  );
+
   return (
     <>
+      {targetsSection}
       {/* Action type selector */}
       <FormField label={t('nodes:actions.actionTypeLabel')} required>
         <HaSelect
           value={actionType}
           onChange={(v) => handleActionTypeChange(String(v))}
           options={[
-            { value: 'service', label: t('nodes:actions.actionTypes.service') },
-            { value: 'event', label: t('nodes:actions.actionTypes.event') },
-            { value: 'stop', label: t('nodes:actions.actionTypes.stop') },
+            { value: 'service', label: t('nodes:picker.rows.performAction') },
+            { value: 'event', label: t('nodes:blocks.fire_event.label') },
+            { value: 'stop', label: t('nodes:blocks.stop.label') },
           ]}
           fallback={
             <Select value={actionType} onValueChange={handleActionTypeChange}>
@@ -387,9 +386,9 @@ export function ActionFields({ node, onChange, entities }: ActionFieldsProps) {
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="service">{t('nodes:actions.actionTypes.service')}</SelectItem>
-                <SelectItem value="event">{t('nodes:actions.actionTypes.event')}</SelectItem>
-                <SelectItem value="stop">{t('nodes:actions.actionTypes.stop')}</SelectItem>
+                <SelectItem value="service">{t('nodes:picker.rows.performAction')}</SelectItem>
+                <SelectItem value="event">{t('nodes:blocks.fire_event.label')}</SelectItem>
+                <SelectItem value="stop">{t('nodes:blocks.stop.label')}</SelectItem>
               </SelectContent>
             </Select>
           }
@@ -504,109 +503,6 @@ export function ActionFields({ node, onChange, entities }: ActionFieldsProps) {
             />
             <FieldError message={getFieldError('service')} />
           </FormField>
-
-          {/* Target Entities */}
-          {(serviceDefinition?.target || targetEntityIdArray.length > 0) && (
-            <FormField label={t('nodes:actions.targetEntities')}>
-              <HaSelector
-                selector={{ entity: { multiple: true } }}
-                value={targetEntityIdArray}
-                onChange={(v) => handleEntityTargetChange(toStringArray(v))}
-                fallback={
-                  <MultiEntitySelector
-                    value={targetEntityIdArray}
-                    onChange={handleEntityTargetChange}
-                    entities={getTargetEntities(serviceName, entities)}
-                    placeholder={t('nodes:actions.selectTargetEntities')}
-                  />
-                }
-              />
-            </FormField>
-          )}
-
-          {/* Target Devices - show if we have device targets or service supports targets */}
-          {(hasDeviceTargets || serviceDefinition?.target) && (
-            <FormField
-              label={t('nodes:actions.targetDevices')}
-              description={t('nodes:actions.targetDevicesDescription')}
-            >
-              <HaSelector
-                selector={{ device: { multiple: true } }}
-                value={targetDeviceIdArray}
-                onChange={(v) => handleDeviceTargetChange(toStringArray(v))}
-                fallback={
-                  <IdList
-                    values={targetDeviceIdArray}
-                    onChange={handleDeviceTargetChange}
-                    placeholder={t('nodes:actions.addDeviceId')}
-                  />
-                }
-              />
-            </FormField>
-          )}
-
-          {/* Target Areas - show if we have area targets or service supports targets */}
-          {(hasAreaTargets || serviceDefinition?.target) && (
-            <FormField
-              label={t('nodes:actions.targetAreas')}
-              description={t('nodes:actions.targetAreasDescription')}
-            >
-              <HaSelector
-                selector={{ area: { multiple: true } }}
-                value={targetAreaIdArray}
-                onChange={(v) => handleAreaTargetChange(toStringArray(v))}
-                fallback={
-                  <IdList
-                    values={targetAreaIdArray}
-                    onChange={handleAreaTargetChange}
-                    placeholder={t('nodes:actions.addAreaId')}
-                  />
-                }
-              />
-            </FormField>
-          )}
-
-          {/* Target Labels - show if we have label targets or service supports targets */}
-          {(hasLabelTargets || serviceDefinition?.target) && (
-            <FormField
-              label={t('nodes:actions.targetLabels')}
-              description={t('nodes:actions.targetLabelsDescription')}
-            >
-              <HaSelector
-                selector={{ label: { multiple: true } }}
-                value={targetLabelIdArray}
-                onChange={(v) => handleLabelTargetChange(toStringArray(v))}
-                fallback={
-                  <IdList
-                    values={targetLabelIdArray}
-                    onChange={handleLabelTargetChange}
-                    placeholder={t('nodes:actions.addLabelId')}
-                  />
-                }
-              />
-            </FormField>
-          )}
-
-          {/* Target Floors - show if we have floor targets or service supports targets */}
-          {(hasFloorTargets || serviceDefinition?.target) && (
-            <FormField
-              label={t('nodes:actions.targetFloors')}
-              description={t('nodes:actions.targetFloorsDescription')}
-            >
-              <HaSelector
-                selector={{ floor: { multiple: true } }}
-                value={targetFloorIdArray}
-                onChange={(v) => handleFloorTargetChange(toStringArray(v))}
-                fallback={
-                  <IdList
-                    values={targetFloorIdArray}
-                    onChange={handleFloorTargetChange}
-                    placeholder={t('nodes:actions.addFloorId')}
-                  />
-                }
-              />
-            </FormField>
-          )}
 
           {/* Dynamic service fields */}
           <ServiceDataFields

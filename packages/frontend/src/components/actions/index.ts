@@ -1,6 +1,7 @@
 export { getAlignBottomAction } from './AlignBottomAction';
 export { getAlignCenterAction } from './AlignCenterAction';
 export { getAlignLeftAction } from './AlignLeftAction';
+export { getAlignMiddleAction } from './AlignMiddleAction';
 export { getAlignRightAction } from './AlignRightAction';
 export { getAlignTopAction } from './AlignTopAction';
 export { getCopyAction } from './CopyAction';

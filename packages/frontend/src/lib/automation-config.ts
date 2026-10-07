@@ -1,5 +1,31 @@
-import type { TranspileResult } from '@circuitry/transpiler';
+import type { FlowGraph } from '@circuitry/shared';
+import type { FlowTranspiler, TranspileResult } from '@circuitry/transpiler';
+import { t as i18t } from 'i18next';
 import type { AutomationConfig } from '@/types/hass';
+
+/**
+ * Validates and transpiles a flow for saving, both save paths' way. When
+ * the transpiler can't write it, the error carries its reasons: a save that
+ * fails says why (a flow Home Assistant can't express, a loop that can't be
+ * written), as the YAML preview already did. The save paths used to throw
+ * "Failed to transpile flow to automation config" and drop them.
+ */
+export function transpileForSave(transpiler: FlowTranspiler, graph: FlowGraph): TranspileResult {
+  const validation = transpiler.validate(graph);
+  if (validation.errors.length > 0) {
+    throw new Error(
+      i18t('errors:validation.validationFailed', {
+        errors: validation.errors.map((e) => e.message).join(', '),
+      })
+    );
+  }
+  const result = transpiler.transpile(graph);
+  if (result.success && result.output?.automation) return result;
+  const reasons = (result.errors ?? []).filter((e) => e.trim() !== '');
+  throw new Error(
+    reasons.length > 0 ? reasons.join('\n') : i18t('errors:validation.transpileFailed')
+  );
+}
 
 /**
  * The automation config flow-store saves to Home Assistant for a

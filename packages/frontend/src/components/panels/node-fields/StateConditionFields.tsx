@@ -20,74 +20,55 @@ import { useNodeErrors } from '@/hooks/useNodeErrors';
 import type { HassEntity } from '@/types/hass';
 import { getNodeDataString } from '@/utils/nodeData';
 import { GENERIC_STATES, getStateSuggestions, StateValueListField } from './StateValueCombobox';
+import { PanelTargets } from '../PanelSection';
 
 /** Narrows an `ha-selector` `value-changed` payload to a plain string, or `undefined` if empty/non-string. */
 function toOptionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value ? value : undefined;
 }
 
-interface StateConditionFieldsProps {
-  node: FlowNode;
-  onChange: (key: string, value: unknown) => void;
-  entities: HassEntity[];
+/** A State condition's entity ids, one or several. */
+export function stateConditionEntityIds(data: Readonly<Record<string, unknown>>): string[] {
+  const raw = data.entity_id;
+  if (Array.isArray(raw)) return raw.filter((id): id is string => typeof id === 'string');
+  return typeof raw === 'string' && raw ? [raw] : [];
 }
 
-export function StateConditionFields({ node, onChange, entities }: StateConditionFieldsProps) {
+/**
+ * What a State condition tests: the state (or states) its entities must be
+ * in, and, for several, whether all or any of them. The property panel's
+ * fields, shared with the card's state pill (nodes/StatePill.tsx).
+ */
+export function StateConditionValueFields({
+  data,
+  entityIds,
+  entities,
+  onChange,
+  stateError,
+}: {
+  data: Readonly<Record<string, unknown>>;
+  entityIds: string[];
+  entities: HassEntity[];
+  onChange: (key: string, value: unknown) => void;
+  stateError?: string;
+}) {
   const { t } = useTranslation(['nodes', 'common']);
-  const { getFieldError } = useNodeErrors(node.id);
-  const { entities: contextEntities } = useHass();
-
-  const allEntities = entities.length > 0 ? entities : contextEntities;
-
-  const nodeData = node.data as Record<string, unknown>;
-  const entityIdRaw = nodeData.entity_id;
-  const entityIds: string[] = Array.isArray(entityIdRaw)
-    ? entityIdRaw
-    : typeof entityIdRaw === 'string' && entityIdRaw
-      ? [entityIdRaw]
-      : [];
-
-  const stateValueRaw = nodeData.state;
-  const stateValue: string | string[] = Array.isArray(stateValueRaw)
-    ? (stateValueRaw as string[])
-    : typeof stateValueRaw === 'string'
-      ? stateValueRaw
+  const stateValue: string | string[] = Array.isArray(data.state)
+    ? data.state.filter((s): s is string => typeof s === 'string')
+    : typeof data.state === 'string'
+      ? data.state
       : '';
-  const attributeValue = getNodeDataString(node, 'attribute');
-  const matchValue = getNodeDataString(node, 'match', 'all');
-
+  const attribute = typeof data.attribute === 'string' ? data.attribute : '';
+  const matchValue = typeof data.match === 'string' && data.match ? data.match : 'all';
   const stateSuggestions = useMemo(() => {
     if (entityIds.length === 0) return GENERIC_STATES;
     const all = new Set<string>();
-    for (const id of entityIds) {
-      for (const s of getStateSuggestions(id, allEntities)) {
-        all.add(s);
-      }
-    }
+    for (const id of entityIds) for (const s of getStateSuggestions(id, entities)) all.add(s);
     return Array.from(all);
-  }, [entityIds, allEntities]);
-
-  const forField = getConditionFields('state').find((f) => f.name === 'for');
+  }, [entityIds, entities]);
 
   return (
     <>
-      <FormField label={t('nodes:fieldLabels.entity_id')} required>
-        <HaSelector
-          selector={{ entity: { multiple: true } }}
-          value={entityIds}
-          onChange={(value) => onChange('entity_id', value)}
-          fallback={
-            <MultiEntitySelector
-              value={entityIds}
-              onChange={(value) => onChange('entity_id', value)}
-              entities={allEntities}
-              placeholder={t('common:placeholders.selectEntity')}
-            />
-          }
-        />
-        <FieldError message={getFieldError('entity_id')} />
-      </FormField>
-
       {entityIds.length > 1 && (
         <FormField
           label={t('nodes:fieldLabels.match')}
@@ -108,7 +89,7 @@ export function StateConditionFields({ node, onChange, entities }: StateConditio
       <FormField label={t('nodes:fieldLabels.state')} required>
         <HaSelector
           selector={{
-            state: { entity_id: entityIds, attribute: attributeValue || undefined, multiple: true },
+            state: { entity_id: entityIds, attribute: attribute || undefined, multiple: true },
           }}
           value={Array.isArray(stateValue) ? stateValue : stateValue ? [stateValue] : []}
           onChange={(v) => {
@@ -124,24 +105,66 @@ export function StateConditionFields({ node, onChange, entities }: StateConditio
             />
           }
         />
-        <FieldError message={getFieldError('state')} />
+        <FieldError message={stateError} />
       </FormField>
+    </>
+  );
+}
 
-      <FormField label={t('nodes:fieldLabels.attribute')}>
-        <HaSelector
-          selector={{ attribute: { entity_id: entityIds } }}
-          value={attributeValue}
-          onChange={(v) => onChange('attribute', toOptionalString(v))}
-          fallback={
-            <Input
-              type="text"
-              value={attributeValue}
-              onChange={(e) => onChange('attribute', e.target.value || undefined)}
-              placeholder={t('nodes:fieldPlaceholders.attribute')}
-            />
-          }
-        />
-      </FormField>
+interface StateConditionFieldsProps {
+  node: FlowNode;
+  onChange: (key: string, value: unknown) => void;
+  entities: HassEntity[];
+}
+
+export function StateConditionFields({ node, onChange, entities }: StateConditionFieldsProps) {
+  const { t } = useTranslation(['nodes', 'common']);
+  const { getFieldError } = useNodeErrors(node.id);
+  const { entities: contextEntities } = useHass();
+
+  const allEntities = entities.length > 0 ? entities : contextEntities;
+
+  const nodeData = node.data as Record<string, unknown>;
+  const entityIds = stateConditionEntityIds(nodeData);
+  const attributeValue = getNodeDataString(node, 'attribute');
+
+  const forField = getConditionFields('state').find((f) => f.name === 'for');
+
+  return (
+    <>
+      {/* What it acts on, in the side panel. */}
+      <PanelTargets>
+        <FormField label={t('nodes:fieldLabels.entity_id')} required>
+          <HaSelector
+            selector={{ entity: { multiple: true } }}
+            value={entityIds}
+            onChange={(value) => onChange('entity_id', value)}
+            fallback={
+              <MultiEntitySelector
+                value={entityIds}
+                onChange={(value) => onChange('entity_id', value)}
+                entities={allEntities}
+                placeholder={t('common:placeholders.selectEntity')}
+              />
+            }
+          />
+          <FieldError message={getFieldError('entity_id')} />
+        </FormField>
+      </PanelTargets>
+
+      <StateConditionValueFields
+        data={nodeData}
+        entityIds={entityIds}
+        entities={allEntities}
+        onChange={onChange}
+        stateError={getFieldError('state')}
+      />
+
+      <AttributeField
+        entityIds={entityIds}
+        value={attributeValue}
+        onChange={(v) => onChange('attribute', v)}
+      />
 
       {forField && (
         <DynamicFieldRenderer
@@ -153,5 +176,43 @@ export function StateConditionFields({ node, onChange, entities }: StateConditio
         />
       )}
     </>
+  );
+}
+
+/**
+ * An attribute to test instead of the state (a light's brightness, a
+ * thermostat's mode), picked from its entities' own attributes. The
+ * property panel's field; the card's "+ more" shows it with its own words.
+ */
+export function AttributeField({
+  entityIds,
+  value,
+  onChange,
+  label,
+  description,
+}: {
+  entityIds: string[];
+  value: string;
+  onChange: (value: string | undefined) => void;
+  label?: string;
+  description?: string;
+}) {
+  const { t } = useTranslation(['nodes']);
+  return (
+    <FormField label={label ?? t('nodes:fieldLabels.attribute')} description={description}>
+      <HaSelector
+        selector={{ attribute: { entity_id: entityIds } }}
+        value={value}
+        onChange={(v) => onChange(toOptionalString(v))}
+        fallback={
+          <Input
+            type="text"
+            value={value}
+            onChange={(e) => onChange(e.target.value || undefined)}
+            placeholder={t('nodes:fieldPlaceholders.attribute')}
+          />
+        }
+      />
+    </FormField>
   );
 }

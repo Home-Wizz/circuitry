@@ -36,7 +36,6 @@
     "speed": "Speed",
     "quickHelp": "Quick Help",
     "debugControls": "Debug Controls",
-    "addNode": "Add Node",
     "yamlOutput": "YAML Output",
     "automationTrace": "Automation Trace",
     "selectTraceRun": "Select Trace Run:",
@@ -180,7 +179,8 @@
       "error": "Error",
       "warning": "Warning",
       "info": "Info",
-      "debug": "Debug"
+      "debug": "Debug",
+      "notset": "Lowest level (NOTSET)"
     },
     "initialState": "Initial state",
     "initialStateDescription": "Whether the automation starts enabled or disabled when Home Assistant starts.",
@@ -208,6 +208,13 @@
     "enable": "Enable",
     "disable": "Disable",
     "disconnect": "Disconnect",
+    "lineUpRow": "Line up in a row",
+    "lineUpColumn": "Line up in a column",
+    "zoomIn": "Zoom in",
+    "zoomOut": "Zoom out",
+    "fitView": "Fit to screen",
+    "lock": "Lock the canvas",
+    "unlock": "Unlock the canvas",
     "alignLeft": "Align Left",
     "alignCenter": "Align Center",
     "alignRight": "Align Right",
@@ -220,11 +227,19 @@
     "selectAll": "Select All"
   },
   "contextMenu": {
+    "rename": "Rename…",
+    "renameTitle": "Rename step",
+    "renameDescription": "A name of its own, shown on the card instead of its sentence. Leave it empty to show the sentence again.",
+    "renameLabel": "Name",
     "loopDeleted": "Loop removed",
     "loopCopied": "Loop copied",
     "loopCut": "Loop cut",
     "connectionCopied": "Connection copied",
-    "connectionCut": "Connection cut"
+    "connectionCut": "Connection cut",
+    "replace": "Replace…",
+    "selectFlow": "Select its whole flow",
+    "replaceDoesNotFit": "Not replaced: the new step has no outlet for a link that leaves this one",
+    "replaceBlockNeedsEnd": "Not replaced: a block can only replace a step with nothing after it"
   },
   "shortcuts": {
     "cmd": "Cmd",
@@ -240,6 +255,8 @@
     "useValue": "Use value"
   },
   "toolsMenu": {
+    "settings": "Settings…",
+    "settingsDescription": "How it runs, its traces and variables. Saved with the automation.",
     "rename": "Rename",
     "assignCategory": "Assign category",
     "runActions": "Run actions",
@@ -259,5 +276,37 @@
     "renamedToast": "Renamed to \"{{name}}\"",
     "categoryAssignedToast": "Category updated",
     "deletedToast": "Deleted \"{{name}}\""
+  },
+  "sidebar": {
+    "backToHa": "Back to Home Assistant",
+    "open": "Open",
+    "more": "More",
+    "searchPlaceholder": "Add a step…",
+    "add": "Add",
+    "subs": {
+      "when": "Something happens",
+      "and": "Only if…",
+      "then": "Do something"
+    },
+    "groups": {
+      "branching": "Branching",
+      "repeat": "Repeat",
+      "timing": "Timing and data",
+      "structure": "Structure"
+    },
+    "collapse": "Collapse panel",
+    "expand": "Expand panel"
+  },
+  "tabs": {
+    "closeUnsavedTitle": "Close “{{name}}” without saving?",
+    "closeUnsavedDescription": "This tab has changes that aren't saved to Home Assistant yet. Closing it throws them away.",
+    "closeUnsavedConfirm": "Close without saving",
+    "keepEditing": "Keep editing"
+  },
+  "emptyCanvas": {
+    "hint": "Every automation starts with something happening",
+    "addTrigger": "add a trigger",
+    "or": "or",
+    "openExisting": "open an existing automation"
   }
 }

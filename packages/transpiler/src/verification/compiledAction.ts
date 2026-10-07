@@ -1,4 +1,4 @@
-import type { FlowNode } from '@circuitry/shared';
+import { type FlowNode, TRIGGER_KEYS_KEEPING_NULL } from '@circuitry/shared';
 
 /**
  * Normalizes a leaf action/delay/wait/set_variables step into the same
@@ -40,7 +40,7 @@ function cleanTrigger(trigger: Record<string, unknown>): Record<string, unknown>
   const cleaned = Object.fromEntries(
     Object.entries(trigger).filter(([key, v]) => {
       if (v === undefined) return false; // "" kept (bug #72)
-      if (v === null) return key === 'from' || key === 'to';
+      if (v === null) return TRIGGER_KEYS_KEEPING_NULL.has(key);
       return true;
     })
   );

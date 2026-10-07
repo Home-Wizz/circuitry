@@ -12,9 +12,11 @@ import { findBackEdges } from './topology';
  *
  * HA writes the first as an OR when each branch is only a test on the way
  * to X (a condition whose "yes" or "no" edge goes straight to X and whose
- * other side ends): `gateConditionMeetings` puts one condition in their
- * place, `or` of what each needs to get there (its test, or `not` of it for
- * a "no" edge), and the strategies and gates read that like any other
+ * other side ends): `gateConditionMeetings` puts conditions in their place
+ * -- an `or` of the "yes" sides' tests whose "yes" edge goes to X, and an
+ * `and` of the "no" sides' tests whose "no" edge goes to X (one that can't
+ * be evaluated gets there, as HA's if/else sends it; `not` would raise the
+ * error, #128) -- and the strategies and gates read those like any other
  * condition. The same meeting where a branch does something before its
  * test can't be written in HA (a variable set in a parallel branch doesn't
  * reach the step after it), so `unwritableMeeting` finds it and
@@ -71,10 +73,14 @@ function fanOuts(ctx: Ctx, id: string): FlowEdge[][] {
   return groups.filter((g) => g.length > 1);
 }
 
+/** What a branch that is only a test needs to get to the step it meets
+ * at: its condition, and the side (its "yes" or "no" edge) that goes there. */
+type Arrival = { test: Record<string, unknown>; side: 'true' | 'false' };
+
 /** A branch that is only a test on the way to `meet`: a condition with one
  * way in, no loop edges, whose only edge goes straight to `meet` (its other
  * side ends there). Returns what it needs to get there, or null. */
-function arrivalTest(ctx: Ctx, id: string, meet: string): Record<string, unknown> | null {
+function arrivalTest(ctx: Ctx, id: string, meet: string): Arrival | null {
   const node = ctx.nodes.get(id);
   if (node?.type !== 'condition') return null;
   if (forwardIn(ctx, id).length !== 1) return null;
@@ -83,22 +89,26 @@ function arrivalTest(ctx: Ctx, id: string, meet: string): Record<string, unknown
   const test = Object.fromEntries(
     Object.entries(node.data as Record<string, unknown>).filter(([k]) => !k.startsWith('_'))
   );
-  return out[0].sourceHandle === 'false' ? { condition: 'not', conditions: [test] } : test;
+  return { test, side: out[0].sourceHandle === 'false' ? 'false' : 'true' };
 }
+
+/** One condition from several: `kind` of them, or the one itself. */
+const grouped = (kind: 'and' | 'or', tests: Record<string, unknown>[]): Record<string, unknown> =>
+  tests.length === 1 ? tests[0] : { condition: kind, conditions: tests };
 
 function gateOne(flow: FlowGraph): FlowGraph | null {
   const ctx = contextOf(flow);
   for (const source of flow.nodes) {
     for (const group of fanOuts(ctx, source.id)) {
       // Branches that are only tests, by the step they go to.
-      const byMeet = new Map<string, { edge: FlowEdge; test: Record<string, unknown> }[]>();
+      const byMeet = new Map<string, ({ edge: FlowEdge } & Arrival)[]>();
       for (const edge of group) {
         const only = ctx.edges.filter((e) => e.source === edge.target);
         if (only.length !== 1) continue;
         const meet = only[0].target;
-        const test = arrivalTest(ctx, edge.target, meet);
-        if (!test) continue;
-        byMeet.set(meet, [...(byMeet.get(meet) ?? []), { edge, test }]);
+        const arrival = arrivalTest(ctx, edge.target, meet);
+        if (!arrival) continue;
+        byMeet.set(meet, [...(byMeet.get(meet) ?? []), { edge, ...arrival }]);
       }
       for (const [meet, branches] of byMeet) {
         if (branches.length < 2 || ctx.nodes.get(meet)?.type === 'join') continue;
@@ -108,28 +118,53 @@ function gateOne(flow: FlowGraph): FlowGraph | null {
         const tests = new Set(branches.map((b) => b.edge.target));
         const first = ctx.nodes.get(branches[0].edge.target)!;
         const existing = new Set(flow.nodes.map((n) => n.id));
-        let id = `${source.id}__meets__${meet}`;
-        for (let i = 2; existing.has(id); i++) id = `${source.id}__meets__${meet}_${i}`;
-        const gate: FlowNode = {
+        const freshId = (base: string) => {
+          let id = base;
+          for (let i = 2; existing.has(id); i++) id = `${base}_${i}`;
+          existing.add(id);
+          return id;
+        };
+        const edgeIds = new Set(flow.edges.map((e) => e.id));
+        const edge = (source: string, target: string, sourceHandle: 'true' | 'false') => {
+          const id = uniqueId(`${source}__${sourceHandle}__${target}`, edgeIds);
+          edgeIds.add(id);
+          return { id, source, target, sourceHandle };
+        };
+        const gateNode = (id: string, data: Record<string, unknown>): FlowNode => ({
           id,
           type: 'condition',
           position: first.position,
-          data: { condition: 'or', conditions: branches.map((b) => b.test) },
-        };
-        const edgeIds = new Set(flow.edges.map((e) => e.id));
+          data,
+        });
+        // A "yes" side gets there when its test passes: an OR of those,
+        // whose "yes" edge goes to X. A "no" side gets there when its test
+        // fails or can't be evaluated, which `not` doesn't say (it raises
+        // the error, #128): an AND of those, whose "no" edge goes to X --
+        // HA's if/else sends an error there too. Both kinds: the OR first,
+        // its "no" edge on to the AND.
+        const yes = branches.filter((b) => b.side === 'true').map((b) => b.test);
+        const no = branches.filter((b) => b.side === 'false').map((b) => b.test);
+        const base = `${source.id}__meets__${meet}`;
+        const gates: FlowNode[] = [];
+        const gateEdges: ReturnType<typeof edge>[] = [];
+        if (yes.length > 0) {
+          gates.push(gateNode(freshId(base), grouped('or', yes)));
+          gateEdges.push(edge(gates[0].id, meet, 'true'));
+        }
+        if (no.length > 0) {
+          const id = freshId(yes.length > 0 ? `${base}__no` : base);
+          if (gates.length > 0) gateEdges.push(edge(gates[0].id, id, 'false'));
+          gates.push(gateNode(id, grouped('and', no)));
+          gateEdges.push(edge(id, meet, 'false'));
+        }
         const into = branches[0].edge;
         return {
           ...flow,
-          nodes: [...flow.nodes.filter((n) => !tests.has(n.id)), gate],
+          nodes: [...flow.nodes.filter((n) => !tests.has(n.id)), ...gates],
           edges: [
             ...flow.edges.filter((e) => !tests.has(e.source) && !tests.has(e.target)),
-            { ...into, id: uniqueId(`${into.id}__gate`, edgeIds), target: id },
-            {
-              id: uniqueId(`${id}__to__${meet}`, edgeIds),
-              source: id,
-              target: meet,
-              sourceHandle: 'true',
-            },
+            { ...into, id: uniqueId(`${into.id}__gate`, edgeIds), target: gates[0].id },
+            ...gateEdges,
           ],
         };
       }

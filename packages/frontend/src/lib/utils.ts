@@ -5,9 +5,25 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+/** The first of `keys` that `table` has, if any. */
+export function firstKeyIn(
+  table: Record<string, unknown>,
+  keys: readonly (string | undefined)[]
+): string | undefined {
+  return keys.find((key) => key !== undefined && key in table);
+}
+
 /** A plain object (not null, not an array). */
 export const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/** A value that gives nothing: unset, null, '', an empty list or mapping. */
+export const isEmptyValue = (value: unknown): boolean =>
+  value === undefined ||
+  value === null ||
+  value === '' ||
+  (Array.isArray(value) && value.length === 0) ||
+  (isRecord(value) && Object.keys(value).length === 0);
 
 /**
  * Turns a snake_case identifier (HA domain/service/state names) into a

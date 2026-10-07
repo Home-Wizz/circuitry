@@ -1,7 +1,6 @@
 import { ReactFlowProvider } from '@xyflow/react';
 import {
   AlertCircle,
-  ArrowLeft,
   BrushCleaning,
   FileDown,
   FileUp,
@@ -21,7 +20,7 @@ import { useTranslation } from 'react-i18next';
 import { Toaster } from 'sonner';
 import './index.css';
 import { FlowCanvas } from '@/components/canvas/FlowCanvas';
-import { NodePalette } from '@/components/panels/NodePalette';
+import { NodePalette, paletteAsideClass } from '@/components/panels/NodePalette';
 import { PropertyPanel } from '@/components/panels/PropertyPanel';
 import { SpeedControl } from '@/components/simulator/SpeedControl';
 import { AutomationToolsMenu } from '@/components/toolbar/AutomationToolsMenu';
@@ -72,15 +71,20 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { logger } from '@/lib/logger';
 import { requiredServiceFields } from '@/lib/serviceRequired';
+import { entityFeatures } from '@/lib/serviceTargets';
+import { readStored, writeStored } from '@/lib/storage';
 import { cn } from '@/lib/utils';
 import { version } from '../../../custom_components/circuitry/manifest.json';
 import { useAppRoot } from './contexts/AppRootContext';
 import { useHass } from './contexts/HassContext';
 import { useDarkMode } from './hooks/useDarkMode';
+import { useStableValue } from './hooks/useStableEntityList';
 import { useHaThemeSync } from './hooks/useHaThemeSync';
 import { useLanguage } from './hooks/useLanguage';
 import { useLoadAutomation } from './hooks/useLoadAutomation';
 import { useFlowStore } from './store/flow-store';
+
+const PALETTE_RAIL_KEY = 'circuitry_palette_rail';
 
 /** Lightweight fallback shown while a lazily-loaded panel chunk is fetched. */
 function PanelLoading() {
@@ -92,15 +96,24 @@ function PanelLoading() {
 }
 
 /**
- * Keeps the store's required service fields (#125: an action step leaving
- * one empty gets a warning) in step with the connected HA's services.
+ * Keeps the store's service checks in step with the connected HA: each
+ * service's required fields (#125: an action step leaving one empty gets a
+ * warning) and which entities each service takes (#130).
  */
-function ServiceRequiredFieldsSync() {
+function ServiceChecksSync() {
   const { hass } = useHass();
   const services = hass?.services;
   useEffect(() => {
     if (services) useFlowStore.getState().setServiceRequiredFields(requiredServiceFields(services));
   }, [services]);
+  // Each entity's features (#130: a step naming an entity that can't do its
+  // action gets a warning), held steady across state ticks that don't
+  // change any entity's features.
+  const allFeatures = entityFeatures(hass?.states);
+  const features = useStableValue(allFeatures, JSON.stringify(allFeatures));
+  useEffect(() => {
+    if (services) useFlowStore.getState().setServiceTargets({ services, features });
+  }, [services, features]);
   return null;
 }
 
@@ -227,14 +240,28 @@ function App() {
   const nodeDoubleClickSignal = useFlowStore((s) => s.nodeDoubleClickSignal);
   useEffect(() => {
     if (nodeDoubleClickSignal === 0) return;
-    setRightPanelState((prev) => (prev === 'closed' || prev === 'collapsed' ? 'expanded' : 'closed'));
+    setRightPanelState((prev) =>
+      prev === 'closed' || prev === 'collapsed' ? 'expanded' : 'closed'
+    );
   }, [nodeDoubleClickSignal]);
+  // A card's "+ more" › Side panel: opens it (never closes it).
+  const openPanelSignal = useFlowStore((s) => s.openPanelSignal);
+  useEffect(() => {
+    if (openPanelSignal > 0) setRightPanelState('expanded');
+  }, [openPanelSignal]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [importYamlOpen, setImportYamlOpen] = useState(false);
   const [automationImportOpen, setAutomationImportOpen] = useState(false);
   const [saveDialogOpen, setSaveDialogOpen] = useState(false);
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
   const [exitConfirmOpen, setExitConfirmOpen] = useState(false);
+  // The left panel folded to its dock, remembered across visits: docked
+  // until someone opens it out.
+  const [paletteRail, setPaletteRail] = useState(() => readStored(PALETTE_RAIL_KEY) !== 'false');
+  const togglePaletteRail = () => {
+    setPaletteRail(!paletteRail);
+    writeStored(PALETTE_RAIL_KEY, String(!paletteRail));
+  };
   const [parentWidth, setParentWidth] = useState(() => window.innerWidth);
   const forceSettingsOpen = actualIsRemote && (config.url === '' || config.token === '');
   const isDark = useDarkMode();
@@ -365,7 +392,7 @@ function App() {
     >
       <ReactFlowProvider>
         <DeepLinkHandler />
-        <ServiceRequiredFieldsSync />
+        <ServiceChecksSync />
         <div className="flex h-screen flex-col bg-background">
           {/* Header */}
           <header className="flex h-14 items-center justify-between gap-4 border-border border-b bg-card px-4 shadow-sm">
@@ -399,7 +426,9 @@ function App() {
               </span>
             </div>
 
-            <div className="flex items-center gap-2">
+            {/* Round buttons like the dock's (.header-actions, index.css); Save,
+                the main one, in ink. */}
+            <div className="header-actions flex items-center gap-2">
               <ThemeToggle />
 
               {status && (
@@ -441,17 +470,24 @@ function App() {
                 <TooltipTrigger asChild>
                   <Button
                     onClick={() => setSaveDialogOpen(true)}
-                    variant={hasUnsavedChanges ? 'default' : 'ghost'}
+                    variant="ghost"
                     size="icon"
                     disabled={isSaving}
-                    className={cn(
-                      hasUnsavedChanges && hasRealChanges() && !isSaving && 'save-button-unsaved'
-                    )}
+                    data-testid="save-button"
+                    className="header-save relative"
                   >
                     {isSaving ? (
                       <Loader2 className="h-4 w-4 animate-spin" />
                     ) : (
                       <Save className="h-5 w-5" />
+                    )}
+                    {/* Unsaved changes: a dot on its corner, like the dock's
+                        connection dot. */}
+                    {hasUnsavedChanges && hasRealChanges() && !isSaving && (
+                      <span
+                        data-testid="unsaved-dot"
+                        className="absolute -top-0.5 -right-0.5 h-2.5 w-2.5 rounded-full bg-primary ring-2 ring-background"
+                      />
                     )}
                   </Button>
                 </TooltipTrigger>
@@ -492,55 +528,24 @@ function App() {
           <TabBar />
 
           {/* Main content */}
-          <div className="flex flex-1 overflow-hidden">
-            {/* Left sidebar - Node palette */}
-            <aside className="flex h-full min-h-0 w-72 flex-col border-border border-r bg-card">
-              {!actualIsRemote && (
-                <div className="border-border border-b p-4 pb-2">
-                  <Button
-                    variant="outline"
-                    onClick={() => setExitConfirmOpen(true)}
-                    className="h-auto w-full justify-start gap-3 border-transparent bg-muted py-3 text-muted-foreground hover:border-destructive hover:bg-destructive/20 hover:text-destructive"
-                  >
-                    <ArrowLeft className="h-4 w-4" />
-                    <span className="font-medium text-sm">{t('titles.exit')}</span>
-                  </Button>
-                </div>
-              )}
-              <div className="min-h-0 flex-1 overflow-auto">
-                <NodePalette
-                  onOpenAutomationImport={() => setAutomationImportOpen(true)}
-                  onOpenImportYaml={() => setImportYamlOpen(true)}
-                />
-                <div className="border-t p-4">
-                  <h4 className="mb-2 font-medium text-muted-foreground text-xs">
-                    {t('labels.quickHelp')}
-                  </h4>
-                  <ul className="space-y-1 text-muted-foreground text-xs">
-                    <li>{t('help.clickNodesToAdd')}</li>
-                    <li>{t('help.dragToConnect')}</li>
-                    <li>{t('help.deleteToRemove')}</li>
-                    <li>{t('help.backspaceDeleteKey')}</li>
-                  </ul>
-                </div>
-              </div>
-              <div className="flex flex-col gap-2 border-t p-4">
-                <div className="flex items-center gap-4">
-                  {actualIsRemote && config.url && (
-                    <span className="text-green-600 text-xs">
-                      {t('status.connectedTo', { hostname: new URL(config.url).hostname })}
-                    </span>
-                  )}
-                  {actualConnectionError && (
-                    <span className="text-red-600 text-xs">{actualConnectionError}</span>
-                  )}
-                </div>
-                <div className="text-muted-foreground text-xs">
-                  <span>
-                    {t('titles.appName')} {`v${version}`}
-                  </span>
-                </div>
-              </div>
+          <div className="relative flex flex-1 overflow-hidden">
+            {/* Left sidebar - Node palette, folding to a dock over the canvas */}
+            <aside className={paletteAsideClass(paletteRail)}>
+              <NodePalette
+                onOpenAutomationImport={() => setAutomationImportOpen(true)}
+                onOpenImportYaml={() => setImportYamlOpen(true)}
+                onExit={actualIsRemote ? undefined : () => setExitConfirmOpen(true)}
+                rail={paletteRail}
+                onToggleRail={togglePaletteRail}
+                status={{
+                  text:
+                    actualIsRemote && config.url
+                      ? t('status.connectedTo', { hostname: new URL(config.url).hostname })
+                      : undefined,
+                  error: actualConnectionError || undefined,
+                }}
+                version={version}
+              />
             </aside>
 
             {/* Canvas */}
@@ -580,11 +585,25 @@ function App() {
                   onValueChange={(value) => setRightTab(value as RightPanelTab)}
                   className="flex min-h-0 flex-1 flex-col"
                 >
-                  <div className="flex items-center border-b">
-                    <TabsList className="grid flex-1 grid-cols-3 rounded-none border-b-0">
-                      <TabsTrigger value="properties">{t('labels.properties')}</TabsTrigger>
-                      <TabsTrigger value="yaml">{t('labels.yaml')}</TabsTrigger>
-                      <TabsTrigger value="simulator">{t('labels.debug')}</TabsTrigger>
+                  {/* Properties / YAML / Debug as a switch, like the pickers'
+                      When / And / Then. */}
+                  <div className="flex items-center gap-1 py-2 pl-3">
+                    <TabsList className="grid h-auto flex-1 grid-cols-3 rounded-[10px] border border-foreground/10 p-[3px]">
+                      {(
+                        [
+                          ['properties', t('labels.properties')],
+                          ['yaml', t('labels.yaml')],
+                          ['simulator', t('labels.debug')],
+                        ] as const
+                      ).map(([value, label]) => (
+                        <TabsTrigger
+                          key={value}
+                          value={value}
+                          className="rounded-[7px] py-1.5 data-[state=active]:bg-card data-[state=active]:font-semibold"
+                        >
+                          {label}
+                        </TabsTrigger>
+                      ))}
                     </TabsList>
                     <Button
                       variant="ghost"
@@ -606,63 +625,66 @@ function App() {
                     </Button>
                   </div>
 
-                <div className="flex flex-1 flex-col overflow-hidden">
-                  <TabsContent value="properties" className="mt-0 flex-1 overflow-hidden">
-                    <PropertyPanel />
-                  </TabsContent>
-                  <TabsContent value="yaml" className="mt-0 flex-1 overflow-hidden">
-                    <Suspense fallback={<PanelLoading />}>
-                      <YamlPreview />
-                    </Suspense>
-                  </TabsContent>
-                  <TabsContent value="simulator" className="mt-0 flex-1 overflow-hidden">
-                    <div className="flex h-full flex-col">
-                      {/* Shared Speed Control */}
-                      <div className="border-b p-4">
-                        <div className="mb-2 flex items-center justify-between">
-                          <h4 className="font-medium text-muted-foreground text-xs">
-                            {t('labels.debugControls')}
-                          </h4>
-                          <div className="flex gap-1">
-                            <Button
-                              onClick={handleImport}
-                              variant="ghost"
-                              size="icon"
-                              className="h-6 w-6"
-                              title={t('buttons.importJson')}
-                            >
-                              <FileUp className="h-3.5 w-3.5" />
-                            </Button>
-                            <Button
-                              onClick={handleExport}
-                              variant="ghost"
-                              size="icon"
-                              className="h-6 w-6"
-                              title={t('titles.exportJson')}
-                            >
-                              <FileDown className="h-3.5 w-3.5" />
-                            </Button>
-                          </div>
-                        </div>
-                        <SpeedControl speed={simulationSpeed} onSpeedChange={setSimulationSpeed} />
-                      </div>
-
+                  <div className="flex flex-1 flex-col overflow-hidden">
+                    <TabsContent value="properties" className="mt-0 flex-1 overflow-hidden">
+                      <PropertyPanel />
+                    </TabsContent>
+                    <TabsContent value="yaml" className="mt-0 flex-1 overflow-hidden">
                       <Suspense fallback={<PanelLoading />}>
-                        {/* Simulation Section */}
-                        <div className="flex-1 border-b">
-                          <TraceSimulator />
+                        <YamlPreview />
+                      </Suspense>
+                    </TabsContent>
+                    <TabsContent value="simulator" className="mt-0 flex-1 overflow-hidden">
+                      <div className="flex h-full flex-col">
+                        {/* Shared Speed Control */}
+                        <div className="border-b p-4">
+                          <div className="mb-2 flex items-center justify-between">
+                            <h4 className="font-medium text-muted-foreground text-xs">
+                              {t('labels.debugControls')}
+                            </h4>
+                            <div className="flex gap-1">
+                              <Button
+                                onClick={handleImport}
+                                variant="ghost"
+                                size="icon"
+                                className="h-6 w-6"
+                                title={t('buttons.importJson')}
+                              >
+                                <FileUp className="h-3.5 w-3.5" />
+                              </Button>
+                              <Button
+                                onClick={handleExport}
+                                variant="ghost"
+                                size="icon"
+                                className="h-6 w-6"
+                                title={t('titles.exportJson')}
+                              >
+                                <FileDown className="h-3.5 w-3.5" />
+                              </Button>
+                            </div>
+                          </div>
+                          <SpeedControl
+                            speed={simulationSpeed}
+                            onSpeedChange={setSimulationSpeed}
+                          />
                         </div>
 
-                        {/* Trace Section */}
-                        <div className="flex-1">
-                          <AutomationTraceViewer />
-                        </div>
-                      </Suspense>
-                    </div>
-                  </TabsContent>
-                </div>
-              </Tabs>
-            </ResizablePanel>
+                        <Suspense fallback={<PanelLoading />}>
+                          {/* Simulation Section */}
+                          <div className="flex-1 border-b">
+                            <TraceSimulator />
+                          </div>
+
+                          {/* Trace Section */}
+                          <div className="flex-1">
+                            <AutomationTraceViewer />
+                          </div>
+                        </Suspense>
+                      </div>
+                    </TabsContent>
+                  </div>
+                </Tabs>
+              </ResizablePanel>
             )}
           </div>
         </div>

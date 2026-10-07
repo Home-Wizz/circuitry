@@ -2,7 +2,6 @@ import type { Edge, Node, OnBeforeDelete, OnConnectEnd } from '@xyflow/react';
 import {
   Background,
   BackgroundVariant,
-  Controls,
   type EdgeTypes,
   MarkerType,
   MiniMap,
@@ -12,10 +11,18 @@ import {
   ReactFlow,
   useReactFlow,
 } from '@xyflow/react';
-import { Eye, EyeOff } from 'lucide-react';
-import { type DragEvent, type MouseEvent as ReactMouseEvent, useCallback, useMemo, useRef, useState } from 'react';
+import {
+  type DragEvent,
+  type MouseEvent as ReactMouseEvent,
+  useCallback,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { useTranslation } from 'react-i18next';
 import { CanvasContextMenu, type ContextMenuTarget } from '@/components/canvas/CanvasContextMenu';
+import { type Point, useRightDragSelect } from '@/components/canvas/useRightDragSelect';
+import { nodesInBox } from '@/lib/canvasEdits';
 import { type CanvasExtent, CanvasScrollbars } from '@/components/canvas/CanvasScrollbars';
 import { QuickAddMenu, type QuickAddPosition } from '@/components/canvas/QuickAddMenu';
 import {
@@ -25,21 +32,11 @@ import {
   HintEdge,
   LoopBackEdge,
 } from '@/components/edges';
-import {
-  ActionNode,
-  ConditionNode,
-  DelayNode,
-  JoinNode,
-  SequenceEndNode,
-  SequenceStartNode,
-  SetVariablesNode,
-  StartNode,
-  TriggerNode,
-  WaitNode,
-} from '@/components/nodes';
+import { EmptyCanvasPrompt } from '@/components/canvas/EmptyCanvasPrompt';
+import { NODE_COMPONENTS } from '@/components/nodes/nodeComponents';
+import { stepTone } from '@/config/nodeTypeCatalog';
 import type { NodeTypeConfig } from '@/components/panels/NodePalette';
 import { NodeToolbar } from '@/components/toolbar/NodeToolbar';
-import { Button } from '@/components/ui/button';
 import { useDarkMode } from '@/hooks/useDarkMode';
 import { type CompoundBlockKey, createCompoundBlock } from '@/lib/block-factories';
 import { buildQuickAddConnections, type QuickAddDirection } from '@/lib/quick-add';
@@ -55,19 +52,8 @@ interface QuickAddState {
   direction: QuickAddDirection;
 }
 
-// New node types should be added here as needed!
-const nodeTypes: NodeTypes = {
-  trigger: TriggerNode,
-  condition: ConditionNode,
-  action: ActionNode,
-  delay: DelayNode,
-  wait: WaitNode,
-  set_variables: SetVariablesNode,
-  start: StartNode,
-  join: JoinNode,
-  sequence_start: SequenceStartNode,
-  sequence_end: SequenceEndNode,
-};
+// New node types are added in nodes/nodeComponents.ts.
+const nodeTypes: NodeTypes = NODE_COMPONENTS;
 
 const edgeTypes: EdgeTypes = {
   deletable: DeletableEdge,
@@ -106,10 +92,24 @@ export function FlowCanvas() {
   const [quickAdd, setQuickAdd] = useState<QuickAddState | null>(null);
   const [contextMenuTarget, setContextMenuTarget] = useState<ContextMenuTarget | null>(null);
   const closeContextMenu = useCallback(() => setContextMenuTarget(null), []);
+
+  // Right-drag on empty canvas: a box that selects the nodes it touches,
+  // then the selection's menu (Duplicate, Copy, Cut, Delete). A box that
+  // touches nothing clears the selection and opens no menu.
+  const onBox = useCallback(
+    (a: Point, b: Point) => {
+      const touched = new Set(nodesInBox(nodes, screenToFlowPosition(a), screenToFlowPosition(b)));
+      onNodesChange(nodes.map((n) => ({ type: 'select', id: n.id, selected: touched.has(n.id) })));
+      if (touched.size > 0) setContextMenuTarget({ kind: 'selection', screenX: b.x, screenY: b.y });
+    },
+    [nodes, onNodesChange, screenToFlowPosition]
+  );
+  const { box: rightDragBox, openMenu } = useRightDragSelect(reactFlowWrapper, onBox);
   // Minimap visibility toggle — per user request, collapsible since it's
   // permanent screen real estate that's only useful once a flow has enough
   // nodes to need an overview. Defaults closed per explicit user request.
-  const [minimapOpen, setMinimapOpen] = useState(false);
+  // Shown or hidden from the left panel's menu (NodePalette.tsx).
+  const minimapOpen = useFlowStore((state) => state.minimapOpen);
 
   // Right-click menu (Copy/Cut/Paste/Delete) — see CanvasContextMenu.tsx. A
   // right-click on a node that isn't already part of a multi-selection
@@ -128,14 +128,10 @@ export function FlowCanvas() {
         // `.selected` flag but doesn't go through onSelectionChange below.
         selectNode(node.id);
       }
-      setContextMenuTarget({
-        kind: 'node',
-        screenX: event.clientX,
-        screenY: event.clientY,
-        nodeId: node.id,
-      });
+      const at = { screenX: event.clientX, screenY: event.clientY };
+      openMenu(() => setContextMenuTarget({ kind: 'node', ...at, nodeId: node.id }));
     },
-    [nodes, setNodes, selectNode]
+    [nodes, setNodes, selectNode, openMenu]
   );
 
   // xyflow's dedicated double-click event — separate from both a single
@@ -150,15 +146,33 @@ export function FlowCanvas() {
     notifyNodeDoubleClicked();
   }, [notifyNodeDoubleClicked]);
 
-  const onEdgeContextMenu = useCallback((event: ReactMouseEvent, edge: Edge) => {
-    event.preventDefault();
-    setContextMenuTarget({ kind: 'edge', screenX: event.clientX, screenY: event.clientY, edge });
-  }, []);
+  const onEdgeContextMenu = useCallback(
+    (event: ReactMouseEvent, edge: Edge) => {
+      event.preventDefault();
+      const at = { screenX: event.clientX, screenY: event.clientY };
+      openMenu(() => setContextMenuTarget({ kind: 'edge', ...at, edge }));
+    },
+    [openMenu]
+  );
 
-  const onPaneContextMenu = useCallback((event: ReactMouseEvent | MouseEvent) => {
-    event.preventDefault();
-    setContextMenuTarget({ kind: 'pane', screenX: event.clientX, screenY: event.clientY });
-  }, []);
+  // Right-click on the box a shift-drag left around the selection.
+  const onSelectionContextMenu = useCallback(
+    (event: ReactMouseEvent) => {
+      event.preventDefault();
+      const at = { screenX: event.clientX, screenY: event.clientY };
+      openMenu(() => setContextMenuTarget({ kind: 'selection', ...at }));
+    },
+    [openMenu]
+  );
+
+  const onPaneContextMenu = useCallback(
+    (event: ReactMouseEvent | MouseEvent) => {
+      event.preventDefault();
+      const at = { screenX: event.clientX, screenY: event.clientY };
+      openMenu(() => setContextMenuTarget({ kind: 'pane', ...at }));
+    },
+    [openMenu]
+  );
 
   // Bounds panning to where the flow's own nodes actually are, instead of
   // xyflow's default infinite pan — per user request ("the UI allows for
@@ -405,6 +419,7 @@ export function FlowCanvas() {
 
   // Style edges based on simulation state, trace state, and selected node
   const styledEdges = useMemo(() => {
+    const typeById = new Map(nodes.map((node) => [node.id, node.type]));
     return edges.map((edge) => {
       // Check if this edge is part of the execution path during simulation
       const targetIdx = executionPath.indexOf(edge.target);
@@ -471,9 +486,12 @@ export function FlowCanvas() {
         return { ...edge };
       }
 
-      // Determine edge styling based on state (priority: simulation > trace > selection)
-      let edgeStyle = { strokeWidth: 2, stroke: isDarkMode ? '#94a3b8' : '#64748b' };
-      let markerEnd = { type: MarkerType.ArrowClosed, color: isDarkMode ? '#94a3b8' : '#64748b' };
+      // Determine edge styling based on state (priority: simulation > trace > selection).
+      // At rest a wire takes a light tint of the step it comes from, so a
+      // path can be followed by colour.
+      const wireColour = `hsl(var(--${stepTone(typeById.get(edge.source))}) / 0.75)`;
+      let edgeStyle = { strokeWidth: 2, stroke: wireColour };
+      let markerEnd = { type: MarkerType.ArrowClosed, color: wireColour };
 
       if (isActiveInSimulation) {
         // Simulation takes precedence - green for active path
@@ -499,6 +517,7 @@ export function FlowCanvas() {
     });
   }, [
     edges,
+    nodes,
     isSimulating,
     executionPath,
     simulationEdgeIds,
@@ -524,6 +543,7 @@ export function FlowCanvas() {
         onNodeContextMenu={onNodeContextMenu}
         onEdgeContextMenu={onEdgeContextMenu}
         onPaneContextMenu={onPaneContextMenu}
+        onSelectionContextMenu={onSelectionContextMenu}
         onDragOver={onDragOver}
         onDrop={onDrop}
         panOnScroll={isMacOS()}
@@ -549,20 +569,9 @@ export function FlowCanvas() {
         className={cn('canvas-modern-bg', isDarkMode ? 'dark' : undefined)}
         proOptions={{ hideAttribution: true }}
       >
-        {/* Two-tier grid (fine dots + a coarser line grid every 6th cell),
-            the same layering technique tldraw/Figma-style canvases use for a
-            grid that reads as "structured" up close and "textured" zoomed
-            out, rather than one flat repeating dot pattern — per user
-            request to modernize the canvas background. A radial vignette
-            (canvas-modern-bg, index.css) sits underneath both so the canvas
-            reads as a soft-lit surface instead of a flat fill. */}
-        <Background
-          id="canvas-bg-lines"
-          variant={BackgroundVariant.Lines}
-          gap={120}
-          lineWidth={1}
-          color={isDarkMode ? 'rgba(148, 163, 184, 0.12)' : 'rgba(100, 116, 139, 0.10)'}
-        />
+        {/* A plain dot grid over a soft radial vignette (canvas-modern-bg,
+            index.css); the coarser line grid that sat over it was removed
+            on request, as clutter. */}
         <Background
           id="canvas-bg-dots"
           variant={BackgroundVariant.Dots}
@@ -570,30 +579,13 @@ export function FlowCanvas() {
           size={1.4}
           color={isDarkMode ? 'rgba(148, 163, 184, 0.55)' : 'rgba(100, 116, 139, 0.4)'}
         />
+        {nodes.length === 0 && <EmptyCanvasPrompt />}
         {/* The floating "+Add" toolbar that used to live here (CanvasAddMenu)
             was removed per explicit user request — it was always a second,
             redundant way to reach the same When/And/Then dialogs the
             sidebar's own Trigger/Condition/Action buttons already open (see
             NodePalette.tsx). Its former spot at the top of the sidebar now
             hosts the Open Automation button instead. */}
-        <Controls />
-        {/* Collapsible per user request — the minimap is only really useful
-            once a flow has enough nodes to need an overview, but it always
-            took up the same corner of screen space. The toggle button lives
-            in the same corner (stacks above the minimap itself when open,
-            via ReactFlow's own Panel stacking for a shared position) so it's
-            still discoverable when collapsed. */}
-        <Panel position="bottom-right" className="!m-0">
-          <Button
-            variant="outline"
-            size="icon"
-            className="mb-2 h-8 w-8 bg-background/90"
-            onClick={() => setMinimapOpen((open) => !open)}
-            title={minimapOpen ? t('buttons.hideMinimap') : t('buttons.showMinimap')}
-          >
-            {minimapOpen ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-          </Button>
-        </Panel>
         {minimapOpen && (
           <MiniMap
             nodeStrokeWidth={3}
@@ -607,30 +599,11 @@ export function FlowCanvas() {
             // chrome (see useHaThemeSync.ts) so this follows suit too.
             bgColor="hsl(var(--card))"
             maskColor={isDarkMode ? 'rgba(0, 0, 0, 0.6)' : 'rgba(240, 240, 240, 0.6)'}
-            nodeClassName={(node) => {
-              switch (node.type) {
-                case 'trigger':
-                  return 'fill-amber-50 stroke-amber-400';
-                case 'condition':
-                  return 'fill-blue-50 stroke-blue-400';
-                case 'action':
-                  return 'fill-green-50 stroke-green-400';
-                case 'delay':
-                  return 'fill-purple-50 stroke-purple-400';
-                case 'wait':
-                  return 'fill-orange-50 stroke-orange-400';
-                case 'set_variables':
-                  return 'fill-cyan-50 stroke-cyan-400';
-                case 'start':
-                  return 'fill-emerald-50 stroke-emerald-500';
-                case 'join':
-                case 'sequence_start':
-                case 'sequence_end':
-                  return 'fill-indigo-50 stroke-indigo-400';
-                default:
-                  return 'fill-slate-100 stroke-slate-400';
-              }
-            }}
+            // Each step in its kind's colour, as on the canvas (nodeTypeCatalog's
+            // tone): a tinted fill and a solid edge.
+            nodeColor={(node) => `hsl(var(--${stepTone(node.type)}) / 0.35)`}
+            nodeStrokeColor={(node) => `hsl(var(--${stepTone(node.type)}))`}
+            className="overflow-hidden rounded-[14px] border border-foreground/10 shadow-[0_6px_20px_rgba(0,0,0,0.15)]"
           />
         )}
 
@@ -663,6 +636,13 @@ export function FlowCanvas() {
 
       <CanvasScrollbars wrapperRef={reactFlowWrapper} extent={contentExtent} />
 
+      {rightDragBox && (
+        <div
+          data-testid="right-drag-box"
+          className="pointer-events-none absolute z-10 rounded-sm border border-primary bg-primary/10"
+          style={rightDragBox}
+        />
+      )}
       <CanvasContextMenu target={contextMenuTarget} onClose={closeContextMenu} />
 
       <QuickAddMenu

@@ -45,7 +45,9 @@ export interface GraphWalkHooks {
  * section 2):
  * - A step runs, then its token goes down every edge out of it; several
  *   edges are a parallel, one token per edge.
- * - A condition runs its test and goes down its true or its false edges.
+ * - A condition runs its test and goes down its true or its false edges;
+ *   one that can't be evaluated goes down its false edges, as HA's
+ *   if/else does (#128).
  *   With no edge on that side, a list member (no `_blockKey`, one way in,
  *   the true edge of a condition with one true edge, not reached from that
  *   condition's else) takes its list head's else (2.2); otherwise the
@@ -58,14 +60,19 @@ export interface GraphWalkHooks {
  *   they have all finished, got there or not (#111).
  * - A count loop's test going back to its init node goes to what follows
  *   the init (the counter isn't reset; 2.4).
- * - An until test that can't be evaluated leaves the loop (HA; bug #63).
+ * - An until test that can't be evaluated leaves the loop (HA; bug #63),
+ *   and so does a member of its list, through the list's exit: HA reads
+ *   the list as one test (#128).
  * - `stop` ends the run; inside a parallel the other branches finish first
  *   and nothing after them runs.
  * The graph is normalized first (analyzer/normalize.ts: disabled steps,
- * loop anchors, path endings), as every strategy and gate reads it.
+ * loop anchors, path endings), as every strategy and gate reads it, but
+ * tests meeting at one step are left as drawn: this reads the meeting
+ * itself, each test on its own (#128: an OR of them is the strategies'
+ * way to write it, and is checked against this reading).
  */
 export function walkGraph(graph: FlowGraph, triggerIdx: number, hooks: GraphWalkHooks): void {
-  const flow = normalizeGraph(graph);
+  const flow = normalizeGraph(graph, { meetings: false, copies: false });
   const nodes = new Map(flow.nodes.map((n) => [n.id, n]));
   const edges = flow.edges.filter((e) => e.type !== 'hint' && e.type !== 'choose-hint');
   const backEdges = findBackEdges(flow);
@@ -142,7 +149,37 @@ export function walkGraph(graph: FlowGraph, triggerIdx: number, hooks: GraphWalk
   const isUntilTest = (node: FlowNode): boolean =>
     blockKey(node) === 'repeat_until' ||
     (typeof blockKey(node) !== 'string' &&
-      out(node.id).some((e) => e.sourceHandle === 'false' && backEdges.has(e.id)));
+      out(node.id).some((e) => e.sourceHandle === 'false' && backEdges.has(e.id))) ||
+    // A member of an until test's list (`until: [A, B]`): HA reads the
+    // list as the loop's one test (#128).
+    (forwardIn(node.id).length === 1 &&
+      isMemberOf(node.id, forwardIn(node.id)[0].source) &&
+      isUntilTest(nodes.get(forwardIn(node.id)[0].source)!));
+
+  /** Whether `id` is a member of the list of `head`, the condition before
+   * it (2.2): it has no "no" edge of its own and inherits the list's else. */
+  const isMemberOf = (id: string, head: string): boolean => {
+    const node = nodes.get(id);
+    return (
+      node?.type === 'condition' &&
+      forwardIn(id).length === 1 &&
+      forwardIn(id)[0].source === head &&
+      !out(id).some((e) => e.sourceHandle === 'false') &&
+      inheritedElse(id) !== null
+    );
+  };
+
+  /** Where an until test's list goes when the loop is left: the "yes"
+   * edges of its last member. HA reads `until: [A, B]` as one test, and a
+   * member that can't be evaluated ends the loop there (#63, #128). */
+  const untilExit = (id: string): FlowEdge[] => {
+    let current = id;
+    for (;;) {
+      const yes = out(current).filter((e) => e.sourceHandle === 'true');
+      if (yes.length !== 1 || !isMemberOf(yes[0].target, current)) return yes;
+      current = yes[0].target;
+    }
+  };
 
   /** Runs one node; returns where its token goes next ([] : the path ends). */
   const step = (id: string): Move[] => {
@@ -152,9 +189,11 @@ export function walkGraph(graph: FlowGraph, triggerIdx: number, hooks: GraphWalk
     hooks.visit?.(node);
     if (node.type === 'condition') {
       const result = hooks.test(node);
-      // An until test that can't be evaluated ends the loop (bug #63);
-      // anywhere else an error reads as false.
-      const passed = result === true || (result === null && isUntilTest(node));
+      // An until test that can't be evaluated ends the loop (bug #63),
+      // also a member of its list; anywhere else an error reads as false,
+      // as HA's if/else reads it (#128).
+      if (result === null && isUntilTest(node)) return untilExit(id).flatMap(target);
+      const passed = result === true;
       const side = out(id).filter((e) => e.sourceHandle === (passed ? 'true' : 'false'));
       if (side.length > 0) return side.flatMap(target);
       if (passed) return [];
@@ -286,7 +325,15 @@ export function walkGraph(graph: FlowGraph, triggerIdx: number, hooks: GraphWalk
         }
       }
     }
-    const merged = tokens.filter((t) => t === token || (t.at === at && t.waiting));
+    // #133: at a meeting point, with every token already there, waiting or
+    // not yet looked at (a fan-out's branch that goes straight there
+    // arrives before the others are marked): they go on as one. Not one
+    // that came down a loop's back edge, which waits for that loop's next
+    // pass.
+    const meeting = forwardIn(at).length > 1;
+    const merged = tokens.filter(
+      (t) => t === token || (t.at === at && (t.waiting || (meeting && t.loop === undefined)))
+    );
     tokens = tokens.filter((t) => !merged.includes(t));
     // Every branch it waited for has finished: none still counts for it.
     for (const t of tokens) t.owes = t.owes.filter((j) => j !== at);

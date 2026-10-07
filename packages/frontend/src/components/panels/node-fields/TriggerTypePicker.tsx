@@ -17,10 +17,12 @@ import {
   Tag,
   TrendingUp,
   Webhook,
+  type LucideIcon,
   Zap,
 } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { recipeChoiceKey, triggerPickKey } from '@/components/canvas/pickerCurrent';
 import { TruncatedTooltip } from '@/components/ui/truncated-tooltip';
 import {
   Command,
@@ -31,12 +33,12 @@ import {
   CommandList,
 } from '@/components/ui/command';
 import type { DeviceTrigger } from '@/hooks/useDeviceAutomation';
+import { useTriggerCatalog } from '@/hooks/useHaCatalog';
 import { getDomainColor } from '@/lib/domain-colors';
 import { getDomainIcon } from '@/lib/domain-icons';
 import {
-  ENTITY_TRIGGER_CATEGORIES,
   type EntityTriggerCategory,
-  groupCategoriesByDomain,
+  groupCategoriesByType,
   type TriggerRecipe,
 } from '@/lib/triggerRecipes';
 import { cn } from '@/lib/utils';
@@ -81,7 +83,7 @@ import { TriggerTargetPicker } from './TriggerTargetPicker';
 // TypeResultsPanel below) so WhenTriggerDialog.tsx's Miller-column modal can
 // reuse the exact same grouping/labeling/results-rendering rather than
 // re-deriving it.
-export const PLATFORM_ICONS: Record<TriggerPlatform, React.ComponentType<{ className?: string }>> = {
+export const PLATFORM_ICONS: Record<TriggerPlatform, LucideIcon> = {
   state: Zap,
   numeric_state: TrendingUp,
   time: Clock,
@@ -149,7 +151,14 @@ export const TYPE_GROUPS: Array<{ key: TriggerPickerGroupKey; platforms: Trigger
   { key: 'timeAndSun', platforms: ['time', 'time_pattern', 'sun', 'calendar'] },
   {
     key: 'homeAssistant',
-    platforms: ['event', 'homeassistant', 'template', 'webhook', 'conversation', 'persistent_notification'],
+    platforms: [
+      'event',
+      'homeassistant',
+      'template',
+      'webhook',
+      'conversation',
+      'persistent_notification',
+    ],
   },
   { key: 'generic', platforms: ['device', 'state', 'numeric_state'] },
   { key: 'integrations', platforms: ['mqtt', 'zone', 'tag', 'geo_location'] },
@@ -220,7 +229,7 @@ export const DOMAIN_GROUP_LABELS: Record<string, string> = {
   alarm_control_panel: 'Alarm panel',
   remote: 'Remote',
   button: 'Button',
-  select: 'Dropdown',
+  select: 'Select',
   text: 'Text',
   counter: 'Counter',
   todo: 'To-do list',
@@ -239,19 +248,35 @@ export const DOMAIN_GROUP_LABELS: Record<string, string> = {
   sensor: 'Sensor',
 };
 
-/**
+/*
  * DOMAIN_GROUP_ORDER's own sequence mirrors real HA's "Add trigger" dialog
  * grouping (Light/Switch/Fan first, Binary sensor/Sensor last, ...) — but per
  * direct user request, the "Device types" list (this component's "By type"
- * tree below, and WhenTriggerDialog.tsx's Miller-column root section built
- * from the same two constants) renders alphabetically by resolved label
- * instead. Derived rather than reordering DOMAIN_GROUP_ORDER itself, so that
- * array still documents HA's own grouping for anyone comparing against the
- * real dialog.
+ * tree below, and WhenTriggerDialog.tsx's Miller-column root section)
+ * renders alphabetically by resolved label instead (sortedDomainGroups).
+ * DOMAIN_GROUP_ORDER itself is kept as it is, so that array still documents
+ * HA's own grouping for anyone comparing against the real dialog.
  */
-export const SORTED_DOMAIN_GROUP_ORDER: string[] = [...DOMAIN_GROUP_ORDER].sort((a, b) =>
-  (DOMAIN_GROUP_LABELS[a] ?? a).localeCompare(DOMAIN_GROUP_LABELS[b] ?? b)
-);
+
+/** A domain's label in the "Device types" list: the catalog's, or, for a
+ * domain only a type discovered from HA's descriptions brings, its
+ * category's heading (HA's name for the integration). */
+export function domainGroupLabel(domain: string, categories: EntityTriggerCategory[]): string {
+  return DOMAIN_GROUP_LABELS[domain] ?? categories[0]?.heading ?? domain;
+}
+
+/** The domains in the "Device types" list, alphabetically by label: every
+ * domain with a category (the catalog's own, in the same order as
+ * SORTED_DOMAIN_GROUP_ORDER, and any HA's descriptions add). */
+export function sortedDomainGroups(
+  categoriesByDomain: Map<string, EntityTriggerCategory[]>
+): string[] {
+  return [...categoriesByDomain.entries()]
+    .filter(([, categories]) => categories.length > 0)
+    .map(([domain, categories]) => ({ domain, label: domainGroupLabel(domain, categories) }))
+    .sort((a, b) => a.label.localeCompare(b.label))
+    .map(({ domain }) => domain);
+}
 
 interface TriggerTypePickerProps {
   entities: HassEntity[];
@@ -280,7 +305,9 @@ export function TriggerTypePicker({
   // and a binary_sensor's "Battery" (low/normal) are different categories
   // that happen to share a name, only disambiguated by which group they're
   // under.
-  const categoriesByDomain = useMemo(() => groupCategoriesByDomain(), []);
+  // The catalog as the connected HA has it (hooks/useHaCatalog.ts).
+  const catalog = useTriggerCatalog();
+  const categoriesByDomain = useMemo(() => groupCategoriesByType(catalog), [catalog]);
 
   const toggleDomain = (domain: string) => {
     setExpandedDomains((prev) => {
@@ -298,14 +325,16 @@ export function TriggerTypePicker({
   const normalizedCategorySearch = categorySearch.trim().toLowerCase();
   const categorySearchResults = useMemo(() => {
     if (!normalizedCategorySearch) return null;
-    return ENTITY_TRIGGER_CATEGORIES.filter(
-      (category) =>
-        category.label.toLowerCase().includes(normalizedCategorySearch) ||
-        (DOMAIN_GROUP_LABELS[category.domain] ?? category.domain)
-          .toLowerCase()
-          .includes(normalizedCategorySearch)
-    ).sort((a, b) => a.label.localeCompare(b.label));
-  }, [normalizedCategorySearch]);
+    return catalog
+      .filter(
+        (category) =>
+          category.label.toLowerCase().includes(normalizedCategorySearch) ||
+          (DOMAIN_GROUP_LABELS[category.domain] ?? category.domain)
+            .toLowerCase()
+            .includes(normalizedCategorySearch)
+      )
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [normalizedCategorySearch, catalog]);
 
   return (
     <div className="flex flex-col gap-3">
@@ -371,14 +400,17 @@ export function TriggerTypePicker({
                       onClick={() => setSelectedCategory(category)}
                       className={cn(
                         'flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-sm hover:bg-muted',
-                        selectedCategory?.groupKey === category.groupKey && 'bg-muted text-foreground'
+                        selectedCategory?.groupKey === category.groupKey &&
+                          'bg-muted text-foreground'
                       )}
                     >
                       <Zap className="h-3.5 w-3.5 shrink-0 text-trigger" />
                       <TruncatedTooltip content={category.label}>
                         <span className="min-w-0 flex-1 truncate">{category.label}</span>
                       </TruncatedTooltip>
-                      <TruncatedTooltip content={DOMAIN_GROUP_LABELS[category.domain] ?? category.domain}>
+                      <TruncatedTooltip
+                        content={DOMAIN_GROUP_LABELS[category.domain] ?? category.domain}
+                      >
                         <span className="shrink-0 truncate text-muted-foreground text-xs">
                           {DOMAIN_GROUP_LABELS[category.domain] ?? category.domain}
                         </span>
@@ -389,10 +421,10 @@ export function TriggerTypePicker({
               )
             ) : (
               <div className="space-y-0.5">
-                {SORTED_DOMAIN_GROUP_ORDER.map((domain) => {
+                {sortedDomainGroups(categoriesByDomain).map((domain) => {
                   const categories = categoriesByDomain.get(domain);
                   if (!categories || categories.length === 0) return null;
-                  const domainLabel = DOMAIN_GROUP_LABELS[domain] ?? domain;
+                  const domainLabel = domainGroupLabel(domain, categories);
 
                   // Single-category domain: a flat, directly-selectable leaf
                   // (no expand step) — matches real HA's "Cover"/"Light"/...
@@ -485,7 +517,10 @@ export function TriggerTypePicker({
             <CommandList className="max-h-[200px]">
               <CommandEmpty>{t('nodes:triggers.picker.noResults')}</CommandEmpty>
               {TYPE_GROUPS.map((group) => (
-                <CommandGroup key={group.key} heading={t(`nodes:triggers.picker.groups.${group.key}`)}>
+                <CommandGroup
+                  key={group.key}
+                  heading={t(`nodes:triggers.picker.groups.${group.key}`)}
+                >
                   {group.platforms.map((platform) => {
                     const Icon = PLATFORM_ICONS[platform];
                     const label = t(`nodes:triggers.platforms.${platform}`);
@@ -558,6 +593,8 @@ export function TypeResultsPanel({
           label={recipe.label}
           description={recipe.description}
           onSelect={() => onSelectRecipe([], recipe)}
+          pickKey={triggerPickKey(recipe.fields.trigger)}
+          choiceKey={recipeChoiceKey(recipe.id, [])}
         />
       ))}
     </div>

@@ -2,7 +2,7 @@ import type { TriggerPlatform } from '@circuitry/shared';
 import { getTriggerDefaults } from '@/config/triggerFields';
 import type { DeviceTrigger } from '@/hooks/useDeviceAutomation';
 import { defaultThreshold, triggerIsTargetless } from '@/lib/nativeThreshold';
-import { getTriggerEnumField } from '@/lib/triggerEnumField';
+import { picksZone } from '@/lib/nativeZone';
 import type { TriggerRecipe } from '@/lib/triggerRecipes';
 
 /**
@@ -14,9 +14,15 @@ import type { TriggerRecipe } from '@/lib/triggerRecipes';
  */
 export type TriggerSelection =
   | { kind: 'platform'; platform: TriggerPlatform }
-  | { kind: 'entityTarget'; entityId: string }
+  | { kind: 'entityTarget'; entityIds: string[] }
   | { kind: 'deviceTrigger'; trigger: DeviceTrigger }
-  | { kind: 'recipe'; entityIds: string[]; recipe: TriggerRecipe };
+  | {
+      kind: 'recipe';
+      entityIds: string[];
+      recipe: TriggerRecipe;
+      /** A whole area as its target ("Anything in <room>"), instead of entities. */
+      areaId?: string;
+    };
 
 /**
  * Single source of truth for turning a trigger-picker selection into the
@@ -26,17 +32,26 @@ export type TriggerSelection =
  * shot from the "+Add > When" Miller-column modal) call this instead of
  * each re-deriving the platform/entity_id/to/from/attribute mapping.
  */
-/** The entities picked for a zone trigger are zones: its `zone` option,
- * not its target (#118 -- HA's target there is the people and device
- * trackers, and zone occupancy has none). */
-const picksZone = (trigger: string): boolean => getTriggerEnumField(trigger)?.optionsKey === 'zone';
-
 /** Whether picking this recipe asks for entities first: not for a
  * trigger with no target in HA and nothing else to pick (sun, moon; #118 --
  * the moon has no entities, so its trigger couldn't be added at all). */
 export function triggerRecipeTakesEntities(recipe: TriggerRecipe): boolean {
   const { trigger } = recipe.fields;
-  return !triggerIsTargetless(trigger) || picksZone(trigger);
+  return !recipeIsTargetless(recipe) || picksZone('trigger', trigger);
+}
+
+/** Whether a recipe's type can target a whole area: a purpose-specific
+ * type with a target (not one whose picked entities are its zones). A
+ * legacy type takes entities only. */
+export function triggerRecipeTakesArea(recipe: TriggerRecipe): boolean {
+  const { trigger } = recipe.fields;
+  return trigger.includes('.') && !recipeIsTargetless(recipe) && !picksZone('trigger', trigger);
+}
+
+/** Whether a recipe's type has no target: as HA describes it, for a type
+ * the tables don't know, else the tables'. */
+function recipeIsTargetless(recipe: TriggerRecipe): boolean {
+  return recipe.fields.targetless ?? triggerIsTargetless(recipe.fields.trigger);
 }
 
 export function buildTriggerNodeData(selection: TriggerSelection): Record<string, unknown> {
@@ -48,7 +63,7 @@ export function buildTriggerNodeData(selection: TriggerSelection): Record<string
       // "By target" picker shortcut: jump straight to a `state` trigger
       // pre-filled with the chosen entity, rather than making the user pick
       // "State Change" afterward on the "By type" tab.
-      return { ...getTriggerDefaults('state'), entity_id: [selection.entityId] };
+      return { ...getTriggerDefaults('state'), entity_id: selection.entityIds };
 
     case 'deviceTrigger': {
       const { trigger } = selection;
@@ -77,12 +92,18 @@ export function buildTriggerNodeData(selection: TriggerSelection): Record<string
       // zone occupancy) gets none, whatever was picked (#118: HA refuses a
       // target there), and a zone trigger's picked zones are its zone.
       if (trigger.includes('.')) {
-        const zone = picksZone(trigger);
+        const zone = picksZone('trigger', trigger);
         // zone.entered/left still need a target (the people and device
         // trackers), which HA requires: an empty one, filled in the panel.
-        const target = triggerIsTargetless(trigger) ? undefined : { entity_id: zone ? [] : entityIds };
+        const target = recipeIsTargetless(recipe)
+          ? undefined
+          : selection.areaId && triggerRecipeTakesArea(recipe)
+            ? { area_id: selection.areaId }
+            : { entity_id: zone ? [] : entityIds };
         // A threshold type starts with the threshold the panel shows (#124).
-        const threshold = recipe.fields.options?.threshold ?? defaultThreshold('trigger', trigger);
+        const threshold = recipe.fields.thresholdless
+          ? undefined
+          : (recipe.fields.options?.threshold ?? defaultThreshold('trigger', trigger));
         return {
           trigger,
           ...(target ? { target } : {}),

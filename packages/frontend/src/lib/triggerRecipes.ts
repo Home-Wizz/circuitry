@@ -1,6 +1,7 @@
 import type { TriggerPlatform } from '@circuitry/shared';
 import { getThresholdUnit, type TypedThreshold } from '@/lib/nativeThreshold';
 import type { HassEntity } from '@/types/hass';
+import { prettify } from '@/lib/utils';
 
 /**
  * Client-side catalog of "trigger recipes" per entity domain (and, where it
@@ -81,6 +82,18 @@ export interface TriggerRecipeFields {
     offset?: { hours?: number; minutes?: number; seconds?: number };
     offset_type?: 'before' | 'after';
   };
+  /**
+   * Whether the type has no target, for a type the panel's tables don't
+   * know (one discovered from the connected HA's descriptions: HA describes
+   * no target for it). Unset: the tables answer (triggerIsTargetless).
+   */
+  targetless?: boolean;
+  /**
+   * The connected HA describes the type without a `threshold` (an HA from
+   * before the threshold rework, whose bounds are other fields): none is
+   * seeded (lib/haCatalog.ts sets it). Unset: the tables' threshold.
+   */
+  thresholdless?: boolean;
 }
 
 export interface TriggerRecipe {
@@ -115,6 +128,9 @@ export interface TriggerRecipe {
 export interface EntityTriggerCategory {
   groupKey: string;
   domain: string;
+  /** The entity domains its recipes act on, where they aren't `domain`'s
+   * own (a category discovered from HA's descriptions: its target's). */
+  entityDomains?: string[];
   deviceClass?: string;
   heading: string;
   label: string;
@@ -155,21 +171,41 @@ export const BINARY_SENSOR_CLASSES: Record<
   garage_door: { heading: 'Garage door', onLabel: 'Opened', offLabel: 'Closed' },
   gas: { heading: 'Gas', onLabel: 'Started detecting gas', offLabel: 'Stopped detecting gas' },
   heat: { heading: 'Heat', onLabel: 'Became hot', offLabel: 'Became not hot' },
-  light: { heading: 'Light', onLabel: 'Started detecting light', offLabel: 'Stopped detecting light' },
+  light: {
+    heading: 'Light',
+    onLabel: 'Started detecting light',
+    offLabel: 'Stopped detecting light',
+  },
   lock: { heading: 'Lock', onLabel: 'Unlocked', offLabel: 'Locked' },
   moisture: { heading: 'Moisture', onLabel: 'Became moist', offLabel: 'Became dry' },
-  motion: { heading: 'Motion', onLabel: 'Started detecting motion', offLabel: 'Stopped detecting motion' },
+  motion: {
+    heading: 'Motion',
+    onLabel: 'Started detecting motion',
+    offLabel: 'Stopped detecting motion',
+  },
   moving: { heading: 'Moving', onLabel: 'Started moving', offLabel: 'Stopped moving' },
   occupancy: { heading: 'Occupancy', onLabel: 'Became occupied', offLabel: 'Became not occupied' },
   opening: { heading: 'Opening', onLabel: 'Opened', offLabel: 'Closed' },
   plug: { heading: 'Plug', onLabel: 'Plugged in', offLabel: 'Unplugged' },
   power: { heading: 'Power', onLabel: 'Powered', offLabel: 'Not powered' },
   presence: { heading: 'Presence', onLabel: 'Present', offLabel: 'Not present' },
-  problem: { heading: 'Problem', onLabel: 'Started detecting problem', offLabel: 'Stopped detecting problem' },
+  problem: {
+    heading: 'Problem',
+    onLabel: 'Started detecting problem',
+    offLabel: 'Stopped detecting problem',
+  },
   running: { heading: 'Running', onLabel: 'Started running', offLabel: 'Stopped running' },
   safety: { heading: 'Safety', onLabel: 'Became unsafe', offLabel: 'Became safe' },
-  smoke: { heading: 'Smoke', onLabel: 'Started detecting smoke', offLabel: 'Stopped detecting smoke' },
-  sound: { heading: 'Sound', onLabel: 'Started detecting sound', offLabel: 'Stopped detecting sound' },
+  smoke: {
+    heading: 'Smoke',
+    onLabel: 'Started detecting smoke',
+    offLabel: 'Stopped detecting smoke',
+  },
+  sound: {
+    heading: 'Sound',
+    onLabel: 'Started detecting sound',
+    offLabel: 'Stopped detecting sound',
+  },
   tamper: {
     heading: 'Tamper',
     onLabel: 'Started detecting tampering',
@@ -366,7 +402,12 @@ const SENSOR_CLASSES: Record<string, string> = {
  */
 const SENSOR_NATIVE: Record<
   string,
-  { changedTrigger: string; changedDescription: string; thresholdTrigger: string; thresholdDescription: string }
+  {
+    changedTrigger: string;
+    changedDescription: string;
+    thresholdTrigger: string;
+    thresholdDescription: string;
+  }
 > = {
   moisture: {
     changedTrigger: 'moisture.changed',
@@ -449,13 +490,16 @@ const SENSOR_NATIVE: Record<
     changedTrigger: 'air_quality.voc_changed',
     changedDescription: 'Triggers when one or more volatile organic compound readings change.',
     thresholdTrigger: 'air_quality.voc_crossed_threshold',
-    thresholdDescription: 'Triggers when one or more volatile organic compound readings cross a threshold.',
+    thresholdDescription:
+      'Triggers when one or more volatile organic compound readings cross a threshold.',
   },
   volatile_organic_compounds_parts: {
     changedTrigger: 'air_quality.voc_ratio_changed',
-    changedDescription: 'Triggers when one or more volatile organic compound ratio readings change.',
+    changedDescription:
+      'Triggers when one or more volatile organic compound ratio readings change.',
     thresholdTrigger: 'air_quality.voc_ratio_crossed_threshold',
-    thresholdDescription: 'Triggers when one or more volatile organic compound ratio readings cross a threshold.',
+    thresholdDescription:
+      'Triggers when one or more volatile organic compound ratio readings cross a threshold.',
   },
   battery: {
     changedTrigger: 'battery.level_changed',
@@ -517,7 +561,10 @@ const COVER_CLASSES: Record<string, string> = {
  * moment you select it — it does not ask you to first drill into "Blind" vs
  * "Garage door" the way binary_sensor/sensor's device classes do.
  */
-function buildCategories(): { browsable: EntityTriggerCategory[]; lookupOnly: EntityTriggerCategory[] } {
+function buildCategories(): {
+  browsable: EntityTriggerCategory[];
+  lookupOnly: EntityTriggerCategory[];
+} {
   const categories: EntityTriggerCategory[] = [];
   const lookupOnly: EntityTriggerCategory[] = [];
 
@@ -527,7 +574,11 @@ function buildCategories(): { browsable: EntityTriggerCategory[]; lookupOnly: En
   // the older `state`/`to: 'on'` sugar these three used before — see
   // docs/trigger-picker-rebuild.md's native-trigger-format log entry for
   // which domains got this treatment and why the rest didn't yet.
-  const pluralDomainName: Record<string, string> = { light: 'lights', switch: 'switches', fan: 'fans' };
+  const pluralDomainName: Record<string, string> = {
+    light: 'lights',
+    switch: 'switches',
+    fan: 'fans',
+  };
   for (const domain of ['light', 'switch', 'fan'] as const) {
     const name = domain[0].toUpperCase() + domain.slice(1);
     const plural = pluralDomainName[domain];
@@ -684,8 +735,16 @@ function buildCategories(): { browsable: EntityTriggerCategory[]; lookupOnly: En
     } else if (deviceClass === 'damper') {
       // No dedicated trigger page — stays generic.
       recipes = [
-        { id: `cover_${deviceClass}_closed`, label: `${label} closed`, fields: { trigger: 'state', to: 'closed' } },
-        { id: `cover_${deviceClass}_opened`, label: `${label} opened`, fields: { trigger: 'state', to: 'open' } },
+        {
+          id: `cover_${deviceClass}_closed`,
+          label: `${label} closed`,
+          fields: { trigger: 'state', to: 'closed' },
+        },
+        {
+          id: `cover_${deviceClass}_opened`,
+          label: `${label} opened`,
+          fields: { trigger: 'state', to: 'open' },
+        },
       ];
     } else {
       recipes = [
@@ -704,7 +763,14 @@ function buildCategories(): { browsable: EntityTriggerCategory[]; lookupOnly: En
       ];
     }
     coverClassRecipes[deviceClass] = recipes;
-    lookupOnly.push({ groupKey: `cover:${deviceClass}`, domain: 'cover', deviceClass, heading: 'Cover', label, recipes });
+    lookupOnly.push({
+      groupKey: `cover:${deviceClass}`,
+      domain: 'cover',
+      deviceClass,
+      heading: 'Cover',
+      label,
+      recipes,
+    });
   }
   // Fallback for covers with no device_class set at all.
   const coverDefaultRecipes: TriggerRecipe[] = [
@@ -727,7 +793,9 @@ function buildCategories(): { browsable: EntityTriggerCategory[]; lookupOnly: En
   });
 
   // --- binary_sensor: one category per device class + generic fallback ---
-  for (const [deviceClass, { heading, onLabel, offLabel }] of Object.entries(BINARY_SENSOR_CLASSES)) {
+  for (const [deviceClass, { heading, onLabel, offLabel }] of Object.entries(
+    BINARY_SENSOR_CLASSES
+  )) {
     const native = BINARY_SENSOR_NATIVE[deviceClass];
     categories.push({
       groupKey: `binary_sensor:${deviceClass}`,
@@ -737,8 +805,18 @@ function buildCategories(): { browsable: EntityTriggerCategory[]; lookupOnly: En
       label: heading,
       recipes: native
         ? [
-            { id: 'bs_on', label: onLabel, description: native.onDescription, fields: { trigger: native.onTrigger } },
-            { id: 'bs_off', label: offLabel, description: native.offDescription, fields: { trigger: native.offTrigger } },
+            {
+              id: 'bs_on',
+              label: onLabel,
+              description: native.onDescription,
+              fields: { trigger: native.onTrigger },
+            },
+            {
+              id: 'bs_off',
+              label: offLabel,
+              description: native.offDescription,
+              fields: { trigger: native.offTrigger },
+            },
           ]
         : [
             { id: 'bs_on', label: onLabel, fields: { trigger: 'state', to: 'on' } },
@@ -790,7 +868,12 @@ function buildCategories(): { browsable: EntityTriggerCategory[]; lookupOnly: En
                 options: {
                   threshold: {
                     type: 'above',
-                    value: { number: 0, ...(getThresholdUnit(native.thresholdTrigger) ? { unit_of_measurement: getThresholdUnit(native.thresholdTrigger) } : {}) },
+                    value: {
+                      number: 0,
+                      ...(getThresholdUnit(native.thresholdTrigger)
+                        ? { unit_of_measurement: getThresholdUnit(native.thresholdTrigger) }
+                        : {}),
+                    },
                   },
                 },
               },
@@ -813,7 +896,11 @@ function buildCategories(): { browsable: EntityTriggerCategory[]; lookupOnly: En
     label: 'Sensor',
     recipes: [
       { id: 'sensor_changed', label: 'Value changed', fields: { trigger: 'state' } },
-      { id: 'sensor_threshold', label: 'Value crossed threshold', fields: { trigger: 'numeric_state' } },
+      {
+        id: 'sensor_threshold',
+        label: 'Value crossed threshold',
+        fields: { trigger: 'numeric_state' },
+      },
     ],
   });
 
@@ -893,7 +980,11 @@ function buildCategories(): { browsable: EntityTriggerCategory[]; lookupOnly: En
               value: {
                 number: 50,
                 ...(getThresholdUnit('media_player.volume_crossed_threshold')
-                  ? { unit_of_measurement: getThresholdUnit('media_player.volume_crossed_threshold') }
+                  ? {
+                      unit_of_measurement: getThresholdUnit(
+                        'media_player.volume_crossed_threshold'
+                      ),
+                    }
                   : {}),
               },
             },
@@ -927,7 +1018,8 @@ function buildCategories(): { browsable: EntityTriggerCategory[]; lookupOnly: En
       {
         id: 'climate_mode_changed',
         label: 'Thermostat mode changed',
-        description: 'Triggers when the HVAC mode of one or more thermostats changes to a specific mode.',
+        description:
+          'Triggers when the HVAC mode of one or more thermostats changes to a specific mode.',
         fields: { trigger: 'climate.hvac_mode_changed' },
       },
       {
@@ -969,7 +1061,8 @@ function buildCategories(): { browsable: EntityTriggerCategory[]; lookupOnly: En
       {
         id: 'climate_target_temp_threshold',
         label: 'Thermostat target temperature crossed threshold',
-        description: 'Triggers when the temperature setpoint of one or more thermostats crosses a threshold.',
+        description:
+          'Triggers when the temperature setpoint of one or more thermostats crosses a threshold.',
         fields: { trigger: 'climate.target_temperature_crossed_threshold' },
       },
       {
@@ -981,7 +1074,8 @@ function buildCategories(): { browsable: EntityTriggerCategory[]; lookupOnly: En
       {
         id: 'climate_target_humidity_threshold',
         label: 'Thermostat target humidity crossed threshold',
-        description: 'Triggers when the target humidity of one or more thermostats crosses a threshold.',
+        description:
+          'Triggers when the target humidity of one or more thermostats crosses a threshold.',
         fields: { trigger: 'climate.target_humidity_crossed_threshold' },
       },
     ],
@@ -1128,7 +1222,8 @@ function buildCategories(): { browsable: EntityTriggerCategory[]; lookupOnly: En
       {
         id: 'timer_remaining_time_reached',
         label: 'Timer remaining time reached',
-        description: 'Triggers when one or more running timers reach a specific remaining duration.',
+        description:
+          'Triggers when one or more running timers reach a specific remaining duration.',
         fields: { trigger: 'timer.remaining_time_reached' },
       },
     ],
@@ -1315,8 +1410,8 @@ function buildCategories(): { browsable: EntityTriggerCategory[]; lookupOnly: En
   categories.push({
     groupKey: 'select',
     domain: 'select',
-    heading: 'Dropdown',
-    label: 'Dropdown',
+    heading: 'Select',
+    label: 'Select',
     recipes: [
       {
         id: 'select_changed',
@@ -1353,7 +1448,8 @@ function buildCategories(): { browsable: EntityTriggerCategory[]; lookupOnly: En
       {
         id: 'water_heater_on',
         label: 'Water heater turned on',
-        description: 'Triggers when one or more water heaters turn on, regardless of the operation mode.',
+        description:
+          'Triggers when one or more water heaters turn on, regardless of the operation mode.',
         fields: { trigger: 'water_heater.turned_on' },
       },
       {
@@ -1365,7 +1461,8 @@ function buildCategories(): { browsable: EntityTriggerCategory[]; lookupOnly: En
       {
         id: 'water_heater_mode_changed',
         label: 'Water heater operation mode changed',
-        description: 'Triggers when the operation mode of one or more water heaters changes to a specific mode.',
+        description:
+          'Triggers when the operation mode of one or more water heaters changes to a specific mode.',
         fields: { trigger: 'water_heater.operation_mode_changed' },
       },
       {
@@ -1377,7 +1474,8 @@ function buildCategories(): { browsable: EntityTriggerCategory[]; lookupOnly: En
       {
         id: 'water_heater_target_temp_threshold',
         label: 'Water heater target temperature crossed threshold',
-        description: 'Triggers when the temperature setpoint of one or more water heaters crosses a threshold.',
+        description:
+          'Triggers when the temperature setpoint of one or more water heaters crosses a threshold.',
         fields: { trigger: 'water_heater.target_temperature_crossed_threshold' },
       },
     ],
@@ -1545,16 +1643,17 @@ function buildCategories(): { browsable: EntityTriggerCategory[]; lookupOnly: En
   });
 
   // --- sun ---
-  // All 8 dotted `sun.*` triggers (home-assistant.io/triggers/ index) — none
-  // of these existed in the catalog before this pass. Every one is a
+  // All 16 dotted `sun.*` triggers HA 2026.9 describes (its sun/triggers.yaml;
+  // the golden/blue hour, midnight sun and polar night ones were missing
+  // here until a check against HA's own descriptions). Every one is a
   // singleton (HA hardcodes `sun.sun` internally, no user-selectable
   // target/behavior — see NativeTriggerFields.tsx's `isSunSingleton`
-  // branch, added this pass to match NativeConditionFields.tsx's existing
-  // equivalent). `elevation_changed`/`elevation_crossed_threshold` are
-  // numeric (TYPED threshold, see nativeThreshold.ts); the other 6 are
-  // point-in-time event triggers with an `offset`/`offset_type`
-  // before/after pair instead (dawn/dusk additionally get a civil/nautical/
-  // astronomical `type` selector) — see lib/triggerOffsetField.ts.
+  // branch). `elevation_changed`/`elevation_crossed_threshold` are numeric
+  // (TYPED threshold, see nativeThreshold.ts); the others are point-in-time
+  // event triggers with an `offset`/`offset_type` before/after pair instead
+  // (dawn/dusk additionally get a civil/nautical/astronomical `type`, the
+  // golden and blue hour ones a morning/evening `period`) — see
+  // lib/triggerOffsetField.ts and lib/sunPeriodField.ts.
   categories.push({
     groupKey: 'sun',
     domain: 'sun',
@@ -1598,6 +1697,54 @@ function buildCategories(): { browsable: EntityTriggerCategory[]; lookupOnly: En
         fields: { trigger: 'sun.solar_midnight' },
       },
       {
+        id: 'sun_golden_hour_started',
+        label: 'Golden hour started',
+        description: 'Triggers when golden hour starts, in the morning, the evening, or either.',
+        fields: { trigger: 'sun.golden_hour_started' },
+      },
+      {
+        id: 'sun_golden_hour_ended',
+        label: 'Golden hour ended',
+        description: 'Triggers when golden hour ends, in the morning, the evening, or either.',
+        fields: { trigger: 'sun.golden_hour_ended' },
+      },
+      {
+        id: 'sun_blue_hour_started',
+        label: 'Blue hour started',
+        description: 'Triggers when blue hour starts, in the morning, the evening, or either.',
+        fields: { trigger: 'sun.blue_hour_started' },
+      },
+      {
+        id: 'sun_blue_hour_ended',
+        label: 'Blue hour ended',
+        description: 'Triggers when blue hour ends, in the morning, the evening, or either.',
+        fields: { trigger: 'sun.blue_hour_ended' },
+      },
+      {
+        id: 'sun_midnight_sun_started',
+        label: 'Midnight sun started',
+        description: 'Triggers when the midnight sun period starts and the sun stops setting.',
+        fields: { trigger: 'sun.midnight_sun_started' },
+      },
+      {
+        id: 'sun_midnight_sun_ended',
+        label: 'Midnight sun ended',
+        description: 'Triggers when the midnight sun period ends and the sun sets again.',
+        fields: { trigger: 'sun.midnight_sun_ended' },
+      },
+      {
+        id: 'sun_polar_night_started',
+        label: 'Polar night started',
+        description: 'Triggers when the polar night period starts and the sun stops rising.',
+        fields: { trigger: 'sun.polar_night_started' },
+      },
+      {
+        id: 'sun_polar_night_ended',
+        label: 'Polar night ended',
+        description: 'Triggers when the polar night period ends and the sun rises again.',
+        fields: { trigger: 'sun.polar_night_ended' },
+      },
+      {
         id: 'sun_elevation_changed',
         label: 'Sun elevation changed',
         description: 'Triggers when the elevation of the sun changes.',
@@ -1636,18 +1783,40 @@ function buildCategories(): { browsable: EntityTriggerCategory[]; lookupOnly: En
   // The legacy `event` platform (bare event_type/event_data matching, no
   // entity target at all) already exists separately in config/triggerFields.ts
   // and is untouched by this addition.
+  // One recipe, shared with the doorbell category below.
+  const EVENT_RECEIVED: TriggerRecipe = {
+    id: 'event_received',
+    label: 'Event received',
+    description: 'Triggers when one or more event entities receive a specific event type.',
+    fields: { trigger: 'event.received' },
+  };
   categories.push({
     groupKey: 'event',
     domain: 'event',
     heading: 'Event',
     label: 'Event',
+    recipes: [EVENT_RECEIVED],
+  });
+
+  // --- doorbell ---
+  // `doorbell.rang` (HA's doorbell/triggers.yaml): targets event entities of
+  // the doorbell device class, no options. Its own category (domain event,
+  // device class doorbell) so a doorbell event entity offers it by target,
+  // alongside the event entity's own `event.received`.
+  categories.push({
+    groupKey: 'event:doorbell',
+    domain: 'event',
+    deviceClass: 'doorbell',
+    heading: 'Doorbell',
+    label: 'Doorbell',
     recipes: [
       {
-        id: 'event_received',
-        label: 'Event received',
-        description: 'Triggers when one or more event entities receive a specific event type.',
-        fields: { trigger: 'event.received' },
+        id: 'doorbell_rang',
+        label: 'Doorbell rang',
+        description: 'Triggers when one or more doorbells ring.',
+        fields: { trigger: 'doorbell.rang' },
       },
+      EVENT_RECEIVED,
     ],
   });
 
@@ -1666,7 +1835,8 @@ function buildCategories(): { browsable: EntityTriggerCategory[]; lookupOnly: En
       {
         id: 'moon_phase_changed',
         label: 'Moon phase changed',
-        description: 'Triggers when the moon phase changes, optionally limited to a specific phase.',
+        description:
+          'Triggers when the moon phase changes, optionally limited to a specific phase.',
         fields: { trigger: 'moon.phase_changed' },
       },
     ],
@@ -1685,19 +1855,22 @@ function buildCategories(): { browsable: EntityTriggerCategory[]; lookupOnly: En
       {
         id: 'assist_satellite_idle',
         label: 'Satellite became idle',
-        description: 'Triggers when one or more Assist satellites become idle after having processed a command.',
+        description:
+          'Triggers when one or more Assist satellites become idle after having processed a command.',
         fields: { trigger: 'assist_satellite.idle' },
       },
       {
         id: 'assist_satellite_listening',
         label: 'Satellite started listening',
-        description: 'Triggers when one or more Assist satellites start listening for a command from someone.',
+        description:
+          'Triggers when one or more Assist satellites start listening for a command from someone.',
         fields: { trigger: 'assist_satellite.listening' },
       },
       {
         id: 'assist_satellite_processing',
         label: 'Satellite started processing',
-        description: 'Triggers when one or more Assist satellites start processing a command after having heard it.',
+        description:
+          'Triggers when one or more Assist satellites start processing a command after having heard it.',
         fields: { trigger: 'assist_satellite.processing' },
       },
       {
@@ -1776,27 +1949,136 @@ function buildCategories(): { browsable: EntityTriggerCategory[]; lookupOnly: En
   return { browsable: categories, lookupOnly };
 }
 
-const { browsable: BROWSABLE_CATEGORIES, lookupOnly: LOOKUP_ONLY_CATEGORIES } = buildCategories();
+/**
+ * Each recipe with an id no other has (#167): the generic recipes a
+ * builder repeats per device class (`bs_on`, `sensor_changed`, ...) get
+ * their category's key in front. A list keyed by recipe id (search
+ * results, a merged "Device types" group) otherwise kept rows from an
+ * earlier list: narrowing a search left every "... changed" row shown.
+ */
+function withUniqueRecipeIds<C extends EntityTriggerCategory>(categories: C[], others: C[]): C[] {
+  const counts = new Map<string, number>();
+  for (const category of [...categories, ...others])
+    for (const recipe of category.recipes) counts.set(recipe.id, (counts.get(recipe.id) ?? 0) + 1);
+  return categories.map((category) => ({
+    ...category,
+    recipes: category.recipes.map((recipe) =>
+      (counts.get(recipe.id) ?? 0) > 1
+        ? { ...recipe, id: `${category.groupKey}:${recipe.id}` }
+        : recipe
+    ),
+  }));
+}
+
+const built = buildCategories();
+const BROWSABLE_CATEGORIES = withUniqueRecipeIds(built.browsable, built.lookupOnly);
+const LOOKUP_ONLY_CATEGORIES = withUniqueRecipeIds(built.lookupOnly, built.browsable);
 
 /** What "By type" lists and searches — see buildCategories()'s doc comment for why this differs from the resolution map below. */
 export const ENTITY_TRIGGER_CATEGORIES: EntityTriggerCategory[] = BROWSABLE_CATEGORIES;
 
+/** The integration a trigger type belongs to in HA (`door` for
+ * `door.opened`), or null for a legacy platform (`state`, ...). */
+export function triggerTypeDomain(type: string): string | null {
+  const dot = type.indexOf('.');
+  return dot > 0 ? type.slice(0, dot) : null;
+}
+
 /**
- * Groups `ENTITY_TRIGGER_CATEGORIES` by originating domain, sorted by label
- * within each domain. Shared by TriggerTypePicker.tsx's "By type" tree and
- * WhenTriggerDialog.tsx's Miller-column modal — both need the same
- * domain -> categories map, just rendered differently (accordion tree vs.
- * cascading columns).
+ * The "Device types" groups, as HA lists its trigger types: one per
+ * integration a type belongs to (Door, Motion, Temperature, Air quality,
+ * ...: `door.opened` is a Door type whether it acts on a door sensor or a
+ * door cover), each one category holding that integration's types from
+ * every catalog category, each type once. A category's legacy recipes
+ * (`state` for a device class HA has no type of its own for: Cold,
+ * Connectivity, ...) stay under its entity domain, by category (Binary
+ * sensor › Cold). Shared by TriggerTypePicker.tsx's "By type" tree and
+ * WhenTriggerDialog.tsx's columns; sorted by label within a group.
  */
-export function groupCategoriesByDomain(): Map<string, EntityTriggerCategory[]> {
-  const map = new Map<string, EntityTriggerCategory[]>();
-  for (const category of ENTITY_TRIGGER_CATEGORIES) {
-    const list = map.get(category.domain);
-    if (list) list.push(category);
-    else map.set(category.domain, [category]);
+export function groupCategoriesByType(
+  categories: EntityTriggerCategory[] = ENTITY_TRIGGER_CATEGORIES
+): Map<string, EntityTriggerCategory[]> {
+  // Each HA integration's types, in catalog order, with the entity
+  // domains of the categories they came from and their names.
+  const typed = new Map<
+    string,
+    {
+      recipes: TriggerRecipe[];
+      types: Set<string>;
+      domains: Set<string>;
+      names: EntityTriggerCategory[];
+    }
+  >();
+  const legacy = new Map<string, EntityTriggerCategory[]>();
+  for (const category of categories) {
+    const own: TriggerRecipe[] = [];
+    for (const recipe of category.recipes) {
+      const key = triggerTypeDomain(recipe.fields.trigger);
+      if (key === null) {
+        own.push(recipe);
+        continue;
+      }
+      let group = typed.get(key);
+      if (!group) {
+        group = { recipes: [], types: new Set(), domains: new Set(), names: [] };
+        typed.set(key, group);
+      }
+      // The entities it acts on from every category that has it (a door
+      // sensor's and a door cover's), the type itself once.
+      for (const domain of category.entityDomains ?? [category.domain]) group.domains.add(domain);
+      group.names.push(category);
+      if (group.types.has(recipe.fields.trigger)) continue;
+      group.types.add(recipe.fields.trigger);
+      group.recipes.push(recipe);
+    }
+    if (own.length > 0) {
+      const list = legacy.get(category.domain) ?? [];
+      list.push(own.length === category.recipes.length ? category : { ...category, recipes: own });
+      legacy.set(category.domain, list);
+    }
   }
-  for (const list of map.values()) {
-    list.sort((a, b) => a.label.localeCompare(b.label));
+
+  const map = new Map<string, EntityTriggerCategory[]>();
+  for (const [key, group] of typed) {
+    // The integration's name: the category named for it (its domain's,
+    // or a device class of that name), else the first it came from.
+    const named =
+      group.names.find((c) => c.domain === key && !c.deviceClass) ??
+      group.names.find((c) => c.deviceClass === key) ??
+      group.names.find((c) => c.groupKey === key);
+    const label = named?.label ?? prettify(key);
+    map.set(key, [
+      {
+        groupKey: `type:${key}`,
+        domain: key,
+        entityDomains: [...group.domains],
+        heading: named?.heading ?? label,
+        label,
+        recipes: group.recipes,
+      },
+    ]);
+  }
+  // A legacy group that shares its name with an integration (Cover's
+  // `state` recipes for a damper; Vacuum's, Person's) joins it.
+  for (const [domain, list] of legacy) {
+    const sameName = map.get(domain);
+    if (sameName) {
+      const [merged] = sameName;
+      if (merged) {
+        merged.recipes = [...merged.recipes, ...list.flatMap((c) => c.recipes)];
+        merged.entityDomains = [
+          ...new Set([
+            ...(merged.entityDomains ?? []),
+            ...list.flatMap((c) => c.entityDomains ?? [c.domain]),
+          ]),
+        ];
+      }
+    } else {
+      map.set(
+        domain,
+        [...list].sort((a, b) => a.label.localeCompare(b.label))
+      );
+    }
   }
   return map;
 }
@@ -1826,6 +2108,11 @@ export function getEntityRecipeGroup(
     category =
       (deviceClass && CATEGORIES_BY_GROUP_KEY.get(`${domain}:${deviceClass}`)) ||
       CATEGORIES_BY_GROUP_KEY.get(`${domain}:default`);
+  } else if (domain === 'event') {
+    // A doorbell event entity has its own category (`doorbell.rang` too).
+    category =
+      (deviceClass && CATEGORIES_BY_GROUP_KEY.get(`event:${deviceClass}`)) ||
+      CATEGORIES_BY_GROUP_KEY.get('event');
   } else {
     category = CATEGORIES_BY_GROUP_KEY.get(domain);
   }

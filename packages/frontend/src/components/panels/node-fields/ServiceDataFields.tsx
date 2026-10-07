@@ -15,9 +15,11 @@ import {
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
 import { HaSelector, HaSwitch } from '@/ha';
+import { selectOptions, serviceFieldList } from '@/lib/serviceFields';
+import { cn, isRecord } from '@/lib/utils';
 import { DurationInput, type DurationValue } from './DurationField';
 
-interface ServiceField {
+export interface ServiceField {
   name?: string;
   description?: string;
   example?: unknown;
@@ -26,9 +28,12 @@ interface ServiceField {
 }
 
 interface ServiceDataFieldsProps {
-  serviceFields: Record<string, ServiceField>;
+  /** The service's `fields` as HA describes them (sections included). */
+  serviceFields: unknown;
   currentData: Record<string, unknown>;
   onChange: (field: string, value: unknown) => void;
+  /** False where they stand alone (a card's pill): no rule and heading above. */
+  framed?: boolean;
 }
 
 /**
@@ -62,28 +67,42 @@ export function ServiceDataFields({
   serviceFields,
   currentData,
   onChange,
+  framed = true,
 }: ServiceDataFieldsProps) {
   const { t } = useTranslation(['common', 'nodes']);
-  if (Object.keys(serviceFields).length === 0) {
+  if (serviceFieldList(serviceFields).length === 0) {
     return null;
   }
 
   return (
-    <div className="mt-3 flex flex-col gap-3 border-t pt-3">
-      <h4 className="mb-3 font-semibold text-muted-foreground text-xs">
-        {t('nodes:serviceDataFields.heading')}
-      </h4>
-      {Object.entries(serviceFields).map(([fieldName, field]) => (
+    <div className={cn('flex flex-col gap-3', framed && 'mt-3 border-t pt-3')}>
+      {framed && (
+        <h4 className="mb-3 font-semibold text-muted-foreground text-xs">
+          {t('nodes:serviceDataFields.heading')}
+        </h4>
+      )}
+      {serviceFieldList(serviceFields).map(([fieldName, field]) => (
         <ServiceDataField
           key={fieldName}
           fieldName={fieldName}
-          field={field}
+          field={asServiceField(field)}
           value={currentData[fieldName]}
           onChange={(value) => onChange(fieldName, value)}
         />
       ))}
     </div>
   );
+}
+
+/** A field's description, from what HA sends (unknown keys ignored). */
+export function asServiceField(raw: Record<string, unknown>): ServiceField {
+  return {
+    name: typeof raw.name === 'string' ? raw.name : undefined,
+    description: typeof raw.description === 'string' ? raw.description : undefined,
+    example: raw.example,
+    required: raw.required === true,
+    selector: isRecord(raw.selector) ? raw.selector : undefined,
+  };
 }
 
 function toStringArray(value: unknown): string[] {
@@ -98,7 +117,7 @@ interface ServiceDataFieldProps {
   onChange: (value: unknown) => void;
 }
 
-function ServiceDataField({ fieldName, field, value, onChange }: ServiceDataFieldProps) {
+export function ServiceDataField({ fieldName, field, value, onChange }: ServiceDataFieldProps) {
   const { t } = useTranslation(['common', 'nodes']);
   const selector = field.selector ?? {};
   const selectorType = Object.keys(selector)[0];
@@ -123,7 +142,14 @@ function ServiceDataField({ fieldName, field, value, onChange }: ServiceDataFiel
       const config = selectorConfig as { min?: number; max?: number; unit_of_measurement?: string };
       return wrap(
         <HaSelector
-          selector={{ number: { min: config.min, max: config.max, mode: 'box', unit_of_measurement: config.unit_of_measurement } }}
+          selector={{
+            number: {
+              min: config.min,
+              max: config.max,
+              mode: 'box',
+              unit_of_measurement: config.unit_of_measurement,
+            },
+          }}
           value={typeof value === 'number' ? value : undefined}
           onChange={(v) => onChange(typeof v === 'number' ? v : v ? Number(v) : undefined)}
           required={field.required}
@@ -143,10 +169,7 @@ function ServiceDataField({ fieldName, field, value, onChange }: ServiceDataFiel
     }
 
     case 'select': {
-      const config = selectorConfig as { options?: unknown[] };
-      const options = (config.options ?? []).map((opt) =>
-        typeof opt === 'string' ? { value: opt, label: opt } : (opt as { value: string; label: string })
-      );
+      const options = selectOptions(selectorConfig);
 
       if (isMultiple) {
         const values = toStringArray(value);
@@ -155,7 +178,13 @@ function ServiceDataField({ fieldName, field, value, onChange }: ServiceDataFiel
             selector={{ select: { options, multiple: true } }}
             value={values}
             onChange={(v) => onChange(Array.isArray(v) ? v : [])}
-            fallback={<IdList values={values} onChange={onChange} placeholder={t('placeholders.addValue')} />}
+            fallback={
+              <IdList
+                values={values}
+                onChange={onChange}
+                placeholder={t('placeholders.addValue')}
+              />
+            }
           />
         );
       }
@@ -216,7 +245,11 @@ function ServiceDataField({ fieldName, field, value, onChange }: ServiceDataFiel
           value={value ?? ''}
           onChange={onChange}
           fallback={
-            <EntitySelector value={String(value ?? '')} onChange={onChange} placeholder={placeholder} />
+            <EntitySelector
+              value={String(value ?? '')}
+              onChange={onChange}
+              placeholder={placeholder}
+            />
           }
         />
       );
@@ -232,7 +265,9 @@ function ServiceDataField({ fieldName, field, value, onChange }: ServiceDataFiel
           selector={{ [selectorType]: { multiple: isMultiple } }}
           value={isMultiple ? values : values[0]}
           onChange={(v) => onChange(isMultiple ? (Array.isArray(v) ? v : []) : v)}
-          fallback={<IdList values={values} onChange={onChange} placeholder={t('placeholders.addValue')} />}
+          fallback={
+            <IdList values={values} onChange={onChange} placeholder={t('placeholders.addValue')} />
+          }
         />
       );
     }
@@ -298,7 +333,11 @@ function ServiceDataField({ fieldName, field, value, onChange }: ServiceDataFiel
           onChange={onChange}
           fallback={
             <Textarea
-              value={typeof value === 'object' && value !== null ? JSON.stringify(value, null, 2) : ((value as string) ?? '')}
+              value={
+                typeof value === 'object' && value !== null
+                  ? JSON.stringify(value, null, 2)
+                  : ((value as string) ?? '')
+              }
               onChange={(e) => {
                 try {
                   onChange(JSON.parse(e.target.value));
@@ -324,7 +363,11 @@ function ServiceDataField({ fieldName, field, value, onChange }: ServiceDataFiel
           value={(value as string) ?? ''}
           onChange={(v) => onChange(typeof v === 'string' ? v : '')}
           fallback={
-            <Input type="time" value={(value as string) ?? ''} onChange={(e) => onChange(e.target.value)} />
+            <Input
+              type="time"
+              value={(value as string) ?? ''}
+              onChange={(e) => onChange(e.target.value)}
+            />
           }
         />
       );
@@ -336,7 +379,11 @@ function ServiceDataField({ fieldName, field, value, onChange }: ServiceDataFiel
           value={(value as string) ?? ''}
           onChange={(v) => onChange(typeof v === 'string' ? v : '')}
           fallback={
-            <Input type="date" value={(value as string) ?? ''} onChange={(e) => onChange(e.target.value)} />
+            <Input
+              type="date"
+              value={(value as string) ?? ''}
+              onChange={(e) => onChange(e.target.value)}
+            />
           }
         />
       );
@@ -412,7 +459,13 @@ function ServiceDataField({ fieldName, field, value, onChange }: ServiceDataFiel
             selector={field.selector ?? { text: { multiple: true } }}
             value={values}
             onChange={(v) => onChange(Array.isArray(v) ? v : [])}
-            fallback={<IdList values={values} onChange={onChange} placeholder={placeholder || t('placeholders.addValue')} />}
+            fallback={
+              <IdList
+                values={values}
+                onChange={onChange}
+                placeholder={placeholder || t('placeholders.addValue')}
+              />
+            }
           />
         );
       }

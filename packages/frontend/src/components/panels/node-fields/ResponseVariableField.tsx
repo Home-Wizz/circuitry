@@ -6,6 +6,10 @@ import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import { HaSwitch } from '@/ha';
 
+/** Variables the state-machine strategy keeps its place in (#129 added
+ * `pass_nodes`): a response stored under one of them would overwrite it. */
+const STATE_MACHINE_VARIABLES = ['current_node', 'flow_context', 'pass_nodes'];
+
 interface ResponseVariableFieldProps {
   /**
    * The live service registry's `response` metadata, when known. `undefined`
@@ -32,6 +36,8 @@ export function ResponseVariableField({
   handleResponseVariableChange,
 }: ResponseVariableFieldProps) {
   const { t } = useTranslation(['common', 'nodes']);
+  const name = responseVariable?.trim() ?? '';
+  const reserved = STATE_MACHINE_VARIABLES.includes(name) ? name : null;
   const inputAndAlert = (
     <>
       <Input
@@ -40,10 +46,12 @@ export function ResponseVariableField({
         onChange={handleResponseVariableChange}
         placeholder={t('nodes:responseVariableField.placeholder')}
       />
-      {responseVariable?.trim() === 'current_node' && (
+      {reserved && (
         <Alert variant="destructive" className="mt-2 border-0 px-0">
           <AlertTitle>{t('labels.warning')}</AlertTitle>
-          <AlertDescription>{t('nodes:responseVariableField.currentNodeWarning')}</AlertDescription>
+          <AlertDescription>
+            {t('nodes:responseVariableField.currentNodeWarning', { name: reserved })}
+          </AlertDescription>
         </Alert>
       )}
     </>

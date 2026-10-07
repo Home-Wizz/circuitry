@@ -32,6 +32,11 @@ export const SELECTED_NODE_STYLE: CSSProperties = {
   outlineOffset: '2px',
 };
 
+/** A node colour as the `--tone` the `.node-neon` disc (index.css) reads. */
+export function toneStyle(tone: NodeColorToken): CSSProperties & { '--tone': string } {
+  return { '--tone': `hsl(var(--${tone}))` };
+}
+
 export interface NodeColorClasses {
   /** Card border */
   border: string;
@@ -47,8 +52,6 @@ export interface NodeColorClasses {
   handle: string;
   /** Step-number / count badge */
   badge: string;
-  /** NodePalette drag button */
-  palette: string;
 }
 
 /**
@@ -71,7 +74,6 @@ export const NODE_COLORS: Record<NodeColorToken, NodeColorClasses> = {
     chip: 'bg-trigger-subtle',
     handle: 'bg-trigger! border-trigger!',
     badge: 'bg-trigger text-trigger-foreground',
-    palette: 'bg-trigger border-trigger text-trigger-foreground hover:bg-trigger/90',
   },
   condition: {
     border: 'border-condition',
@@ -81,7 +83,6 @@ export const NODE_COLORS: Record<NodeColorToken, NodeColorClasses> = {
     chip: 'bg-condition-subtle',
     handle: 'bg-condition! border-condition!',
     badge: 'bg-condition text-condition-foreground',
-    palette: 'bg-condition border-condition text-condition-foreground hover:bg-condition/90',
   },
   action: {
     border: 'border-action',
@@ -91,7 +92,6 @@ export const NODE_COLORS: Record<NodeColorToken, NodeColorClasses> = {
     chip: 'bg-action-subtle',
     handle: 'bg-action! border-action!',
     badge: 'bg-action text-action-foreground',
-    palette: 'bg-action border-action text-action-foreground hover:bg-action/90',
   },
   delay: {
     border: 'border-delay',
@@ -101,7 +101,6 @@ export const NODE_COLORS: Record<NodeColorToken, NodeColorClasses> = {
     chip: 'bg-delay-subtle',
     handle: 'bg-delay! border-delay!',
     badge: 'bg-delay text-delay-foreground',
-    palette: 'bg-delay border-delay text-delay-foreground hover:bg-delay/90',
   },
   wait: {
     border: 'border-wait',
@@ -111,7 +110,6 @@ export const NODE_COLORS: Record<NodeColorToken, NodeColorClasses> = {
     chip: 'bg-wait-subtle',
     handle: 'bg-wait! border-wait!',
     badge: 'bg-wait text-wait-foreground',
-    palette: 'bg-wait border-wait text-wait-foreground hover:bg-wait/90',
   },
   variables: {
     border: 'border-variables',
@@ -121,7 +119,6 @@ export const NODE_COLORS: Record<NodeColorToken, NodeColorClasses> = {
     chip: 'bg-variables-subtle',
     handle: 'bg-variables! border-variables!',
     badge: 'bg-variables text-variables-foreground',
-    palette: 'bg-variables border-variables text-variables-foreground hover:bg-variables/90',
   },
   start: {
     border: 'border-start',
@@ -131,7 +128,6 @@ export const NODE_COLORS: Record<NodeColorToken, NodeColorClasses> = {
     chip: 'bg-start-subtle',
     handle: 'bg-start! border-start!',
     badge: 'bg-start text-start-foreground',
-    palette: 'bg-start border-start text-start-foreground hover:bg-start/90',
   },
   join: {
     border: 'border-join',
@@ -141,7 +137,6 @@ export const NODE_COLORS: Record<NodeColorToken, NodeColorClasses> = {
     chip: 'bg-join-subtle',
     handle: 'bg-join! border-join!',
     badge: 'bg-join text-join-foreground',
-    palette: 'bg-join border-join text-join-foreground hover:bg-join/90',
   },
 };
 

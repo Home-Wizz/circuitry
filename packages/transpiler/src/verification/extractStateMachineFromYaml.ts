@@ -2,6 +2,14 @@ import type { BProgram, BStep } from './behaviorProgram';
 import { type BoolExpr, boolExprEquivalent, parseConditionExpr } from './boolean';
 import { normalizeTrigger, parseActionSequence } from './extractFromYaml';
 
+/** The loop bookkeeping a state carries (#157): steps at its start, and at
+ * the start of its condition's yes side. Taken out before the state is
+ * read; the gate compares it with what the graph's loops need. */
+export interface LoopSteps {
+  head: unknown[];
+  inThen: unknown[];
+}
+
 /**
  * Extracts the same per-node "state transition table" shape as
  * extractStateMachineFromGraph.ts, but read directly from the CANDIDATE
@@ -39,7 +47,9 @@ export interface YamlConditionState {
   errorTransition?: YamlTransition;
 }
 
-export type YamlStateSpec = YamlLeafState | YamlConditionState | { kind: 'malformed'; reason: string };
+export type YamlStateSpec = (YamlLeafState | YamlConditionState | { kind: 'malformed'; reason: string }) & {
+  loopSteps?: LoopSteps;
+};
 
 export interface YamlParallelEntrySpec {
   content: BProgram;
@@ -58,6 +68,10 @@ export interface StateMachineYamlExtraction {
   states: Map<string, YamlStateSpec>;
   parallelEntries: Map<string, YamlParallelEntrySpec>;
   entry: YamlEntrySpec;
+  /** Whether the dispatcher runs in the chunked run loop (#157). */
+  runLoop?: boolean;
+  /** The loop round variables set at the start (#157). */
+  loopVars?: string[];
 }
 
 function asArray(value: unknown): unknown[] {
@@ -122,7 +136,40 @@ function errorGuard(ifStep: Extract<BStep, { k: 'if' }>): Extract<BStep, { k: 'i
   return boolExprEquivalent(guard.cond, { op: 'not', arg: ifStep.cond }).equivalent ? guard : null;
 }
 
-function parseState(sequence: unknown[]): YamlStateSpec {
+const isMapping = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/** A loop bookkeeping step, by its alias (state-machine.ts writes
+ * `Loop rounds` and `Loop limit`; their exact form is the gate's to check). */
+function isLoopStep(step: unknown): boolean {
+  return isMapping(step) && (step.alias === 'Loop rounds' || step.alias === 'Loop limit');
+}
+
+/** A state's steps without its loop bookkeeping, and the bookkeeping. */
+function splitLoopSteps(sequence: unknown[]): { rest: unknown[]; loopSteps: LoopSteps } {
+  let i = 0;
+  while (i < sequence.length && isLoopStep(sequence[i])) i++;
+  const head = sequence.slice(0, i);
+  const rest = sequence.slice(i);
+  const inThen: unknown[] = [];
+  const ifSteps = rest.filter((s) => isMapping(s) && Array.isArray(s.if) && Array.isArray(s.then));
+  const out = rest.map((step) => {
+    if (ifSteps.length !== 1 || step !== ifSteps[0] || !isMapping(step)) return step;
+    const then = step.then as unknown[];
+    let k = 0;
+    while (k < then.length && isLoopStep(then[k])) k++;
+    inThen.push(...then.slice(0, k));
+    return k === 0 ? step : { ...step, then: then.slice(k) };
+  });
+  return { rest: out, loopSteps: { head, inThen } };
+}
+
+function parseState(raw: unknown[]): YamlStateSpec {
+  const { rest, loopSteps } = splitLoopSteps(raw);
+  return { ...parseStateSteps(rest), loopSteps };
+}
+
+function parseStateSteps(sequence: unknown[]): YamlStateSpec {
   const program = parseActionSequence(sequence);
 
   if (program.length === 1 && program[0].k === 'if') {
@@ -198,19 +245,74 @@ function findEntryExpression(steps: unknown[]): string | null {
 interface DispatcherBlocks {
   choose: unknown[];
   defaultBlock: unknown;
+  /** Whether the dispatcher runs in the chunked run loop (#157). */
+  runLoop: boolean;
+  /** What's wrong with the loops around the dispatcher, if anything. */
+  malformed?: string;
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/** The run loop's fixed bookkeeping (#157), read from state-machine.ts's
+ * generate(): exactly these steps, whatever the graph. With a loop in the
+ * graph the dispatcher runs in chunks of 9,999 rounds, so HA's 10,000-round
+ * limit never stops the dispatch loop, and each round records the state
+ * that ran before (each drawn loop counts its own rounds from it). Held to
+ * its exact form: a round that records the wrong state, or a chunk past
+ * HA's limit, still runs the same actions until a loop runs long. */
+const RUN_RESET = { variables: { run_rounds: 0 } };
+const RUN_UNTIL = '{{ current_node == "END" or run_rounds >= 9999 }}';
+const RUN_ROUND = {
+  variables: {
+    prev_node: '{{ this_node }}',
+    this_node: '{{ current_node }}',
+    run_rounds: '{{ run_rounds + 1 }}',
+  },
+};
+const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+
+function dispatchIn(steps: unknown[]): Record<string, unknown> | null {
+  const found = steps.find((s) => isRecord(s) && Array.isArray(s.choose));
+  return (found as Record<string, unknown> | undefined) ?? null;
 }
 
 function findChooseBlocks(steps: unknown[]): DispatcherBlocks | null {
   for (const step of steps) {
-    if (!step || typeof step !== 'object') continue;
-    const repeat = (step as Record<string, unknown>).repeat;
-    if (!repeat || typeof repeat !== 'object') continue;
-    for (const inner of asArray((repeat as Record<string, unknown>).sequence)) {
-      if (inner && typeof inner === 'object' && Array.isArray((inner as Record<string, unknown>).choose)) {
-        const innerObj = inner as Record<string, unknown>;
-        return { choose: innerObj.choose as unknown[], defaultBlock: innerObj.default };
-      }
+    if (!isRecord(step) || !isRecord(step.repeat)) continue;
+    const loopSteps = asArray(step.repeat.sequence);
+    const direct = dispatchIn(loopSteps);
+    if (direct) {
+      return { choose: direct.choose as unknown[], defaultBlock: direct.default, runLoop: false };
     }
+    // With a loop in the graph the dispatcher sits one level down, in the
+    // run loop (#157).
+    const run = loopSteps.find((s) => isRecord(s) && isRecord(s.repeat));
+    if (!isRecord(run) || !isRecord(run.repeat)) continue;
+    const runSteps = asArray(run.repeat.sequence);
+    const dispatch = dispatchIn(runSteps);
+    if (!dispatch) continue;
+    const exact =
+      loopSteps.length === 2 &&
+      same(loopSteps[0], RUN_RESET) &&
+      loopSteps[1] === run &&
+      run.alias === 'State Machine Run' &&
+      Object.keys(run).sort().join() === 'alias,repeat' &&
+      run.repeat.until === RUN_UNTIL &&
+      Object.keys(run.repeat).sort().join() === 'sequence,until' &&
+      runSteps.length === 2 &&
+      same(runSteps[0], RUN_ROUND) &&
+      runSteps[1] === dispatch;
+    return {
+      choose: dispatch.choose as unknown[],
+      defaultBlock: dispatch.default,
+      runLoop: true,
+      ...(exact
+        ? {}
+        : {
+            malformed: `the run loop around the dispatcher (#157) isn't the fixed form (reset run_rounds, then repeat in chunks of 9,999 rounds, recording the state before each): ${JSON.stringify(loopSteps).slice(0, 300)}`,
+          }),
+    };
   }
   return null;
 }
@@ -305,6 +407,32 @@ export function extractStateMachineFromYamlConfig(config: Record<string, unknown
     };
   }
   const chooseBlocks = dispatcher.choose;
+  const init = steps.find(
+    (s): s is Record<string, unknown> =>
+      isRecord(s) && isRecord(s.variables) && 'current_node' in s.variables
+  );
+  const initVars = init && isRecord(init.variables) ? init.variables : {};
+  const runInit =
+    initVars.prev_node === '' && initVars.this_node === '' && initVars.run_rounds === 0;
+  const loopVars = Object.keys(initVars).filter((k) => k.startsWith('loop_rounds_'));
+  const passProblem =
+    dispatcher.malformed ??
+    (dispatcher.runLoop && !runInit
+      ? 'the run loop (#157) is there but prev_node, this_node and run_rounds are not set with current_node'
+      : undefined) ??
+    (loopVars.some((k) => initVars[k] !== 0)
+      ? 'a loop round variable (#157) is not set to 0 with current_node'
+      : undefined);
+  if (passProblem) {
+    return {
+      isEmpty: false,
+      malformed: passProblem,
+      triggers,
+      states: new Map(),
+      parallelEntries: new Map(),
+      entry: { kind: 'malformed', reason: 'run loop' },
+    };
+  }
   if (!isExpectedDefaultBlock(dispatcher.defaultBlock)) {
     return {
       isEmpty: false,
@@ -338,5 +466,13 @@ export function extractStateMachineFromYamlConfig(config: Record<string, unknown
 
   const entry = parseEntryExpression(entryExpr);
 
-  return { isEmpty: false, triggers, states, parallelEntries, entry };
+  return {
+    isEmpty: false,
+    triggers,
+    states,
+    parallelEntries,
+    entry,
+    runLoop: dispatcher.runLoop,
+    loopVars,
+  };
 }

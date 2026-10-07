@@ -1,28 +1,26 @@
-import { Handle, type NodeProps, Position } from '@xyflow/react';
+import type { NodeProps } from '@xyflow/react';
 import { Ban } from 'lucide-react';
 import { memo } from 'react';
 import { useTranslation } from 'react-i18next';
-import { StepStopsHere } from '@/components/nodes/ConventionMarkers';
+import { JoinModeChoice, pathCountForm } from '@/components/panels/node-fields/JoinModeChoice';
 import { nodeTypes } from '@/config/nodeTypeCatalog';
+import { useIncomingPathCount } from '@/hooks/useIncomingPathCount';
 import { useNodeErrors } from '@/hooks/useNodeErrors';
 import { useTraceNodeState } from '@/hooks/useTraceNodeState';
-import { getTraceStateClass, NODE_COLORS, NODE_STATE_CLASSES, SELECTED_NODE_STYLE } from '@/lib/node-colors';
-import { cn } from '@/lib/utils';
+import { getTraceStateClass } from '@/lib/node-colors';
 import type { JoinNodeData } from '@/store/flow-store';
 import { useFlowStore } from '@/store/flow-store';
-import { NodeStatusBadge } from './NodeStatusBadge';
-
-const COLORS = NODE_COLORS.join;
+import { EditPill, PILL_TEXT } from './EditPill';
+import { StepFrame } from './StepCard';
 
 interface JoinNodeProps extends NodeProps {
   data: JoinNodeData;
 }
 
 /**
- * The "All" join card — an explicit, visible convergence point
- * for parallel branches, rendered as a compact pill (an "ALL"/"ANY"
- * block look) rather than relying on implicit graph-shape
- * inference. Metadata-only under the hood: HA's native `parallel:` action
+ * The join card — an explicit, visible convergence point for parallel
+ * branches, reading "Wait for [all paths]" with what it waits for set on
+ * the card itself, rather than relying on implicit graph-shape inference. Metadata-only under the hood: HA's native `parallel:` action
  * (already emitted by the existing convergence-detection codegen) already
  * *is* All-join semantics, so this node contributes no YAML step of its own.
  */
@@ -40,57 +38,56 @@ export const JoinNode = memo(function JoinNode({ id, data, selected }: JoinNodeP
   // reference, so this card and the Add Node panel/sidebar never drift.
   const JoinIcon = nodeTypes.find((n) => n.type === 'join')?.icon ?? Ban;
 
-  return (
-    <div
-      style={selected ? SELECTED_NODE_STYLE : undefined}
-      className={cn(
-        'relative min-w-[140px] rounded-lg border-2 px-4 py-3',
-        COLORS.border,
-        COLORS.bg,
-        'transition-all duration-200',
-        isActive && NODE_STATE_CLASSES.active,
-        isDisabled && 'border-dashed opacity-50 grayscale',
-        hasErrors && NODE_STATE_CLASSES.error,
-        getTraceStateClass(traceState)
-      )}
-    >
-      <NodeStatusBadge
-        errorMessages={errorMessages}
-        warningMessages={warningMessages}
-        isDisabled={isDisabled}
-      />
-      <Handle type="target" position={Position.Left} className={cn('w-3! h-3!', COLORS.handle)} />
+  const updateNodeData = useFlowStore((s) => s.updateNodeData);
+  const pathCount = useIncomingPathCount(id);
 
-      <div className="flex items-center gap-2">
-        <div className={cn('rounded p-1', COLORS.chip)}>
-          <JoinIcon className={cn('h-4 w-4', COLORS.text)} />
-        </div>
-        {/* Explicit "ALL" pill, not just an inferred graph shape */}
-        <span
-          className={cn(
-            'rounded-full px-2 py-0.5 font-bold text-[10px] tracking-wide',
-            COLORS.badge
-          )}
-        >
-          {mode === 'all' ? t('nodes:joinFields.modeAll') : t('nodes:joinFields.modeAny')}
-        </span>
-        <span className={cn('font-semibold text-sm', COLORS.text)}>
-          {data.alias || t('nodes:types.join')}
-        </span>
-        {stepNumber && (
-          <div
-            className={cn(
-              'ml-auto flex h-5 w-5 items-center justify-center rounded-full font-bold text-xs',
-              COLORS.badge
-            )}
-          >
-            {stepNumber}
-          </div>
+  // What it waits for, set on the card: "Wait for [both paths]" (counted
+  // from the paths coming in; "all paths" until two are connected).
+  const waitFor = (
+    <>
+      {t('nodes:joinFields.waitFor')}{' '}
+      <EditPill
+        tone="join"
+        testId="join-mode-pill"
+        ariaLabel={t('nodes:joinFields.editMode')}
+        contentClassName="w-80 p-1.5"
+        editor={() => (
+          <JoinModeChoice
+            mode={mode}
+            pathCount={pathCount}
+            onChange={(next) => updateNodeData(id, { mode: next })}
+          />
         )}
-      </div>
+      >
+        <span className={PILL_TEXT}>
+          {mode === 'any'
+            ? t('nodes:joinFields.pathsAny')
+            : t(`nodes:joinFields.pathsAll.${pathCountForm(pathCount)}`, { count: pathCount })}
+        </span>
+      </EditPill>
+    </>
+  );
 
-      <Handle type="source" position={Position.Right} className={cn('w-3! h-3!', COLORS.handle)} />
-      <StepStopsHere nodeId={id} />
-    </div>
+  return (
+    <StepFrame
+      nodeId={id}
+      tone="join"
+      icon={JoinIcon}
+      iconKey="join"
+      kind={t('nodes:types.join')}
+      sentence={data.alias || waitFor}
+      stepNumber={stepNumber}
+      selected={selected ?? false}
+      isActive={isActive}
+      isDisabled={isDisabled}
+      hasErrors={hasErrors}
+      errorMessages={errorMessages}
+      warningMessages={warningMessages}
+      traceClass={getTraceStateClass(traceState)}
+      roleLabel={null}
+      hasSourceHandle
+    >
+      {data.alias && <div className="text-foreground text-sm">{waitFor}</div>}
+    </StepFrame>
   );
 });

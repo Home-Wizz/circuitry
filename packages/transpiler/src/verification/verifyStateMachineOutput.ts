@@ -1,13 +1,15 @@
 import type { FlowGraph } from '@circuitry/shared';
 import { load as yamlLoad } from 'js-yaml';
 import { normalizeGraph } from '../analyzer/normalize';
+import { findBackEdges } from '../analyzer/topology';
 import type { BProgram } from './behaviorProgram';
 import { programsEquivalent } from './behaviorProgram';
 import { boolExprEquivalent } from './boolean';
-import { extractGraphSettings } from './extractFromGraph';
+import { extractGraphSettings, SharedLoopEntryError } from './extractFromGraph';
 import { extractYamlSettings } from './extractFromYaml';
 import {
   type EntrySpec,
+  expectedLoopBookkeeping,
   extractStateMachineFromGraph,
   type LeafState,
   type ParallelEntrySpec,
@@ -26,6 +28,9 @@ import { compareMetadata, compareTriggerSets } from './verifyNativeOutput';
 export interface VerifyResult {
   valid: boolean;
   reason?: string;
+  /** #134: the graph has two loops sharing an entry, which the reading of
+   * its parallel branches can't place. */
+  sharedLoopEntry?: SharedLoopEntryError;
 }
 
 /**
@@ -91,7 +96,11 @@ export function verifyStateMachineOutput(
     graph = extractStateMachineFromGraph(originalFlow);
     yaml = extractStateMachineFromYamlConfig(config as Record<string, unknown>);
   } catch (error) {
-    return { valid: false, reason: `state-machine behavior extraction threw: ${(error as Error).message}` };
+    return {
+      valid: false,
+      reason: `state-machine behavior extraction threw: ${(error as Error).message}`,
+      ...(error instanceof SharedLoopEntryError ? { sharedLoopEntry: error } : {}),
+    };
   }
 
   if (graph.isEmpty !== yaml.isEmpty) {
@@ -129,6 +138,21 @@ export function verifyStateMachineOutput(
 
   if (graph.isEmpty) return { valid: true };
   if (yaml.malformed) return { valid: false, reason: yaml.malformed };
+  // #157: a graph with a loop needs the run loop (so HA's 10,000-round
+  // limit never stops the dispatch loop) and each drawn loop its own round
+  // count; one without gets neither. Read from the graph itself, not from
+  // the strategy.
+  const hasLoops = findBackEdges(originalFlow).size > 0;
+  if (hasLoops !== Boolean(yaml.runLoop)) {
+    return {
+      valid: false,
+      reason: hasLoops
+        ? 'the graph has a loop, but the dispatcher is not in the run loop: HA would stop it after 10,000 rounds (#157)'
+        : 'the graph has no loop, but the dispatcher is in a run loop (#157)',
+    };
+  }
+  const loopDiff = compareLoopBookkeeping(originalFlow, yaml);
+  if (loopDiff) return { valid: false, reason: loopDiff };
 
   const entryDiff = compareEntry(graph.entry, yaml.entry);
   if (entryDiff) return { valid: false, reason: entryDiff };
@@ -231,6 +255,32 @@ function leafExpectedContent(state: LeafState): BProgram {
 
 function conditionBranchExpectedContent(t: Transition): BProgram {
   return t.kind === 'fanout' ? t.program : [];
+}
+
+/** #157: each drawn loop's round count, at its head, and its limit where
+ * the graph puts it -- exactly the form state-machine.ts writes; nothing
+ * anywhere else. A dropped or moved step still runs the same actions until
+ * a loop runs long, so nothing short of the exact form passes. */
+function compareLoopBookkeeping(
+  flow: FlowGraph,
+  yaml: ReturnType<typeof extractStateMachineFromYamlConfig>
+): string | null {
+  const expected = expectedLoopBookkeeping(flow);
+  const wantVars = Array.from({ length: expected.loops }, (_, i) => `loop_rounds_${i + 1}`);
+  if (JSON.stringify([...(yaml.loopVars ?? [])].sort()) !== JSON.stringify(wantVars.sort())) {
+    return `the loop round variables set at the start (${(yaml.loopVars ?? []).join(', ') || 'none'}) aren't one per drawn loop (${expected.loops}) (#157)`;
+  }
+  for (const [id, state] of yaml.states) {
+    const want = expected.states.get(id) ?? { head: [], inThen: [] };
+    const got = state.loopSteps ?? { head: [], inThen: [] };
+    if (JSON.stringify(got) !== JSON.stringify(want)) {
+      return `state "${id}": its loop round count and limit aren't the ones its loops need (#157): ${JSON.stringify(got).slice(0, 300)}`;
+    }
+  }
+  for (const id of expected.states.keys()) {
+    if (!yaml.states.has(id)) return `state "${id}", a loop's head, is missing (#157)`;
+  }
+  return null;
 }
 
 function compareStates(g: Map<string, StateSpec>, y: Map<string, YamlStateSpec>): string | null {

@@ -67,7 +67,6 @@ export function TriggerFields({ node, onChange: onChangeRaw, entities }: Trigger
     (key: string, value: unknown) => onChangeRaw(key, clearedToUnset(value)),
     [onChangeRaw]
   );
-  const { getFieldError } = useNodeErrors(node.id);
   // No fallback to 'state' here — an unset trigger is what tells us to show
   // the By target / By type picker below instead of the normal fields.
   const triggerType = getNodeDataString(node, 'trigger', '');
@@ -118,7 +117,7 @@ export function TriggerFields({ node, onChange: onChangeRaw, entities }: Trigger
   // with the chosen entity, rather than making the user pick "State Change"
   // afterward on the "By type" tab.
   const handleSelectEntityTarget = (entityId: string) => {
-    applyTriggerSelection({ kind: 'entityTarget', entityId });
+    applyTriggerSelection({ kind: 'entityTarget', entityIds: [entityId] });
   };
 
   // "By target" picker's results panel: committing one of the real
@@ -221,23 +220,46 @@ export function TriggerFields({ node, onChange: onChangeRaw, entities }: Trigger
             </FormField>
           )}
 
-          {/* Dynamic fields based on trigger type */}
-          <TriggerDynamicFields
-            effectiveTriggerType={effectiveTriggerType}
-            deviceId={deviceId}
-            node={node}
-            onChange={onChange}
-            entities={entities}
-            getFieldError={getFieldError}
-          />
-
-          {/* Universal trigger fields (id/enabled already have dedicated UI in
-              PropertyPanel.tsx for every node type — this only adds
-              `variables`, which is trigger-specific) — visible for every
-              platform, purpose-specific triggers included. */}
-          <TriggerAdvancedFields node={node} onChange={onChange} />
+          <TriggerConfigFields node={node} onChange={onChange} entities={entities} />
         </>
       )}
+    </>
+  );
+}
+
+/**
+ * A chosen trigger's own fields: its platform's (or purpose-specific
+ * type's) fields, then the fields every trigger has. The property panel
+ * shows them under the platform choice; the When picker's last column shows
+ * them before the trigger is added, so a pick is set up where it's made.
+ */
+export function TriggerConfigFields({ node, onChange: onChangeRaw, entities }: TriggerFieldsProps) {
+  // A cleared field is stored unset, not "" (see TriggerFields).
+  const onChange = useCallback(
+    (key: string, value: unknown) => onChangeRaw(key, clearedToUnset(value)),
+    [onChangeRaw]
+  );
+  const { getFieldError } = useNodeErrors(node.id);
+  const triggerType = getNodeDataString(node, 'trigger', '');
+  const deviceId = getNodeDataString(node, 'device_id');
+  const effectiveTriggerType = deviceId && triggerType !== 'device' ? 'device' : triggerType;
+  return (
+    <>
+      {/* Dynamic fields based on trigger type */}
+      <TriggerDynamicFields
+        effectiveTriggerType={effectiveTriggerType}
+        deviceId={deviceId}
+        node={node}
+        onChange={onChange}
+        entities={entities}
+        getFieldError={getFieldError}
+      />
+
+      {/* Universal trigger fields (id/enabled already have dedicated UI in
+          PropertyPanel.tsx for every node type — this only adds
+          `variables`, which is trigger-specific) — visible for every
+          platform, purpose-specific triggers included. */}
+      <TriggerAdvancedFields node={node} onChange={onChange} />
     </>
   );
 }
@@ -279,7 +301,9 @@ function TriggerDynamicFields({
   // `light.turned_on`) use the shared target/behavior field editor instead
   // of config/triggerFields.ts's static list — see NativeTriggerFields.tsx.
   if (effectiveTriggerType.includes('.')) {
-    return <NativeTriggerFields node={node} onChange={onChange} triggerType={effectiveTriggerType} />;
+    return (
+      <NativeTriggerFields node={node} onChange={onChange} triggerType={effectiveTriggerType} />
+    );
   }
 
   // Other trigger types use static field configuration

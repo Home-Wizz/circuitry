@@ -1,8 +1,13 @@
 import type { FlowGraph } from '@circuitry/shared';
 import { dump as yamlDump } from 'js-yaml';
 import { unwritableMeeting } from './analyzer/condition-meetings';
-import { untilLoopingBackToSeveral } from './analyzer/loop-entry-anchors';
+import { unwritablePathEnd } from './analyzer/path-endings';
+import {
+  untilFalseSideLeavingTheLoop,
+  untilLoopingBackToSeveral,
+} from './analyzer/loop-entry-anchors';
 import { nodesReadingLoopVariable } from './analyzer/loop-variable';
+import { stateMachineVariablesUsed } from './analyzer/state-machine-variables';
 import { normalizeGraph } from './analyzer/normalize';
 import { analyzeTopology, type TopologyAnalysis } from './analyzer/topology';
 import { type ValidationResult, validateFlowGraph } from './analyzer/validator';
@@ -133,6 +138,12 @@ export class FlowTranspiler {
         warnings,
       };
     }
+    // Decision D5: a path that ends inside a parallel branch where no stop
+    // or copy writes it.
+    const pathEnd = unwritablePathEnd(flow);
+    if (pathEnd !== null) {
+      return { success: false, errors: [pathEnd], warnings };
+    }
     const ambiguousUntil = untilLoopingBackToSeveral(flow);
     if (ambiguousUntil !== null) {
       return {
@@ -146,6 +157,18 @@ export class FlowTranspiler {
       };
     }
 
+    const untilLeaving = untilFalseSideLeavingTheLoop(flow);
+    if (untilLeaving !== null) {
+      return {
+        success: false,
+        errors: [
+          `When the until loop tested at "${untilLeaving}" fails its test, it goes back into the ` +
+            "loop and also on to a step that doesn't lead back. Home Assistant's until loop can " +
+            'only go round again: move that step into the loop body, or after the loop.',
+        ],
+        warnings,
+      };
+    }
     // Step 2: Analyze topology
     const analysis = this.analyzeTopology(flow);
 
@@ -304,6 +327,26 @@ export class FlowTranspiler {
     // the dispatch loop's instead. A loop read from YAML that does is kept
     // whole (written as a real `repeat:`); anything else is refused here
     // rather than saved doing something else.
+    // #160: a flow that sets or reads one of the state machine's own
+    // variables would move the machine or read its bookkeeping (HA's
+    // variables are one set for the run).
+    if (strategy.name === 'state-machine') {
+      const clashing = stateMachineVariablesUsed(flow);
+      if (clashing.length > 0) {
+        return {
+          success: false,
+          errors: [
+            `This flow can only be saved as a state machine, and it uses ${clashing
+              .map((name) => `\`${name}\``)
+              .join(', ')}, which the state machine keeps its own state in. Rename ` +
+              `${clashing.length === 1 ? 'that variable' : 'those variables'} in the flow.`,
+          ],
+          analysis,
+          warnings,
+        };
+      }
+    }
+
     if (strategy.name === 'state-machine') {
       const readers = nodesReadingLoopVariable(flow);
       if (readers.length > 0) {
@@ -320,12 +363,38 @@ export class FlowTranspiler {
       }
     }
 
+    // A graph the state machine itself can't write (decision D4): its
+    // reason, not the gate's words for a bug.
+    if (strategy.name === 'state-machine' && claim !== undefined) {
+      return {
+        success: false,
+        errors: [`This flow can't be saved: ${claim}.`],
+        analysis,
+        warnings,
+      };
+    }
+
     if (strategy.name === 'state-machine') {
-      const smVerification =
-        claim !== undefined
-          ? { valid: false, reason: claim }
-          : verifyStateMachineOutput(flow, yaml);
+      const smVerification = verifyStateMachineOutput(flow, yaml);
       if (!smVerification.valid) {
+        // #134: two loops going back to the same step, neither inside the
+        // other, where the state machine needs to know which encloses which
+        // (a parallel among them): the reason, not the gate's own words.
+        const shared =
+          'sharedLoopEntry' in smVerification ? smVerification.sharedLoopEntry : undefined;
+        if (shared) {
+          const [a, b] = shared.loops;
+          return {
+            success: false,
+            errors: [
+              `Two loops go back to "${shared.entryId}" (tested at "${a.testNodeId}" and ` +
+                `"${b.testNodeId}"), and neither is inside the other, so which one a branch belongs ` +
+                "to can't be told. Give each loop its own first step, or draw one loop inside the other.",
+            ],
+            analysis,
+            warnings,
+          };
+        }
         return {
           success: false,
           errors: [
@@ -530,7 +599,7 @@ export class FlowTranspiler {
         node.type === 'sequence_end'
       ) {
         m.type = node.type;
-        for (const key of ['alias', 'enabled', 'mode']) {
+        for (const key of ['alias', 'enabled', 'mode', '_frame']) {
           if (data[key] !== undefined) m[key] = data[key];
         }
       }

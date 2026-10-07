@@ -5,6 +5,65 @@ rebrand below were written under this project's previous name — FLODE —
 and are kept exactly as originally written for historical accuracy rather
 than edited to say "Circuitry" throughout.
 
+## [2.3.0] — 2026-10-07
+
+A redesigned editor: steps read as sentences on the canvas, the pickers are
+laid out like Home Assistant's own, and more automations are read and saved
+exactly as written.
+
+### Added
+- **Steps read as sentences** on the canvas, with their entities, settings
+  and durations as pills you can click to change.
+- **"Anything in <room>"**: a whole area as a step's target, so devices
+  added to it later count too.
+- **Duplicate, Replace… and "Select its whole flow"** in a step's
+  right-click menu; right-drag on the canvas selects with a box.
+- **Triggers and conditions your Home Assistant offers** that Circuitry
+  doesn't know yet appear in the pickers with Home Assistant's own names
+  and fields.
+- **An empty canvas** offers to add a trigger or open an automation.
+- **Colour step icons**, bundled (Microsoft Fluent Emoji, MIT).
+
+### Changed
+- **The When, And and Then pickers** follow Home Assistant's layout (areas
+  under floors, devices, device types, labels) and search finds trigger,
+  condition and action types too. A pick that still needs settings is set
+  up in the picker before it's added.
+- **The left panel** folds into a floating dock, and starts docked.
+- **The toolbar** holds zoom, fit and lock, with fewer, clearer align
+  buttons; wires and the minimap take their step's colour.
+- **The side panel** shows the step's card at the top and its settings in
+  sections.
+- **Building blocks** use Home Assistant's names, in English and German.
+
+### Fixed
+- **Pickers offer only entities a step can act on**, and actions only
+  entities that can do them; a step naming one Home Assistant would ignore
+  is flagged.
+- **Values an action needs** that Home Assistant's description doesn't mark
+  (a thermostat's HVAC mode, a calendar event's start and end, ...) are
+  flagged while empty.
+- **Threshold triggers and conditions** can be saved on Home Assistant
+  releases from before 2026.5.
+- **A condition Home Assistant can't evaluate** follows its "No" path, as
+  Home Assistant's if/else does.
+- **Loops in state-machine output** each get Home Assistant's full 10,000
+  rounds.
+- **Importing YAML** keeps the automation's settings, the names of blocks,
+  options and conditions, and values in the looser forms Home Assistant
+  accepts.
+- **More drawn shapes save as drawn** (paths that end inside a parallel
+  block or loop, branches that meet again); a shape Home Assistant can't
+  express is refused with the reason, and a save that fails says why.
+- **A duplicated or pasted step** gets its own id.
+- **Circuitry starts** when the browser refuses it site storage.
+- **The property panel** offers a service's grouped advanced options.
+
+### Known issues
+- Home Assistant 2026.10 refuses a State condition that combines "for" with
+  several states, an attribute or another entity's state, and disables the
+  automation. Circuitry still lets you build one; avoid it until a fix.
+
 ## [2.2.0] — 2026-09-28
 
 Circuitry now reads automations the way Home Assistant does, writes more

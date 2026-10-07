@@ -20,7 +20,8 @@ export interface NodeAction {
     | 'move'
     | 'align'
     | 'edit'
-    | 'delete';
+    | 'delete'
+    | 'view';
   /** Function to determine if this action should be enabled in the toolbar */
   isEnabled?: (context: NodeActionContext) => boolean;
   execute: (context: NodeActionContext) => void;

@@ -332,7 +332,7 @@ export function AutomationSaveDialog({ isOpen, onClose, onSaved }: AutomationSav
           {error && (
             <Alert variant="destructive">
               <AlertTriangle className="h-4 w-4" />
-              <AlertDescription>{error}</AlertDescription>
+              <AlertDescription className="whitespace-pre-line">{error}</AlertDescription>
             </Alert>
           )}
 

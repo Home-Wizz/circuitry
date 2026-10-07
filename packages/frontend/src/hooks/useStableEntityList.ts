@@ -33,17 +33,33 @@ import type { HassEntity } from '@/types/hass';
  * computation in its own `useMemo`; the point is only to give downstream
  * `useMemo`s (which key off this function's *return value*) a reference
  * that stays stable except when entities are actually added, removed, or
- * reassigned — not on every live-state-only tick.
+ * reassigned, or change features or device class — not on every
+ * live-state-only tick.
  */
 export function useStableEntityList<T extends HassEntity>(entities: T[]): T[] {
-  const stableRef = useRef<T[]>(entities);
-  const prevIdsRef = useRef<string>('');
+  // Each entity's features and device class are part of its identity here:
+  // the pickers offer actions by features (#130) and group by device class,
+  // so a change to either (an integration reloaded) must reach them.
+  return useStableValue(
+    entities,
+    entities
+      .map(
+        (e) =>
+          `${e.entity_id}:${e.attributes.supported_features ?? ''}:${e.attributes.device_class ?? ''}`
+      )
+      .join('|')
+  );
+}
 
-  const ids = entities.map((e) => e.entity_id).join('|');
-  if (ids !== prevIdsRef.current) {
-    prevIdsRef.current = ids;
-    stableRef.current = entities;
+/**
+ * Returns `value` with a stable reference across renders where `key` hasn't
+ * changed: the first `value` seen for each new key. The same idea as
+ * useStableEntityList, for any value with a cheap identity string.
+ */
+export function useStableValue<T>(value: T, key: string): T {
+  const stableRef = useRef<{ key: string; value: T } | null>(null);
+  if (stableRef.current === null || stableRef.current.key !== key) {
+    stableRef.current = { key, value };
   }
-
-  return stableRef.current;
+  return stableRef.current.value;
 }

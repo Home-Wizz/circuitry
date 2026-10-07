@@ -16,19 +16,109 @@ export function copyNodesToClipboard(context: NodeActionContext): void {
   context.setPasteCount(0);
 }
 
+const isTriggeredBy = (node: Node<FlowNodeData>) =>
+  node.type === 'condition' && node.data.condition === 'trigger';
+
+/** An id not taken yet: the id itself, else with _2, _3, ... */
+function freshId(id: string, taken: ReadonlySet<string>): string {
+  if (!taken.has(id)) return id;
+  let n = 2;
+  while (taken.has(`${id}_${n}`)) n++;
+  return `${id}_${n}`;
+}
+
+/** A condition's data with the "Triggered by" ids it names (its own and its
+ * sub-conditions') renamed. */
+function renameTriggerRefs(
+  data: Record<string, unknown>,
+  renamed: ReadonlyMap<string, string>
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...data };
+  if (data.condition === 'trigger') {
+    const rename = (id: unknown) => (typeof id === 'string' ? (renamed.get(id) ?? id) : id);
+    out.id = Array.isArray(data.id) ? data.id.map(rename) : rename(data.id);
+  }
+  if (Array.isArray(data.conditions)) {
+    out.conditions = data.conditions.map((sub) =>
+      sub && typeof sub === 'object' && !Array.isArray(sub)
+        ? renameTriggerRefs(sub as Record<string, unknown>, renamed)
+        : sub
+    );
+  }
+  return out;
+}
+
+/**
+ * The copies' data (#164): a copied step's `id:` is kept unless the canvas
+ * already has it, in which case the copy gets a fresh one (an id must be
+ * unique in an automation), and a copied "Triggered by" condition follows a
+ * copied trigger that was renamed, so a duplicated flow tests its own
+ * trigger rather than the original's. A "Triggered by" naming a trigger
+ * that wasn't copied keeps it.
+ */
+export function cloneStepData(
+  sourceNodes: Node<FlowNodeData>[],
+  canvasNodes: Node<FlowNodeData>[]
+): Map<string, FlowNodeData> {
+  const taken = new Set<string>();
+  for (const node of canvasNodes) {
+    const id = node.data.id;
+    if (!isTriggeredBy(node) && typeof id === 'string' && id.trim() !== '') taken.add(id);
+  }
+  const ownIds = new Map<string, string>();
+  const renamedTriggers = new Map<string, string>();
+  for (const node of sourceNodes) {
+    const id = node.data.id;
+    if (isTriggeredBy(node) || typeof id !== 'string' || id.trim() === '') continue;
+    const fresh = freshId(id, taken);
+    taken.add(fresh);
+    ownIds.set(node.id, fresh);
+    if (fresh !== id && node.type === 'trigger') renamedTriggers.set(id, fresh);
+  }
+  const out = new Map<string, FlowNodeData>();
+  for (const node of sourceNodes) {
+    const data = renameTriggerRefs(node.data as Record<string, unknown>, renamedTriggers);
+    const own = ownIds.get(node.id);
+    if (own !== undefined) data.id = own;
+    out.set(node.id, data as FlowNodeData);
+  }
+  return out;
+}
+
+/** The space left between the originals and their duplicates. */
+const BESIDE_GAP = 80;
+/** A node's width before React Flow has measured it. */
+const DEFAULT_NODE_WIDTH = 240;
+
+/** The offset that places copies of `nodes` just right of them, clear of
+ * the whole selection. */
+export function besideOffset(nodes: readonly Node<FlowNodeData>[]): { x: number; y: number } {
+  if (nodes.length === 0) return { x: 0, y: 0 };
+  let left = Number.POSITIVE_INFINITY;
+  let right = Number.NEGATIVE_INFINITY;
+  for (const node of nodes) {
+    const width = node.measured?.width ?? node.width ?? DEFAULT_NODE_WIDTH;
+    left = Math.min(left, node.position.x);
+    right = Math.max(right, node.position.x + width);
+  }
+  return { x: right - left + BESIDE_GAP, y: 0 };
+}
+
 /**
  * Clones a set of nodes and their connecting edges into the canvas.
- * Deselects existing nodes and selects the new clones.
- * Uses a progressive offset based on the paste count.
+ * Deselects existing nodes and selects the new clones. Placed `offset` from
+ * the originals; by default a progressive offset based on the paste count.
  */
 export function cloneNodesIntoCanvas(
   sourceNodes: Node<FlowNodeData>[],
   sourceEdges: Edge[],
-  context: NodeActionContext
+  context: NodeActionContext,
+  placement?: { x: number; y: number }
 ): void {
   const currentPasteCount = (context.pasteCount || 0) + 1;
-  context.setPasteCount(currentPasteCount);
-  const offset = 50 * currentPasteCount;
+  if (!placement) context.setPasteCount(currentPasteCount);
+  const offset = placement ?? { x: 50 * currentPasteCount, y: 50 * currentPasteCount };
+  const clonedData = cloneStepData(sourceNodes, context.nodes);
 
   const nodeIdMap = new Map<string, string>();
 
@@ -41,7 +131,8 @@ export function cloneNodesIntoCanvas(
       ...n,
       selected: true,
       id: newId,
-      position: { x: n.position.x + offset, y: n.position.y + offset },
+      data: clonedData.get(n.id) ?? n.data,
+      position: { x: n.position.x + offset.x, y: n.position.y + offset.y },
     };
   });
 
@@ -57,11 +148,9 @@ export function cloneNodesIntoCanvas(
     context.setEdges([...context.edges, ...newEdges]);
   }
 
-  // Each clone's `data` (including a real HA step `data.id`, if the source
-  // node had one set) is carried over verbatim — only the node's own graph
-  // id is regenerated above. A duplicate `data.id` wouldn't otherwise be
-  // flagged until some unrelated edit happened to re-trigger validation
-  // (unlike addNode/addCompound, which always validate immediately).
+  // Validated at once, as addNode/addCompound are: a copy can still carry
+  // issues of its own (an empty required field), and the whole graph's
+  // checks see the new nodes.
   context.validateAllNodes();
 }
 
@@ -91,7 +180,10 @@ export function pasteEdgesOnly(sourceEdges: Edge[], context: NodeActionContext):
   const newEdges: Edge[] = [];
   for (const edge of sourceEdges) {
     if (!nodeIds.has(edge.source) || !nodeIds.has(edge.target)) continue;
-    const candidate = { ...edge, id: `edge-${Date.now()}-${Math.random().toString(36).substr(2, 9)}` };
+    const candidate = {
+      ...edge,
+      id: `edge-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+    };
     if (isDuplicate(candidate, [...context.edges, ...newEdges])) continue;
     newEdges.push(candidate);
   }

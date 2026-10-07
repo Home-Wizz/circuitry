@@ -13,6 +13,7 @@
 import { type CircuitryAppHandle, mountCircuitryApp } from './app-mount';
 import cssText from './index.css?inline';
 import { registerHaToastTarget } from './lib/haToast';
+import { registerPropertiesInDocument } from './lib/shadowProperties';
 import type { HomeAssistant } from './types/hass';
 
 /** Minimal shape of HA's `CustomPanelInfo` — only the bit Circuitry's own `config_flow` options populate. */
@@ -60,6 +61,8 @@ class CircuitryPanelWrapper extends HTMLElement {
     this.style.height = '100%';
     this.style.position = 'relative';
 
+    // Tailwind's `@property` rules don't work inside the shadow root below.
+    registerPropertiesInDocument(cssText);
     const shadow = this.attachShadow({ mode: 'open' });
 
     const style = document.createElement('style');

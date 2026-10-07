@@ -7,6 +7,7 @@ import {
   useState,
 } from 'react';
 import type { ThemeOverride } from '@/lib/ha-theme';
+import { readStored, writeStored } from '@/lib/storage';
 
 const STORAGE_KEY = 'circuitry_theme_override';
 
@@ -15,12 +16,8 @@ function isThemeOverride(value: string | null): value is ThemeOverride {
 }
 
 function loadThemeOverride(): ThemeOverride {
-  try {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    return isThemeOverride(stored) ? stored : 'auto';
-  } catch {
-    return 'auto';
-  }
+  const stored = readStored(STORAGE_KEY);
+  return isThemeOverride(stored) ? stored : 'auto';
 }
 
 interface ThemeOverrideContextProps {
@@ -43,11 +40,7 @@ export const ThemeOverrideProvider: FC<PropsWithChildren> = ({ children }) => {
 
   const setThemeOverride = useCallback((value: ThemeOverride) => {
     setThemeOverrideState(value);
-    try {
-      localStorage.setItem(STORAGE_KEY, value);
-    } catch {
-      // Ignore storage errors
-    }
+    writeStored(STORAGE_KEY, value);
   }, []);
 
   return (

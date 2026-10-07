@@ -1,9 +1,14 @@
 import { useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
+import {
+  stateTriggerPhrase,
+  thresholdPhrase,
+  triggerEventPhrase,
+} from '@/components/nodes/cardWording';
 import { DOMAIN_GROUP_LABELS } from '@/components/panels/node-fields/TriggerTypePicker';
 import { useNodeCardDisplay } from '@/hooks/useNodeCardDisplay';
-import { BINARY_SENSOR_CLASSES } from '@/lib/triggerRecipes';
-import { prettify, singleEntityIdFrom } from '@/lib/utils';
+import { iconKeyFor } from '@/lib/domain-icons';
+import { isEmptyValue, isRecord, prettify, singleEntityIdFrom } from '@/lib/utils';
 import type { TriggerNodeData } from '@/store/flow-store';
 
 export interface TriggerDisplayInfo {
@@ -14,6 +19,11 @@ export interface TriggerDisplayInfo {
   detail: unknown;
   /** Domain to look up a card icon for (lib/domain-icons.ts) — falls back to the generic Zap icon when unset. */
   iconDomain?: string;
+  /** The area of the entity it watches, for the card's context line. */
+  place?: string;
+  /** What happens, to follow its entities in the card's sentence ("opened",
+   * "turned on"), whatever their number. */
+  phrase?: string;
 }
 
 /**
@@ -27,9 +37,37 @@ export interface TriggerDisplayInfo {
  * only place trigger-card display logic existed, so a second card that
  * needs the same resolution reuses it rather than re-deriving it.
  */
+/** Whether a trigger must hold for a while (`for`, its own or a
+ * purpose-specific type's option). */
+function holdsFor(data: TriggerNodeData): boolean {
+  const options = isRecord(data.options) ? data.options : undefined;
+  return !isEmptyValue(data.for) || (options !== undefined && !isEmptyValue(options.for));
+}
+
+/** An `entity_id` field as a list (one id, several, or none). */
+function entityIdList(value: unknown): string[] {
+  if (Array.isArray(value)) return value.filter((id): id is string => typeof id === 'string');
+  return typeof value === 'string' && value ? [value] : [];
+}
+
+/** A time trigger's `at` in words: a time as written, a helper by its name
+ * ("Wake-up time"), with its offset when it has one. */
+function timeAtDetail(at: unknown, entityNames: (ids: readonly string[]) => string): string | null {
+  const one = (value: unknown): string => {
+    if (typeof value === 'string') return /^[a-z_]+\./.test(value) ? entityNames([value]) : value;
+    if (isRecord(value)) {
+      const name = typeof value.entity_id === 'string' ? entityNames([value.entity_id]) : '';
+      return typeof value.offset === 'string' && value.offset ? `${name} (${value.offset})` : name;
+    }
+    return '';
+  };
+  const parts = (Array.isArray(at) ? at : at === undefined || at === null ? [] : [at]).map(one);
+  return parts.filter(Boolean).join(', ') || null;
+}
+
 export function useTriggerCardDisplay() {
   const { t } = useTranslation(['nodes']);
-  const { resolveEntityTarget, resolveDeviceTarget } = useNodeCardDisplay();
+  const { resolveEntityTarget, resolveDeviceTarget, entityNames } = useNodeCardDisplay();
 
   const triggerPlatformLabels: Record<string, string> = {
     state: t('nodes:triggers.platforms.state'),
@@ -74,25 +112,32 @@ export function useTriggerCardDisplay() {
         const resolved = singleEntityId
           ? resolveEntityTarget(singleEntityId)
           : resolveDeviceTarget(singleDeviceId, domain);
+        // In the cards' own words ("opens", "detects motion"); HA's for a
+        // type the tables don't know yet.
         const eventPhrase =
-          event === 'turned_on'
-            ? t('nodes:triggers.cardPhrases.turnedOn')
-            : event === 'turned_off'
-              ? t('nodes:triggers.cardPhrases.turnedOff')
-              : t(`nodes:triggers.nativeEvents.${event}`, { defaultValue: prettify(event ?? '') });
+          triggerEventPhrase(t, domain ?? '', event ?? '', holdsFor(data)) ??
+          t(`nodes:triggers.nativeEvents.${event}`, { defaultValue: prettify(event ?? '') });
         const targetCount = (
-          [target.entity_id, target.device_id, target.area_id, target.floor_id, target.label_id] as (
-            | string
-            | string[]
-            | undefined
-          )[]
+          [
+            target.entity_id,
+            target.device_id,
+            target.area_id,
+            target.floor_id,
+            target.label_id,
+          ] as (string | string[] | undefined)[]
         ).flatMap((v) => (Array.isArray(v) ? v : v ? [v] : [])).length;
         return {
-          title: data.alias || resolved?.label || DOMAIN_GROUP_LABELS[domain ?? ''] || prettify(domain ?? ''),
+          title:
+            data.alias ||
+            resolved?.label ||
+            DOMAIN_GROUP_LABELS[domain ?? ''] ||
+            prettify(domain ?? ''),
           subtitle: eventPhrase,
           subtitleEntityId: singleEntityId,
           detail: !resolved && targetCount > 1 ? `${targetCount} targets` : null,
-          iconDomain: resolved?.domain ?? domain,
+          iconDomain: iconKeyFor(resolved?.deviceClass, domain, resolved?.domain),
+          place: resolved?.area,
+          phrase: eventPhrase,
         };
       }
 
@@ -117,7 +162,8 @@ export function useTriggerCardDisplay() {
               : getTriggerLabel(triggerType),
             subtitleEntityId: deviceEntityId,
             detail: null,
-            iconDomain: target?.domain ?? domain,
+            iconDomain: iconKeyFor(target?.deviceClass, target?.domain, domain),
+            place: target?.area,
           };
         }
 
@@ -142,23 +188,19 @@ export function useTriggerCardDisplay() {
           // "By type" row). Any other target state falls back to just naming
           // that state, and no target at all keeps the generic "State
           // Change" label rather than guessing a phrase.
-          const binaryClass = target?.deviceClass ? BINARY_SENSOR_CLASSES[target.deviceClass] : undefined;
-          const phrase =
-            data.to === 'on'
-              ? (binaryClass?.onLabel ?? t('nodes:triggers.cardPhrases.turnedOn'))
-              : data.to === 'off'
-                ? (binaryClass?.offLabel ?? t('nodes:triggers.cardPhrases.turnedOff'))
-                : (data.to ?? undefined);
+          const phrase = stateTriggerPhrase(t, data.to, target?.deviceClass, holdsFor(data));
           return {
             title: data.alias || target?.label || getTriggerLabel(triggerType),
             subtitle: singleEntityId
               ? phrase || getTriggerLabel(triggerType)
               : Array.isArray(entityIdField) && entityIdField.length > 1
-                ? `${entityIdField.length} entities:\n${entityIdField.join(', ')}`
+                ? `${t('nodes:pill.entities', { count: entityIdField.length })}:\n${entityNames(entityIdField)}`
                 : getTriggerLabel(triggerType),
             subtitleEntityId: singleEntityId,
             detail: null,
-            iconDomain: target?.domain,
+            iconDomain: iconKeyFor(target?.deviceClass, target?.domain),
+            place: target?.area,
+            phrase: phrase || undefined,
           };
         }
 
@@ -171,15 +213,19 @@ export function useTriggerCardDisplay() {
           return {
             title: data.alias || target?.label || getTriggerLabel(triggerType),
             subtitle: attribute
-              ? t('nodes:triggers.cardPhrases.attributeThreshold', { attribute: prettify(attribute) })
+              ? t('nodes:triggers.cardPhrases.attributeThreshold', {
+                  attribute: prettify(attribute),
+                })
               : singleEntityId
                 ? getTriggerLabel(triggerType)
                 : Array.isArray(entityIdField) && entityIdField.length > 1
-                  ? `${entityIdField.length} entities:\n${entityIdField.join(', ')}`
+                  ? `${t('nodes:pill.entities', { count: entityIdField.length })}:\n${entityNames(entityIdField)}`
                   : getTriggerLabel(triggerType),
             subtitleEntityId: singleEntityId,
             detail: null,
-            iconDomain: target?.domain,
+            iconDomain: iconKeyFor(target?.deviceClass, target?.domain),
+            place: target?.area,
+            phrase: thresholdPhrase(t, attribute),
           };
         }
 
@@ -194,11 +240,7 @@ export function useTriggerCardDisplay() {
           return {
             title: data.alias || getTriggerLabel(triggerType),
             subtitle: getTriggerLabel(triggerType),
-            detail: data.at
-              ? typeof data.at === 'string'
-                ? data.at
-                : `${(data.at as Record<string, unknown>).entity_id || ''}${(data.at as Record<string, unknown>).offset ? ` (${(data.at as Record<string, unknown>).offset})` : ''}`
-              : null,
+            detail: timeAtDetail(data.at, entityNames),
           };
 
         case 'sun':
@@ -227,8 +269,8 @@ export function useTriggerCardDisplay() {
             title: data.alias || getTriggerLabel(triggerType),
             subtitle: getTriggerLabel(triggerType),
             detail:
-              data.zone ||
-              (Array.isArray(data.entity_id) ? data.entity_id.join(', ') : data.entity_id) ||
+              (typeof data.zone === 'string' && data.zone ? entityNames([data.zone]) : '') ||
+              entityNames(entityIdList(data.entity_id)) ||
               null,
           };
 
@@ -269,7 +311,7 @@ export function useTriggerCardDisplay() {
       }
     },
     // biome-ignore lint/correctness/useExhaustiveDependencies: triggerPlatformLabels/getTriggerLabel are recreated every render off `t`, which is itself already a dependency — including them would just re-add `t` transitively.
-    [t, resolveEntityTarget, resolveDeviceTarget]
+    [t, resolveEntityTarget, resolveDeviceTarget, entityNames]
   );
 
   return { getTriggerDisplayInfo };

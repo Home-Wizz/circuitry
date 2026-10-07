@@ -1,4 +1,10 @@
-import type { ConditionNode, FlowEdge, FlowGraph, FlowNode } from '@circuitry/shared';
+import {
+  type ConditionNode,
+  type FlowEdge,
+  type FlowGraph,
+  type FlowNode,
+  TRIGGER_KEYS_KEEPING_NULL,
+} from '@circuitry/shared';
 import { findBackEdges } from '../analyzer/topology';
 import type { BProgram, BStep } from './behaviorProgram';
 import { normalizeActionData } from './behaviorProgram';
@@ -44,8 +50,48 @@ interface Ctx {
   loopsByEntry: Map<string, LoopInfo>;
   /** Set only by findTreeContinuedPathEnds: where to record them. */
   pathEnds?: PathEnd[];
-  /** How many parallel (fan-out) branches the walk is currently inside. */
-  parallelDepth: number;
+  /** One entry per parallel (fan-out) the walk is inside, innermost last:
+   * whether the path ends after it -- nothing its branches lead to runs
+   * after it (pathEndsAfter). */
+  parallels: boolean[];
+  /** Where the walk carries on after what it's inside, innermost last: an
+   * if whose branches meet, or a loop (its next round), each with how many
+   * parallels it's inside (see recordPathEnd, decision D5). */
+  carryOns: CarryOn[];
+  /** Set only by scanPathEnds: path ends no stop can be added at. */
+  rewrites?: PathEndRewrites;
+}
+
+/** How many parallels it's inside, and for an if, its tail copy. */
+interface CarryOn {
+  parallels: number;
+  copy?: TailCopy;
+}
+
+/**
+ * Decision D5: an if inside a parallel branch whose branches meet, with a
+ * path in it that ends where the tree reading carries on to that meeting
+ * point, while something runs after the parallel (so no `stop` can be added
+ * there, #150). Written by copying what follows the meeting point, up to
+ * where the if's branches would have gone on anyway (`outerStop`), into
+ * its else side: then the ending path has nothing after it to carry on to.
+ */
+export interface TailCopy {
+  /** The if's conditions (an AND chain shares one else). */
+  chain: string[];
+  thenTargets: string[];
+  elseTargets: string[];
+  meetings: string[];
+  outerStop: string[];
+}
+
+/** What scanPathEnds finds besides the ends that get a stop. */
+export interface PathEndRewrites {
+  /** Each with the first path end that needs it. */
+  copies: (TailCopy & { end: PathEnd })[];
+  /** Ends no copy writes: inside a loop in a parallel branch (it would go
+   * round again), while something runs after the parallel. */
+  unwritable: PathEnd[];
 }
 
 /**
@@ -117,7 +163,8 @@ function buildCtx(flow: FlowGraph): Ctx {
     incoming,
     backEdgeIds,
     loopsByEntry: new Map(),
-    parallelDepth: 0,
+    parallels: [],
+    carryOns: [],
   };
   ctx.loopsByEntry = detectLoops(ctx);
   return ctx;
@@ -125,6 +172,22 @@ function buildCtx(flow: FlowGraph): Ctx {
 
 function forwardOutgoing(ctx: Ctx, nodeId: string): FlowEdge[] {
   return (ctx.outgoing.get(nodeId) ?? []).filter((e) => !ctx.backEdgeIds.has(e.id));
+}
+
+/** Two different loops whose back edges go to the same step (#28): which
+ * one is inside the other can't be told. Typed so FlowTranspiler can give
+ * the user the reason (#134). */
+export class SharedLoopEntryError extends Error {
+  constructor(
+    readonly entryId: string,
+    readonly loops: [LoopInfo, LoopInfo]
+  ) {
+    super(
+      `two loops share entry node "${entryId}" (${loops[0].kind} tested at "${loops[0].testNodeId}", ` +
+        `${loops[1].kind} tested at "${loops[1].testNodeId}"); cannot tell which one encloses the other`
+    );
+    this.name = 'SharedLoopEntryError';
+  }
 }
 
 /**
@@ -169,10 +232,7 @@ function detectLoops(ctx: Ctx): Map<string, LoopInfo> {
       return;
     }
     if (existing && (existing.kind !== info.kind || existing.testNodeId !== info.testNodeId)) {
-      throw new Error(
-        `two loops share entry node "${entryId}" (${existing.kind} tested at "${existing.testNodeId}", ` +
-          `${info.kind} tested at "${info.testNodeId}"); cannot tell which one encloses the other`
-      );
+      throw new SharedLoopEntryError(entryId, [existing, info]);
     }
     loops.set(entryId, info);
   };
@@ -587,7 +647,12 @@ function fallbackRepeatStep(data: Record<string, unknown>): BStep {
   if (repeat.until) {
     return { k: 'repeat', mode: 'until', test: parseConditionExpr(repeat.until), body };
   }
-  return { k: 'repeat', mode: 'count', count: repeat.count !== undefined ? String(repeat.count) : '', body };
+  return {
+    k: 'repeat',
+    mode: 'count',
+    count: repeat.count !== undefined ? String(repeat.count) : '',
+    body,
+  };
 }
 
 /**
@@ -633,6 +698,33 @@ export function normalizeNodeAction(node: FlowNode): BStep | null {
 /** Walks forward from one or more target ids, applying the parallel/OR-gate
  * fold described in this file's own design notes (project memory, Phase B)
  * when they all reconverge. */
+/** Runs `walkBody` (a loop's body) as a place the walk carries on from
+ * (the loop's next round). */
+function insideLoop<T>(ctx: Ctx, walkBody: () => T): T {
+  ctx.carryOns.push({ parallels: ctx.parallels.length });
+  try {
+    return walkBody();
+  } finally {
+    ctx.carryOns.pop();
+  }
+}
+
+/**
+ * Decision D4: where branches that meet at `meetings` stop -- there, and at
+ * anything after it. A branch that runs on into a step after the meeting
+ * point (through a step that isn't part of it) leaves that step to run
+ * once, after the meeting point. The tree reading used to walk it into the
+ * branch too, so it read that step twice, as native wrote it.
+ */
+function meetingBound(ctx: Ctx, meetings: string[]): string[] {
+  return [...forwardReach(ctx, meetings)];
+}
+
+/** The stop nodes, as a list. */
+function stopIds(stop: string | Set<string> | null): string[] {
+  return stop === null ? [] : stop instanceof Set ? [...stop] : [stop];
+}
+
 function stopHas(stop: string | Set<string> | null, id: string): boolean {
   if (stop === null) return false;
   return stop instanceof Set ? stop.has(id) : stop === id;
@@ -642,30 +734,50 @@ function stopHas(stop: string | Set<string> | null, id: string): boolean {
  * only where something would run after it in the tree reading (`stop` is
  * set: an enclosing if's meeting point or loop test), and not inside a
  * parallel branch (there a path that ends just ends its branch, in every
- * strategy). */
+ * strategy) -- unless the path ends after that parallel and every one
+ * around it: then a `stop` there ends nothing that would run, as HA raises
+ * it once the other branches have finished (#150). */
 function recordPathEnd(
   ctx: Ctx,
   stop: string | Set<string> | null,
   nodeId: string,
   handle?: 'true' | 'false'
 ): void {
-  if (!ctx.pathEnds || stop === null || ctx.parallelDepth > 0) return;
+  if (!ctx.pathEnds || stop === null) return;
   if (ctx.pathEnds.some((p) => p.nodeId === nodeId && p.handle === handle)) return;
   // A node that also comes AFTER the meeting point (reachable from it) is a
   // shared tail the tree reading merely copies into this branch -- the
   // automation's last step, say. Not a place where a path ends early.
-  // (Only for an if's meeting point; a while loop's test reaches its whole
-  // body.)
-  if (stop instanceof Set) {
-    const seen = new Set<string>();
-    const queue = [...stop];
-    while (queue.length > 0) {
-      const id = queue.shift()!;
-      if (id === nodeId) return;
-      if (seen.has(id)) continue;
-      seen.add(id);
-      for (const e of forwardOutgoing(ctx, id)) queue.push(e.target);
+  // Only for an if's meeting point: a loop's test (or a count loop's
+  // increment) reaches its whole body, and is among the stops of an if
+  // inside it whose branches meet (#154: a path ending in such an if went
+  // on to the meeting point and round the loop again).
+  const loopStops = new Set(
+    [...ctx.loopsByEntry.values()].flatMap((loop) => [
+      loop.testNodeId,
+      ...(loop.incrementNodeId ? [loop.incrementNodeId] : []),
+    ])
+  );
+  const meetings = stopIds(stop).filter((id) => !loopStops.has(id));
+  if (forwardReach(ctx, meetings).has(nodeId)) return;
+  // The innermost parallel something runs after (1 for the outermost; 0
+  // when there's none): a path that ends inside it ends only its branch.
+  const goesOn = ctx.parallels.lastIndexOf(false) + 1;
+  if (goesOn > 0) {
+    // Decision D5: a stop can't be used. Where the tree reading carries on
+    // to something inside that branch -- an if's meeting point, or a loop's
+    // next round -- the path must end there instead: the if's tail is
+    // copied; a loop can't be. Carrying on to where the branch itself ends
+    // is right as it is.
+    const frame = ctx.carryOns.at(-1);
+    if (ctx.rewrites && frame && frame.parallels >= goesOn) {
+      const copy = frame.copy;
+      if (!copy) ctx.rewrites.unwritable.push(handle ? { nodeId, handle } : { nodeId });
+      else if (!ctx.rewrites.copies.some((c) => c.chain[0] === copy.chain[0])) {
+        ctx.rewrites.copies.push({ ...copy, end: handle ? { nodeId, handle } : { nodeId } });
+      }
     }
+    return;
   }
   ctx.pathEnds.push(handle ? { nodeId, handle } : { nodeId });
 }
@@ -688,7 +800,7 @@ function walkBranches(
   suppressLoopId?: string
 ): BProgram[] {
   const groups = meetingGroups(ctx, ids, stop);
-  ctx.parallelDepth++;
+  ctx.parallels.push(pathEndsAfter(ctx, ids, stop));
   try {
     return groups.map((group) => {
       if (group.length === 1) return walk(ctx, group[0], stop, new Set(visited), suppressLoopId);
@@ -700,8 +812,21 @@ function walkBranches(
       return buildContinuation(ctx, group, stop, new Set(visited), suppressLoopId);
     });
   } finally {
-    ctx.parallelDepth--;
+    ctx.parallels.pop();
   }
+}
+
+/**
+ * #150: whether nothing a fan-out's branches lead to runs after it -- no
+ * edge leaves what they reach before `stop` (to the stop or past it, or
+ * back to a loop's test). The tree reading carries on at `stop` after the
+ * parallel; as drawn, the automation ends there.
+ */
+function pathEndsAfter(ctx: Ctx, ids: string[], stop: string | Set<string> | null): boolean {
+  const reached = forwardReach(ctx, ids);
+  const afterStop = afterStopOf(ctx, ids, stop);
+  const region = new Set([...reached].filter((id) => !afterStop.has(id)));
+  return [...region].every((id) => (ctx.outgoing.get(id) ?? []).every((e) => region.has(e.target)));
 }
 
 /**
@@ -712,15 +837,8 @@ function walkBranches(
  */
 function meetingGroups(ctx: Ctx, ids: string[], stop: string | Set<string> | null): string[][] {
   // What comes after the stop runs once after it, whichever branch has a
-  // (shortcut) edge to it: not a meeting of the branches. Only a stop the
-  // branches lead to counts (a loop's test they go back to comes before
-  // them).
-  const reached = forwardReach(ctx, ids);
-  const stops = stop === null ? [] : stop instanceof Set ? [...stop] : [stop];
-  const afterStop = forwardReach(
-    ctx,
-    stops.filter((id) => reached.has(id))
-  );
+  // (shortcut) edge to it: not a meeting of the branches.
+  const afterStop = afterStopOf(ctx, ids, stop);
   const reach = ids.map((start) => {
     const seen = new Set<string>();
     const queue = [start];
@@ -746,6 +864,17 @@ function meetingGroups(ctx: Ctx, ids: string[], stop: string | Set<string> | nul
   return groups.map((g) => g.members.map((i) => ids[i]));
 }
 
+/** The stop the branches from `ids` lead to and everything after it (forward
+ * edges). Only a stop they lead to counts: a loop's test they go back to
+ * comes before them. */
+function afterStopOf(ctx: Ctx, ids: string[], stop: string | Set<string> | null): Set<string> {
+  const reached = forwardReach(ctx, ids);
+  return forwardReach(
+    ctx,
+    stopIds(stop).filter((id) => reached.has(id))
+  );
+}
+
 /** Every node reachable from `starts` by forward edges, `starts` included. */
 function forwardReach(ctx: Ctx, starts: string[]): Set<string> {
   const seen = new Set<string>();
@@ -765,7 +894,7 @@ function buildContinuation(
   stop: string | Set<string> | null,
   visited: Set<string>,
   suppressLoopId?: string,
-  sequentialFallback = false,
+  sequentialFallback = false
 ): BProgram {
   // A target that a stop target leads to (#99: a shortcut edge past the
   // stop) runs once, after the stop, not also here.
@@ -797,7 +926,10 @@ function buildContinuation(
   // makes this correct for a branch that is itself a multi-condition
   // AND-chain ending in an empty then/else, not just a single bare node.
   if (convergenceSet.length > 0) {
-    const boundSet = new Set(convergenceSet);
+    // With the enclosing stop (#152): a branch's edge to where the
+    // enclosing branches meet goes there, not into the branch. And what
+    // comes after the meeting point (decision D4).
+    const boundSet = new Set([...meetingBound(ctx, convergenceSet), ...stopIds(stop)]);
     const branchPrograms = walkBranches(ctx, ids, boundSet, visited, suppressLoopId);
     const branchConditions: BoolExpr[] = [];
     const allEmptyConditions = ids.every((id, i) => {
@@ -822,7 +954,13 @@ function buildContinuation(
     // #111: a Join goes on once every branch has finished, whether its test
     // passed or not -- never an OR of them.
     const atJoin = ctx.nodesById.get(convergenceSet[0])?.type === 'join';
-    if (allEmptyConditions && convergenceSet.length === 1 && !atJoin) {
+    // #132: each branch's test is the way its branch gets there only when
+    // nothing gets there through a "no" edge: a test whose "no" edge goes
+    // there too always arrives, and the step runs whatever the tests say.
+    const reachedOnlyByYes = (ctx.incoming.get(convergenceSet[0]) ?? [])
+      .filter((e) => !ctx.backEdgeIds.has(e.id))
+      .every((e) => e.sourceHandle === 'true');
+    if (allEmptyConditions && convergenceSet.length === 1 && !atJoin && reachedOnlyByYes) {
       const orExpr: BoolExpr = { op: 'or', args: branchConditions };
       const then = walk(ctx, convergenceSet[0], stop, new Set(visited));
       return [{ k: 'if', cond: orExpr, then, else: [] }];
@@ -894,13 +1032,17 @@ function walk(
   if (loop) {
     if (loop.kind === 'while') {
       const cond = loopTest(ctx, loop);
-      const body = buildContinuation(ctx, loop.bodyEntryIds, loop.testNodeId, new Set(), nodeId);
+      const body = insideLoop(ctx, () =>
+        buildContinuation(ctx, loop.bodyEntryIds, loop.testNodeId, new Set(), nodeId)
+      );
       const after = buildContinuation(ctx, loop.exitTargetIds, stop, visited);
       return [{ k: 'repeat', mode: 'while', test: cond, body }, ...after];
     }
     if (loop.kind === 'until') {
       const cond = loopTest(ctx, loop);
-      const body = buildContinuation(ctx, loop.bodyEntryIds, loop.testNodeId, new Set(), nodeId);
+      const body = insideLoop(ctx, () =>
+        buildContinuation(ctx, loop.bodyEntryIds, loop.testNodeId, new Set(), nodeId)
+      );
       const after = buildContinuation(ctx, loop.exitTargetIds, stop, visited);
       return [{ k: 'repeat', mode: 'until', test: cond, body }, ...after];
     }
@@ -909,7 +1051,9 @@ function walk(
     // emitted as an extra action step -- it has no counterpart at all in
     // NativeStrategy's rendered `repeat: { count: N, sequence: [...] }`.
     const bodyStop = loop.incrementNodeId ?? loop.testNodeId;
-    const body = buildContinuation(ctx, loop.bodyEntryIds, bodyStop, new Set(), nodeId);
+    const body = insideLoop(ctx, () =>
+      buildContinuation(ctx, loop.bodyEntryIds, bodyStop, new Set(), nodeId)
+    );
     const after = buildContinuation(ctx, loop.exitTargetIds, stop, visited);
     return [{ k: 'repeat', mode: 'count', count: loop.count ?? '', body }, ...after];
   }
@@ -973,6 +1117,7 @@ function buildConditionChain(
     .map((e) => e.target);
 
   let currentId = startId;
+  const chain = [startId];
   let thenTargets: string[] = [];
 
   while (true) {
@@ -1027,6 +1172,7 @@ function buildConditionChain(
       if (canChain) {
         visited.add(trueTarget);
         currentId = trueTarget;
+        chain.push(trueTarget);
         continue;
       }
     }
@@ -1081,11 +1227,29 @@ function buildConditionChain(
       : [];
   const innerStop: string | Set<string> | null =
     innerConvergence.length > 0
-      ? new Set([...(stop === null ? [] : stop instanceof Set ? stop : [stop]), ...innerConvergence])
+      ? new Set([...stopIds(stop), ...meetingBound(ctx, innerConvergence)])
       : stop;
 
-  const then = buildContinuation(ctx, thenTargets, innerStop, new Set(visited));
-  const els = buildContinuation(ctx, elseTargets, innerStop, new Set(visited));
+  if (innerConvergence.length > 0) {
+    ctx.carryOns.push({
+      parallels: ctx.parallels.length,
+      copy: {
+        chain,
+        thenTargets,
+        elseTargets,
+        meetings: innerConvergence,
+        outerStop: stopIds(stop),
+      },
+    });
+  }
+  let then: BProgram;
+  let els: BProgram;
+  try {
+    then = buildContinuation(ctx, thenTargets, innerStop, new Set(visited));
+    els = buildContinuation(ctx, elseTargets, innerStop, new Set(visited));
+  } finally {
+    if (innerConvergence.length > 0) ctx.carryOns.pop();
+  }
   const ifStep: BStep = { k: 'if', cond, then, else: els };
 
   if (innerConvergence.length === 0) {
@@ -1104,7 +1268,7 @@ export function buildTrigger(node: FlowNode): Record<string, unknown> {
   for (const [key, value] of Object.entries(data)) {
     if (key.startsWith('_')) continue;
     if (value === undefined) continue; // "" kept (bug #72)
-    if (value === null && key !== 'from' && key !== 'to') continue;
+    if (value === null && !TRIGGER_KEYS_KEEPING_NULL.has(key)) continue;
     cleaned[key] = value;
   }
   // Fold event context_user_id the same way BaseStrategy.foldEventContextUserId
@@ -1170,13 +1334,20 @@ export function extractFromGraph(flow: FlowGraph): GraphExtraction {
  * at all (the gate reports that separately).
  */
 export function findTreeContinuedPathEnds(flow: FlowGraph): PathEnd[] {
+  return scanPathEnds(flow).ends;
+}
+
+/** findTreeContinuedPathEnds, with the ends inside a parallel that no stop
+ * can be added at (decision D5). Nothing when the graph can't be read. */
+export function scanPathEnds(flow: FlowGraph): { ends: PathEnd[] } & PathEndRewrites {
   try {
     const ctx = buildCtx(flow);
     ctx.pathEnds = [];
+    ctx.rewrites = { copies: [], unwritable: [] };
     extractFromCtx(ctx);
-    return ctx.pathEnds;
+    return { ends: ctx.pathEnds, ...ctx.rewrites };
   } catch {
-    return [];
+    return { ends: [], copies: [], unwritable: [] };
   }
 }
 

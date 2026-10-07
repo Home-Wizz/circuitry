@@ -1,5 +1,5 @@
 import type { WaitNode } from '@circuitry/shared';
-import { Trash2Icon, Zap } from 'lucide-react';
+import { PencilIcon, Trash2Icon, Zap } from 'lucide-react';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { WhenTriggerDialog } from '@/components/canvas/WhenTriggerDialog';
@@ -19,6 +19,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { HaSelect, HaSelector, HaSwitch } from '@/ha';
 import { useNodeErrors } from '@/hooks/useNodeErrors';
 import { useResolvedEntities } from '@/hooks/useResolvedEntities';
+import { useTriggerCardDisplay } from '@/hooks/useTriggerCardDisplay';
 import { getDomainIcon } from '@/lib/domain-icons';
 import { clearedToUnset } from '@/lib/utils';
 import type { TriggerNodeData } from '@/store/flow-store';
@@ -38,11 +39,12 @@ export function WaitFields({ node, onChange }: WaitFieldsProps) {
   const { t } = useTranslation(['nodes']);
   const { getFieldError, getRootError } = useNodeErrors(node.id);
   const entities = useResolvedEntities();
-  const [addTriggerOpen, setAddTriggerOpen] = useState(false);
+  const { getTriggerDisplayInfo } = useTriggerCardDisplay();
+  // The When picker: adding a trigger to wait for, or changing one (its index).
+  const [picking, setPicking] = useState<'add' | number | null>(null);
+  const setAddTriggerOpen = (open: boolean) => setPicking(open ? 'add' : null);
   const waitTemplate = getNodeDataString(node, 'wait_template');
   const waitForTrigger = getNodeData<TriggerNodeData[]>(node, 'wait_for_trigger');
-  // A timeout the node holds, zero included, means the switch is on.
-  const hasTimeout = node.data.timeout !== undefined && node.data.timeout !== null;
 
   const waitType = waitForTrigger !== undefined ? 'trigger' : 'template';
   const rootError = getRootError();
@@ -131,14 +133,10 @@ export function WaitFields({ node, onChange }: WaitFieldsProps) {
                 ? trigger.entity_id[0]
                 : trigger.entity_id;
               const Icon = getDomainIcon(entity?.split('.')[0], Zap);
-              // Same platform-label lookup TriggerNode.tsx uses for its card
-              // title, minus the rich per-platform detail formatting —
-              // wait_for_trigger entries are a short list summarized in one
-              // line, not a full canvas card.
-              const platformLabel = t(`nodes:triggers.platforms.${trigger.trigger}`, {
-                defaultValue: trigger.trigger,
-              });
-              const summary = entity ? `${platformLabel} · ${entity}` : platformLabel;
+              // As the wait card reads it (its title and subtitle): names,
+              // never an entity's id.
+              const info = getTriggerDisplayInfo(trigger);
+              const summary = [info.title, info.subtitle].filter(Boolean).join(' · ');
               return (
                 <div
                   key={index}
@@ -150,6 +148,15 @@ export function WaitFields({ node, onChange }: WaitFieldsProps) {
                       <span className="truncate text-sm">{summary}</span>
                     </TruncatedTooltip>
                   </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    aria-label={t('nodes:wait.changeTrigger')}
+                    onClick={() => setPicking(index)}
+                    className="ml-auto h-8 w-8 shrink-0 p-0"
+                  >
+                    <PencilIcon />
+                  </Button>
                   <Button
                     variant="ghost"
                     size="sm"
@@ -174,16 +181,57 @@ export function WaitFields({ node, onChange }: WaitFieldsProps) {
               native HA trigger config (HATriggerSchema), so it gets the same
               picker real triggers use instead of a separate, narrower form. */}
           <WhenTriggerDialog
-            open={addTriggerOpen}
+            open={picking !== null}
             onOpenChange={setAddTriggerOpen}
             entities={entities}
+            // Changing one: the picker opens where it is, marked Current.
+            current={typeof picking === 'number' ? waitForTrigger?.[picking] : undefined}
             onCommit={(data) => {
-              onChange('wait_for_trigger', [...(waitForTrigger ?? []), data]);
+              const list = waitForTrigger ?? [];
+              onChange(
+                'wait_for_trigger',
+                typeof picking === 'number'
+                  ? list.map((trigger, i) => (i === picking ? data : trigger))
+                  : [...list, data]
+              );
             }}
           />
         </div>
       )}
 
+      <WaitTimeoutFields data={node.data} onChange={onChange} />
+
+      {/* `continue_on_error` — "available on all actions", including
+          wait_template/wait_for_trigger — was previously wired into
+          ActionFields.tsx's branches only, missing here. Distinct from
+          `continue_on_timeout` above: that governs what happens when the
+          wait's own timeout elapses; this governs what happens if the step
+          itself errors (e.g. an invalid template). */}
+      <ContinueOnErrorField
+        checked={node.data.continue_on_error === true}
+        onChange={(checked) => onChange('continue_on_error', checked || undefined)}
+      />
+    </>
+  );
+}
+
+/**
+ * A wait's timeout: the switch, how long, and whether it carries on when
+ * the time runs out. The property panel's fields, shared with the wait
+ * card's timeout pill (nodes/WaitNode.tsx).
+ */
+export function WaitTimeoutFields({
+  data,
+  onChange,
+}: {
+  data: WaitNode['data'];
+  onChange: (key: string, value: unknown) => void;
+}) {
+  const { t } = useTranslation(['nodes']);
+  // A timeout the node holds, zero included, means the switch is on.
+  const hasTimeout = data.timeout !== undefined && data.timeout !== null;
+  return (
+    <>
       {/* Timeout switch (bug #66). Off: no `timeout`, so the wait lasts as
           long as it takes. On: the duration below is written as it is,
           zero included -- zero means "give up at once" in HA. The switch
@@ -213,7 +261,7 @@ export function WaitFields({ node, onChange }: WaitFieldsProps) {
         <DurationField
           label={t('nodes:wait.timeoutDurationLabel')}
           description={t('nodes:wait.timeoutDurationDescription')}
-          value={node.data.timeout ?? ''}
+          value={data.timeout ?? ''}
           onChange={(val) => onChange('timeout', val)}
         />
       )}
@@ -224,28 +272,17 @@ export function WaitFields({ node, onChange }: WaitFieldsProps) {
           description={t('nodes:wait.continueOnTimeoutDescription')}
         >
           <HaSwitch
-            checked={node.data.continue_on_timeout ?? true}
+            checked={data.continue_on_timeout ?? true}
             onChange={(checked) => onChange('continue_on_timeout', checked)}
             fallback={
               <Switch
-                checked={node.data.continue_on_timeout ?? true}
+                checked={data.continue_on_timeout ?? true}
                 onCheckedChange={(checked) => onChange('continue_on_timeout', checked)}
               />
             }
           />
         </FormField>
       )}
-
-      {/* `continue_on_error` — "available on all actions", including
-          wait_template/wait_for_trigger — was previously wired into
-          ActionFields.tsx's branches only, missing here. Distinct from
-          `continue_on_timeout` above: that governs what happens when the
-          wait's own timeout elapses; this governs what happens if the step
-          itself errors (e.g. an invalid template). */}
-      <ContinueOnErrorField
-        checked={node.data.continue_on_error === true}
-        onChange={(checked) => onChange('continue_on_error', checked || undefined)}
-      />
     </>
   );
 }

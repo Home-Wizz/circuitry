@@ -10,13 +10,16 @@
     "transpileFailed": "Failed to transpile flow to automation config",
     "noAutomationId": "No automation ID set. Use saveAutomation() for new automations.",
     "node": {
-      "duplicateId": "ID already in use — must be unique within the automation"
+      "duplicateId": "ID already in use — must be unique within the automation",
+      "unknownTriggerId": "No trigger has this id: the condition never passes",
+      "entityIgnored": "Home Assistant ignores an entity here: this type only acts on the kinds of entity it names (a door trigger, on doors)"
     },
     "native": {
       "thresholdRequired": "Set the threshold (Home Assistant refuses this without one)",
       "optionRequired": "This needs a value: Home Assistant refuses it without one",
       "targetRequired": "Add a target (Home Assistant refuses this without one)",
-      "targetEmpty": "No targets are selected, so this never triggers or matches"
+      "targetEmpty": "No targets are selected, so this never triggers or matches",
+      "boundsReversed": "The lower bound is above the upper one: Home Assistant refuses that"
     },
     "trigger": {
       "platformRequired": "Trigger platform is required",
@@ -54,6 +57,8 @@
       "serviceOrEventRequired": "Either a service (e.g. light.turn_on) or an event name is required",
       "serviceFormat": "Service must be in domain.service format (e.g., light.turn_on)",
       "fieldEmpty": "A field this action needs is empty: Home Assistant saves it, but the step fails when it runs",
+      "oneOfEmpty": "This action needs one of these filled in (or a pair of them together): Home Assistant saves it, but the step fails when it runs",
+      "entityUnsupported": "An entity here can't do this action (it lacks a feature the action needs): Home Assistant saves it, but the step fails when it runs",
       "eventEmpty": "The event name is empty, so this fires an event with no name"
     },
     "wait": {

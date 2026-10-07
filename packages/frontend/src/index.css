@@ -124,8 +124,10 @@
     --card-foreground: 222.2 84% 4.9%;
     --popover: 0 0% 100%;
     --popover-foreground: 222.2 84% 4.9%;
-    --primary: 222.2 47.4% 11.2%;
-    --primary-foreground: 210 40% 98%;
+    /* HA's blue (#009ac7, lib/ha-theme.ts's fallback for primary-color):
+       the same before HA's theme is applied, and outside HA. */
+    --primary: 194 100% 39%;
+    --primary-foreground: 0 0% 100%;
     --secondary: 210 40% 96.1%;
     --secondary-foreground: 222.2 47.4% 11.2%;
     --muted: 210 40% 96.1%;
@@ -198,8 +200,10 @@
     --card-foreground: 210 40% 98%;
     --popover: 222.2 84% 4.9%;
     --popover-foreground: 210 40% 98%;
-    --primary: 210 40% 98%;
-    --primary-foreground: 222.2 47.4% 11.2%;
+    /* HA's blue (#009ac7, lib/ha-theme.ts's fallback for primary-color):
+       the same before HA's theme is applied, and outside HA. */
+    --primary: 194 100% 39%;
+    --primary-foreground: 0 0% 100%;
     --secondary: 217.2 32.6% 17.5%;
     --secondary-foreground: 210 40% 98%;
     --muted: 217.2 32.6% 17.5%;
@@ -310,15 +314,18 @@
   @apply font-sans;
 }
 
-/* Canvas background — a soft radial vignette under the two-tier dot/line
-   grid (see FlowCanvas.tsx), rather than one flat fill color, so the canvas
+/* Canvas background — a soft radial vignette under the dot grid
+   (see FlowCanvas.tsx), rather than one flat fill color, so the canvas
    reads as a lit surface with depth instead of a plain colored rectangle.
    Per user request to modernize the canvas background. Uses the theme's own
    --background/--muted tokens (see @theme inline above) so it follows
    light/dark and any HA-theme-synced override automatically — see
    hooks/useHaThemeSync.ts — rather than hardcoded colors. */
+/* Inside HA the cards and the page share one colour (the theme's card
+   background), so the canvas is tinted a step toward --muted: the cards
+   stand off it on any theme, light or dark. */
 .canvas-modern-bg {
-  background-color: hsl(var(--background));
+  background-color: color-mix(in srgb, hsl(var(--muted)) 45%, hsl(var(--background)));
   background-image: radial-gradient(ellipse at center, hsl(var(--muted) / 55%) 0%, hsl(var(--background) / 0%) 70%);
 }
 
@@ -375,22 +382,128 @@
   }
 }
 
-/* Save button animation for unsaved changes */
-@keyframes save-pulse {
-  0%, 100% {
-    transform: scale(1);
-    box-shadow: 0 0 0 0 hsl(var(--warning) / 70%);
-  }
-  50% {
-    transform: scale(1.05);
-    box-shadow: 0 0 0 10px hsl(var(--warning) / 0%);
+/* The tick list's line for the room itself ("Anything in <room>",
+   MultiTargetPanel in PickerColumns.tsx): an edge down its left side and a
+   rim in the picker's kind colour (`--tone`, set on the When / And / Then
+   dialog), as the Fill in design has it. Picked, it takes the
+   primary colour's rim like any picked line. */
+.pick-room-target {
+  position: relative;
+  overflow: hidden;
+  padding-left: 1rem;
+}
+.pick-room-target:not([aria-pressed='true']) {
+  border-color: color-mix(in srgb, var(--tone, var(--color-primary)) 55%, transparent);
+}
+.pick-room-target::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 4px;
+  background: var(--tone, var(--color-primary));
+}
+
+/* A node colour as a small round icon (StepIcon.tsx). `--tone` is the
+   node's colour (toneStyle in lib/node-colors.ts); where the browser can,
+   it's pushed brighter and more saturated first.
+   .node-neon: a solid disc with a white symbol (the side panel's rows),
+   without a glow.
+   .node-neon-soft: a circle tinted with the colour, no ring, for a colour
+   emoji (the canvas cards). Neither glows. */
+.node-neon,
+.node-neon-soft {
+  --neon: var(--tone);
+}
+.node-neon {
+  background-color: var(--neon);
+  color: white;
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.28);
+}
+.node-neon-soft {
+  background-color: color-mix(in srgb, var(--neon) 18%, transparent);
+  color: var(--neon);
+}
+@supports (color: oklch(from red l c h)) {
+  .node-neon,
+  .node-neon-soft {
+    --neon: oklch(from var(--tone) clamp(0.6, l, 0.74) calc(c * 1.3 + 0.04) h);
   }
 }
 
-.save-button-unsaved {
-  animation: save-pulse 2s infinite;
+/* A step's card on the canvas (StepCard.tsx): a pill edged in the step's
+   colour (`--tone`, toneStyle in lib/node-colors.ts), a darker lip under it
+   and a soft shadow in the same colour. It sits in the components layer so
+   a card's state classes (an error, a dashed placeholder) still win. The
+   shadow goes through `--tw-shadow`, so the rings for a run or an error add
+   to it rather than replacing it. The radius is fixed rather than full, so
+   a tall card (a list of steps) stays a rounded rectangle. */
+@layer components {
+  .step-pill {
+    border-width: 2.5px;
+    border-style: solid;
+    border-color: var(--tone);
+    border-radius: 32px;
+    --tw-shadow:
+      0 2px 0 color-mix(in srgb, var(--tone) 70%, black),
+      0 0 0 1px color-mix(in srgb, var(--tone) 30%, transparent),
+      0 7px 18px color-mix(in srgb, var(--tone) 38%, transparent);
+    box-shadow:
+      var(--tw-ring-offset-shadow, 0 0 #0000), var(--tw-ring-shadow, 0 0 #0000),
+      var(--tw-shadow);
+  }
 }
 
-.save-button-unsaved-dark {
-  animation: save-pulse 2s infinite;
+/* The left panel folded to a dock (paletteAsideClass in NodePalette.tsx):
+   a button grows as the pointer passes over it, its neighbours a little
+   less, as a desktop dock does. Grown from the centre so it stays inside
+   the capsule. */
+.palette-dock .dock-item {
+  transition: transform 0.15s ease-out;
+}
+.palette-dock .dock-item:hover {
+  transform: scale(1.3);
+  position: relative;
+  z-index: 1;
+}
+.palette-dock .dock-item:has(+ .dock-item:hover),
+.palette-dock .dock-item:hover + .dock-item {
+  transform: scale(1.12);
+}
+@media (prefers-reduced-motion: reduce) {
+  .palette-dock .dock-item {
+    transition: none;
+  }
+}
+/* The dock's one menu button (NodePalette.tsx): ink, the text colour
+   (near-black in light, white in dark), as no step uses it: it reads as
+   the dock's controls, not as another kind of step. */
+.dock-menu {
+  background-color: hsl(var(--foreground));
+  color: hsl(var(--background));
+}
+
+/* The header's buttons (App.tsx): round, like the dock's, on a quiet fill;
+   Save, the main action, in ink like the dock's menu button. Unlayered so
+   they win over the ghost button's own hover fill. */
+.header-actions > button {
+  width: 34px;
+  height: 34px;
+  border-radius: 9999px;
+  background-color: hsl(var(--muted));
+  box-shadow: inset 0 0 0 1px hsl(var(--foreground) / 0.1);
+  color: hsl(var(--foreground));
+}
+.header-actions > button:hover {
+  background-color: hsl(var(--muted));
+  box-shadow: inset 0 0 0 1px hsl(var(--foreground) / 0.25);
+}
+.header-actions > button svg {
+  width: 16px;
+  height: 16px;
+}
+.header-actions > button.header-save,
+.header-actions > button.header-save:hover {
+  background-color: hsl(var(--foreground));
+  color: hsl(var(--background));
+  box-shadow: none;
 }

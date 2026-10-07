@@ -13,6 +13,7 @@ import { HaSelector, HaSwitch } from '@/ha';
 import { useNodeErrors } from '@/hooks/useNodeErrors';
 import type { HassEntity } from '@/types/hass';
 import { GENERIC_STATES, getStateSuggestions, StateValueListField } from './StateValueCombobox';
+import { PanelTargets } from '../PanelSection';
 
 /** Narrows an `ha-selector` `value-changed` payload (a string or an array of strings for multiple:true) to the trigger's from/to shape: a bare string for one value, an array for 2+, or undefined for none. */
 function toStateListValue(value: unknown): string | string[] | undefined {
@@ -30,25 +31,22 @@ interface StateTriggerFieldsProps {
 }
 
 /**
- * Fields for the `state` trigger platform.
- * Renders entity_id, from/to (with not_from/not_to and explicit-null "any
- * state" support — see StateTransitionField), and the `for` duration.
+ * A State trigger's From and To (each with its "not" and explicit-null "any
+ * state" forms, see StateTransitionField), suggesting the states its
+ * entities have: in the property panel, and opened from the card's state
+ * pill (components/nodes/StatePill.tsx), so both write the same.
  */
-export function StateTriggerFields({ node, onChange, entities }: StateTriggerFieldsProps) {
-  const { t } = useTranslation(['nodes', 'common']);
-  const { getFieldError } = useNodeErrors(node.id);
-  const { entities: contextEntities } = useHass();
-
-  const allEntities = entities.length > 0 ? entities : contextEntities;
-
-  const data = node.data as Record<string, unknown>;
-  const entityIdRaw = data.entity_id;
-  const entityIds: string[] = Array.isArray(entityIdRaw)
-    ? entityIdRaw
-    : typeof entityIdRaw === 'string' && entityIdRaw
-      ? [entityIdRaw]
-      : [];
-
+export function StateTransitionFields({
+  data,
+  entityIds,
+  entities: allEntities,
+  onChange,
+}: {
+  data: Readonly<Record<string, unknown>>;
+  entityIds: string[];
+  entities: HassEntity[];
+  onChange: (key: string, value: unknown) => void;
+}) {
   // Collect state suggestions from all selected entities
   const stateSuggestions = useMemo(() => {
     if (entityIds.length === 0) return GENERIC_STATES;
@@ -61,30 +59,8 @@ export function StateTriggerFields({ node, onChange, entities }: StateTriggerFie
     return Array.from(allSuggestions);
   }, [entityIds, allEntities]);
 
-  // The `for`/`attribute` fields use the existing DynamicFieldRenderer
-  const forField = getTriggerFields('state').find((f) => f.name === 'for');
-  const attributeField = getTriggerFields('state').find((f) => f.name === 'attribute');
-
   return (
     <>
-      {/* Entity selector */}
-      <FormField label={t('nodes:triggers.fields.entityId')} required>
-        <HaSelector
-          selector={{ entity: { multiple: true } }}
-          value={entityIds}
-          onChange={(value) => onChange('entity_id', value)}
-          fallback={
-            <MultiEntitySelector
-              value={entityIds}
-              onChange={(value) => onChange('entity_id', value)}
-              entities={allEntities}
-              placeholder={t('common:placeholders.selectEntity')}
-            />
-          }
-        />
-        <FieldError message={getFieldError('entity_id')} />
-      </FormField>
-
       {/* From / Not From */}
       <StateTransitionField
         direction="from"
@@ -108,6 +84,62 @@ export function StateTriggerFields({ node, onChange, entities }: StateTriggerFie
         onChangeNotValue={(v) => onChange('not_to', v)}
         entityIds={entityIds}
         stateSuggestions={stateSuggestions}
+      />
+    </>
+  );
+}
+
+/**
+ * Fields for the `state` trigger platform.
+ * Renders entity_id, from/to (with not_from/not_to and explicit-null "any
+ * state" support — see StateTransitionField), and the `for` duration.
+ */
+export function StateTriggerFields({ node, onChange, entities }: StateTriggerFieldsProps) {
+  const { t } = useTranslation(['nodes', 'common']);
+  const { getFieldError } = useNodeErrors(node.id);
+  const { entities: contextEntities } = useHass();
+
+  const allEntities = entities.length > 0 ? entities : contextEntities;
+
+  const data = node.data as Record<string, unknown>;
+  const entityIdRaw = data.entity_id;
+  const entityIds: string[] = Array.isArray(entityIdRaw)
+    ? entityIdRaw
+    : typeof entityIdRaw === 'string' && entityIdRaw
+      ? [entityIdRaw]
+      : [];
+
+  // The `for`/`attribute` fields use the existing DynamicFieldRenderer
+  const forField = getTriggerFields('state').find((f) => f.name === 'for');
+  const attributeField = getTriggerFields('state').find((f) => f.name === 'attribute');
+
+  return (
+    <>
+      {/* Entity selector: What it acts on, in the side panel. */}
+      <PanelTargets>
+        <FormField label={t('nodes:triggers.fields.entityId')} required>
+          <HaSelector
+            selector={{ entity: { multiple: true } }}
+            value={entityIds}
+            onChange={(value) => onChange('entity_id', value)}
+            fallback={
+              <MultiEntitySelector
+                value={entityIds}
+                onChange={(value) => onChange('entity_id', value)}
+                entities={allEntities}
+                placeholder={t('common:placeholders.selectEntity')}
+              />
+            }
+          />
+          <FieldError message={getFieldError('entity_id')} />
+        </FormField>
+      </PanelTargets>
+
+      <StateTransitionFields
+        data={data}
+        entityIds={entityIds}
+        entities={allEntities}
+        onChange={onChange}
       />
 
       {/* Attribute (optional) */}
@@ -199,7 +231,9 @@ function StateTransitionField({
       : [];
 
   const label =
-    direction === 'from' ? t('nodes:triggers.fields.fromState') : t('nodes:triggers.fields.toState');
+    direction === 'from'
+      ? t('nodes:triggers.fields.fromState')
+      : t('nodes:triggers.fields.toState');
   const notLabel =
     direction === 'from'
       ? t('nodes:triggers.stateTransition.notFrom')

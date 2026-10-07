@@ -6,6 +6,8 @@ import { HaSwitch } from '@/ha';
 interface ContinueOnErrorFieldProps {
   checked: boolean;
   onChange: (checked: boolean) => void;
+  /** In plain words, for the card's "+ more". */
+  plain?: boolean;
 }
 
 /**
@@ -17,12 +19,16 @@ interface ContinueOnErrorFieldProps {
  * this same toggle four times, per CLAUDE.md's DRY mandate — mirrors
  * WaitFields.tsx's `continue_on_timeout` toggle styling.
  */
-export function ContinueOnErrorField({ checked, onChange }: ContinueOnErrorFieldProps) {
+export function ContinueOnErrorField({
+  checked,
+  onChange,
+  plain = false,
+}: ContinueOnErrorFieldProps) {
   const { t } = useTranslation(['nodes']);
   return (
     <FormField
-      label={t('nodes:actions.continueOnError')}
-      description={t('nodes:actions.continueOnErrorDescription')}
+      label={t(plain ? 'nodes:more.carryOn' : 'nodes:actions.continueOnError')}
+      description={t(plain ? 'nodes:more.carryOnHint' : 'nodes:actions.continueOnErrorDescription')}
     >
       <HaSwitch
         checked={checked}

@@ -1,6 +1,8 @@
 import { Plus, X } from 'lucide-react';
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
 import { type FlowTabState, useFlowStore } from '@/store/flow-store';
@@ -41,6 +43,13 @@ export function TabBar() {
   const { flowId, flowName, hasUnsavedChanges, tabOrder, backgroundTabs, switchTab, closeTab, openInNewTab } =
     useFlowStore();
 
+  // A tab with unsaved changes asks before it's closed (closing drops them).
+  const [pendingClose, setPendingClose] = useState<TabSummary | null>(null);
+  const requestClose = (tab: TabSummary) => {
+    if (tab.hasUnsavedChanges) setPendingClose(tab);
+    else closeTab(tab.flowId);
+  };
+
   if (tabOrder.length <= 1) return null;
 
   const activeTab: TabSummary = { flowId, flowName, hasUnsavedChanges };
@@ -71,13 +80,14 @@ export function TabBar() {
               <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" aria-hidden="true" />
             )}
             <span className="truncate">{tab.flowName || t('placeholders.automationName')}</span>
+            {/* Always shown, not only on hover: a touch screen has no hover. */}
             <button
               type="button"
               onClick={(e) => {
                 e.stopPropagation();
-                closeTab(tab.flowId);
+                requestClose(tab);
               }}
-              className="ml-0.5 shrink-0 rounded p-0.5 opacity-0 hover:bg-background focus-visible:opacity-100 group-hover:opacity-100"
+              className="-mr-1 ml-0.5 shrink-0 rounded p-1 text-muted-foreground hover:bg-background hover:text-foreground"
               title={t('titles.closeTab')}
               aria-label={t('titles.closeTab')}
             >
@@ -101,6 +111,21 @@ export function TabBar() {
         </TooltipTrigger>
         <TooltipContent>{t('titles.newTab')}</TooltipContent>
       </Tooltip>
+
+      <ConfirmDialog
+        open={pendingClose !== null}
+        onOpenChange={(open) => !open && setPendingClose(null)}
+        title={t('tabs.closeUnsavedTitle', {
+          name: pendingClose?.flowName || t('placeholders.automationName'),
+        })}
+        description={t('tabs.closeUnsavedDescription')}
+        confirmLabel={t('tabs.closeUnsavedConfirm')}
+        cancelLabel={t('tabs.keepEditing')}
+        onConfirm={() => {
+          if (pendingClose) closeTab(pendingClose.flowId);
+          setPendingClose(null);
+        }}
+      />
     </div>
   );
 }

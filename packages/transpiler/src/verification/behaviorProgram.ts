@@ -1,4 +1,9 @@
-import { type BoolExpr, boolExprEquivalent, normalizeAtomicCondition } from './boolean';
+import {
+  type BoolExpr,
+  boolExprEquivalent,
+  decidedValue,
+  normalizeAtomicCondition,
+} from './boolean';
 
 /**
  * A "behavior program": what an automation actually DOES, expressed at the
@@ -149,7 +154,20 @@ export function programsEquivalent(a: BProgram, b: BProgram, path = 'root'): Com
  * positives over false negatives" rule (see verifyNativeOutput.ts).
  */
 export function normalizeProgram(program: BProgram): BProgram {
-  let result = dropNoOpSteps(program.map(normalizeStep));
+  // #161: the rules for the steps after a `stop` run as a second pass, on
+  // the tree the first pass settled: run inside the first, cutting a
+  // branch's copied tail after its stop hid the tail the branches share
+  // (`[stop, R]` beside `[E, R]`) from the factoring below. The second pass
+  // is a function of the first's result, so what the first pass finds equal
+  // stays equal.
+  return normalizeTree(normalizeTree(program, false), true);
+}
+
+/** One normalization pass (see normalizeProgram); `stopRules` adds #161's
+ * rules for the steps after a stop. */
+function normalizeTree(program: BProgram, stopRules: boolean): BProgram {
+  const steps = dropNoOpSteps(program.map((step) => normalizeStep(step, stopRules)));
+  let result = stopRules ? afterStoppingBranches(untilStop(steps)) : steps;
 
   // Factor out a common trailing continuation that both branches of an
   // `if` step share, splitting it back out into sibling steps that follow
@@ -184,7 +202,10 @@ export function normalizeProgram(program: BProgram): BProgram {
           // Re-run the per-step fold on the trimmed if -- removing the
           // shared suffix can expose a new AND-fold/swap opportunity (e.g.
           // `then` becomes empty).
-          next.push(normalizeStep({ k: 'if', cond: step.cond, then, else: elseProgram }), ...suffix);
+          next.push(
+            normalizeStep({ k: 'if', cond: step.cond, then, else: elseProgram }, stopRules),
+            ...suffix
+          );
           changed = true;
           continue;
         }
@@ -195,6 +216,56 @@ export function normalizeProgram(program: BProgram): BProgram {
   }
 
   return result;
+}
+
+/** Whether a program's last step is a `stop` (the run ends there). */
+function endsInStop(program: BProgram): boolean {
+  const last = program.at(-1);
+  return last?.k === 'action' && 'stop' in last.call;
+}
+
+/** #161: a program up to its first `stop`: nothing after one runs (the
+ * YAML reading copies the steps after a choose into each case, a case
+ * that stops included). */
+function untilStop(program: BProgram): BProgram {
+  const stop = program.findIndex((step) => endsInStop([step]));
+  return stop === -1 ? program : program.slice(0, stop + 1);
+}
+
+/**
+ * #161: an `if` one of whose branches ends in a `stop` runs its other
+ * branch, and what follows, only when that branch is taken: `if C then
+ * [..., stop] else [E]; R` and `if C then [..., stop] else []; E; R` are
+ * the same run. The other branch is moved out after the if, so the steps
+ * after are in one place whichever way it was written: after the choose
+ * (a case that only stops, the steps after it) or in the other branch (the
+ * tree of ifs the graph reads).
+ */
+function afterStoppingBranches(program: BProgram): BProgram {
+  for (let i = 0; i < program.length; i++) {
+    const step = program[i];
+    if (step.k !== 'if') continue;
+    const thenStops = endsInStop(step.then);
+    if (thenStops === endsInStop(step.else)) continue;
+    const goesOn = thenStops ? step.else : step.then;
+    if (goesOn.length === 0) continue;
+    const emptied = normalizeStep(
+      {
+        k: 'if',
+        cond: step.cond,
+        then: thenStops ? step.then : [],
+        else: thenStops ? [] : step.else,
+      },
+      true
+    );
+    return afterStoppingBranches([
+      ...program.slice(0, i),
+      emptied,
+      ...goesOn,
+      ...program.slice(i + 1),
+    ]);
+  }
+  return program;
 }
 
 /**
@@ -222,8 +293,10 @@ function dropNoOpSteps(program: BProgram): BProgram {
     // its own. Left unhandled, a disabled `sequence:` group holding a
     // condition failed the gate and fell back to the state machine
     // (found 2026-09-27 in a real-HA fixture run).
-    if (step.k === 'if' && step.cond.op === 'const') {
-      out.push(...(step.cond.value ? step.then : step.else));
+    // Decided whatever its form (an and/or/not of disabled conditions).
+    const decided = step.k === 'if' ? decidedValue(step.cond) : undefined;
+    if (step.k === 'if' && decided !== undefined) {
+      out.push(...(decided ? step.then : step.else));
       continue;
     }
     if (step.k === 'parallel') {
@@ -255,10 +328,10 @@ function commonSuffixLength(a: BProgram, b: BProgram): number {
   return n;
 }
 
-function normalizeStep(step: BStep): BStep {
+function normalizeStep(step: BStep, stopRules: boolean): BStep {
   if (step.k === 'if') {
-    let then = normalizeProgram(step.then);
-    let elseProgram = normalizeProgram(step.else);
+    let then = normalizeTree(step.then, stopRules);
+    let elseProgram = normalizeTree(step.else, stopRules);
     let cond = step.cond;
 
     // Run the AND-chain fold and the then/else swap (see each block's own
@@ -277,7 +350,13 @@ function normalizeStep(step: BStep): BStep {
     // iteration either strictly reduces nesting depth (a fold) or strictly
     // moves content from else into then while zeroing else (a swap) on a
     // finite tree, so this cannot loop forever.
-    let changed = true;
+    //
+    // An if decided by disabled conditions is left as it is, for
+    // dropNoOpSteps to replace with the branch it always runs (#151): the
+    // swap below turned `if (disabled) then [] else [X]` into
+    // `if not(disabled) then [X]`, and a fold then ANDs such a condition
+    // with one that reads something, deciding nothing.
+    let changed = decidedValue(cond) === undefined;
     while (changed) {
       changed = false;
 
@@ -313,10 +392,10 @@ function normalizeStep(step: BStep): BStep {
     return { k: 'if', cond, then, else: elseProgram };
   }
   if (step.k === 'parallel') {
-    return { k: 'parallel', branches: step.branches.map(normalizeProgram) };
+    return { k: 'parallel', branches: step.branches.map((b) => normalizeTree(b, stopRules)) };
   }
   if (step.k === 'repeat') {
-    return { ...step, body: normalizeProgram(step.body) };
+    return { ...step, body: normalizeTree(step.body, stopRules) };
   }
   return step;
 }

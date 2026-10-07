@@ -2,6 +2,7 @@ import type { TriggerPlatform } from '@circuitry/shared';
 import { ChevronRight, Clock, Search, Sun, Zap } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { recipeChoiceKey } from '@/components/canvas/pickerCurrent';
 import { TruncatedTooltip } from '@/components/ui/truncated-tooltip';
 import { useHass } from '@/contexts/HassContext';
 import { useDeviceAutomation } from '@/hooks/useDeviceAutomation';
@@ -9,11 +10,16 @@ import type { DeviceTrigger } from '@/hooks/useDeviceAutomation';
 import { useStableEntityList } from '@/hooks/useStableEntityList';
 import { useTranslations } from '@/hooks/useTranslations';
 import { getDomainColor } from '@/lib/domain-colors';
-import { getDomainIcon } from '@/lib/domain-icons';
 import { buildCompositeValue, getTriggerLabel } from '@/lib/deviceTriggerLabels';
+import { useHaOffers, useTriggerCatalog } from '@/hooks/useHaCatalog';
+import { useNativeDescriptions } from '@/hooks/useNativeDescriptions';
+import { entityRecipeGroups, secondaryEntityCategories } from '@/lib/nativeTargets';
 import { getEntityRecipeGroup, type TriggerRecipe } from '@/lib/triggerRecipes';
+import { groupRecipesByHeading } from '@/lib/recipeRows';
+import { entityName } from '@/lib/entityNames';
 import { cn } from '@/lib/utils';
 import type { HassEntity } from '@/types/hass';
+import { entityPickerIcon, getPickerIcon, type PickerIcon } from '@/components/nodes/StepIcon';
 import { TriggerResultRow } from './TriggerResultRow';
 
 /**
@@ -27,7 +33,7 @@ import { TriggerResultRow } from './TriggerResultRow';
  *
  * Every branch is directly selectable, not just leaf entities: clicking an
  * area or a device aggregates results across everything under it (matching
- * HA's own dialog, where selecting "Master Bedroom" shows every trigger any
+ * HA's own dialog, where selecting "Bedroom" shows every trigger any
  * device in that room supports, grouped by domain), while clicking a single
  * entity narrows results down to just that entity.
  *
@@ -45,13 +51,16 @@ import { TriggerResultRow } from './TriggerResultRow';
  * reimplementing either.
  */
 export function getEntityName(entity: HassEntity): string {
-  return (entity.attributes.friendly_name as string) || entity.entity_id;
+  return entityName(entity, entity.entity_id);
 }
 
 export interface DeviceGroup {
   deviceId: string;
   name: string;
   entities: HassEntity[];
+  /** Its config and diagnostic entities (a battery level), for the types HA
+   * lets reach them (SelectedScope.secondaryEntityIds). */
+  secondaryEntityIds?: string[];
 }
 
 export interface EntityScope {
@@ -79,7 +88,8 @@ export function groupByDevice(
     } else {
       deviceMap.set(deviceId, {
         deviceId,
-        name: getDeviceNameById(deviceId) ?? deviceId,
+        // A device HA names nothing is named after its first entity, never its id.
+        name: getDeviceNameById(deviceId) || getEntityName(entity),
         entities: [entity],
       });
     }
@@ -98,12 +108,43 @@ export function groupByDevice(
  * "Entity > State" fallback row, which doesn't make sense for an
  * area/device-wide selection spanning multiple entities.
  */
+/** A room (an area) or a label whose types are listed together. */
+export interface RoomScope {
+  label: string;
+  /** Set for an area: the types that can target it offer "Anything in
+   * <room>" (a label has no area target). */
+  areaId?: string;
+}
+
 export interface SelectedScope {
   key: string;
   label: string;
   deviceIds: string[];
   entityIds: string[];
   singleEntityId?: string;
+  /** A room's (or label's) types, every entity in it at once: a type opens
+   * its entities to tick, "Anything in <room>" first where the type can
+   * target it, and a State row lists them all. */
+  room?: RoomScope;
+  /** The scope's config and diagnostic entities: only the types HA lets
+   * reach them (`primary_entities_only: false`, the battery's) list them. */
+  secondaryEntityIds?: string[];
+  /** A device picked under Generic > Device: only its own device triggers,
+   * conditions or actions (HA's `device_automation`), not its entities'
+   * types, as HA's own Device type offers. */
+  deviceAutomationsOnly?: boolean;
+}
+
+/** The entities whose types a scope lists: none for a device's own
+ * automations only (deviceAutomationsOnly). */
+export function scopeTypeEntityIds(scope: SelectedScope): string[] {
+  return scope.deviceAutomationsOnly ? [] : scope.entityIds;
+}
+
+/** A scope's config and diagnostic entities whose types it lists (only the
+ * types that reach them, secondaryEntityCategories). */
+export function scopeSecondaryEntityIds(scope: SelectedScope): string[] {
+  return scope.deviceAutomationsOnly ? [] : (scope.secondaryEntityIds ?? []);
 }
 
 export function allEntityIds(scope: EntityScope): string[] {
@@ -133,6 +174,7 @@ export function buildDeviceScope(key: string, group: DeviceGroup): SelectedScope
     deviceIds: [group.deviceId],
     entityIds: group.entities.map((e) => e.entity_id),
     singleEntityId,
+    ...(group.secondaryEntityIds?.length ? { secondaryEntityIds: group.secondaryEntityIds } : {}),
   };
 }
 
@@ -167,45 +209,45 @@ export interface UnassignedGroups {
 }
 
 /**
- * Splits the old flat "Unassigned" list (area-less devices + area-less
- * standalone entities) into the four subcategories real HA's own Settings >
- * Entities page groups things into — Entities, Helpers, Devices, Service —
- * per direct user request. Exported so WhenTriggerDialog.tsx/
- * AndConditionDialog.tsx/ThenActionDialog.tsx all build this split the same
- * way instead of each re-deriving it.
+ * The pickers' Unassigned, as Home Assistant's own target tree builds it
+ * (home-assistant/frontend's ha-automation-add-from-target.ts,
+ * `_loadUnassignedDevices` / `_loadUnassignedEntities`, read 2026-10-07):
  *
- * - `devices` is `ungroupedDevices` unchanged (devices with no area).
- * - `helpers` is pulled from *every* automation-relevant entity, not just
- *   the already area-less ones — helpers are inherently area-less as a
- *   concept in real HA (there's no "assign a room" option for them), so
- *   scoping this to unassignedStandaloneEntities would miss any helper a
- *   user *did* assign an area to (HA still lets you set one, it just isn't
- *   meaningful the way it is for a physical device).
- * - `entities` is what's left of unassignedStandaloneEntities once helper
- *   domains are pulled out.
- * - `services` is the exact old combined list, kept byte-for-byte — per
- *   explicit user direction that this subcategory should just be a
- *   relabeled copy of the previous single-list "Unassigned" behavior, not a
- *   new derivation.
+ * - `entities` and `helpers`: entities with no area and no device, split
+ *   by whether their domain's integration is a helper (HA: the manifest's
+ *   `integration_type === "helper"`); a helper given an area is in that
+ *   area, not here;
+ * - `devices` and `services`: devices with no area of their own (not
+ *   disabled), split by the registry's `entry_type === "service"`.
+ *
+ * (It used to list every helper, wherever it was, and Services repeated
+ * the other three lists; bug #180.)
  */
 export function buildUnassignedGroups(
-  allEntities: HassEntity[],
   ungroupedDevices: DeviceGroup[],
-  unassignedStandaloneEntities: HassEntity[]
+  unassignedStandaloneEntities: HassEntity[],
+  isHelper: (entity: HassEntity) => boolean,
+  isService: (deviceId: string) => boolean
 ): UnassignedGroups {
-  const helperEntities = allEntities
-    .filter((e) => HELPER_DOMAINS.has(e.entity_id.split('.')[0]))
-    .slice()
-    .sort((a, b) => getEntityName(a).localeCompare(getEntityName(b)));
-  const pureEntities = unassignedStandaloneEntities.filter(
-    (e) => !HELPER_DOMAINS.has(e.entity_id.split('.')[0])
-  );
-
+  const byName = (list: HassEntity[]) =>
+    list.slice().sort((a, b) => getEntityName(a).localeCompare(getEntityName(b)));
   return {
-    entities: { deviceGroups: [], standaloneEntities: pureEntities },
-    helpers: { deviceGroups: [], standaloneEntities: helperEntities },
-    devices: { deviceGroups: ungroupedDevices, standaloneEntities: [] },
-    services: { deviceGroups: ungroupedDevices, standaloneEntities: unassignedStandaloneEntities },
+    entities: {
+      deviceGroups: [],
+      standaloneEntities: byName(unassignedStandaloneEntities.filter((e) => !isHelper(e))),
+    },
+    helpers: {
+      deviceGroups: [],
+      standaloneEntities: byName(unassignedStandaloneEntities.filter(isHelper)),
+    },
+    devices: {
+      deviceGroups: ungroupedDevices.filter((g) => !isService(g.deviceId)),
+      standaloneEntities: [],
+    },
+    services: {
+      deviceGroups: ungroupedDevices.filter((g) => isService(g.deviceId)),
+      standaloneEntities: [],
+    },
   };
 }
 
@@ -225,8 +267,13 @@ export function TriggerTargetPicker({
   onSelectRecipe,
 }: TriggerTargetPickerProps) {
   const { t } = useTranslation(['nodes']);
-  const { areas, getAreaIdForEntity, getDeviceIdForEntity, getDeviceNameById, isAutomationRelevantEntity } =
-    useHass();
+  const {
+    areas,
+    getAreaIdForEntity,
+    getDeviceIdForEntity,
+    getDeviceNameById,
+    isAutomationRelevantEntity,
+  } = useHass();
   // Keeps `config`/`diagnostic`-category and hidden entities (auto-generated
   // "Identify" buttons, signal strength sensors, firmware update entities,
   // ...) out of the tree/results entirely — matching HA's own automation
@@ -263,7 +310,9 @@ export function TriggerTargetPicker({
   const areaGroups = useMemo(() => {
     return areas
       .map((area) => {
-        const areaEntities = entities.filter((e) => getAreaIdForEntity(e.entity_id) === area.area_id);
+        const areaEntities = entities.filter(
+          (e) => getAreaIdForEntity(e.entity_id) === area.area_id
+        );
         const scope = groupByDevice(areaEntities, getDeviceIdForEntity, getDeviceNameById);
         return { area, ...scope };
       })
@@ -336,7 +385,10 @@ export function TriggerTargetPicker({
             aria-label={isExpanded ? 'Collapse' : 'Expand'}
           >
             <ChevronRight
-              className={cn('h-3.5 w-3.5 text-muted-foreground transition-transform', isExpanded && 'rotate-90')}
+              className={cn(
+                'h-3.5 w-3.5 text-muted-foreground transition-transform',
+                isExpanded && 'rotate-90'
+              )}
             />
           </button>
           <TruncatedTooltip content={group.name}>
@@ -544,7 +596,11 @@ interface ResultRow {
   description?: string;
   chip: string | null;
   domain: string | undefined;
+  /** Its icon: its first entity's (by device class), else its domain's. */
+  icon: PickerIcon;
   onSelect: () => void;
+  /** The key it's chosen by (pickerCurrent.tsx's recipeChoiceKey). */
+  choiceKey?: string;
 }
 
 /**
@@ -556,12 +612,15 @@ export function TargetResultsPanel({
   selected,
   entities,
   onSelectEntityTarget,
+  onSelectStateTargets,
   onSelectDeviceTrigger,
   onSelectRecipe,
 }: {
   selected: SelectedScope | null;
   entities: HassEntity[];
   onSelectEntityTarget: (entityId: string) => void;
+  /** A room's State row: its entities, to tick. */
+  onSelectStateTargets?: (entityIds: string[]) => void;
   onSelectDeviceTrigger: (trigger: DeviceTrigger) => void;
   onSelectRecipe: (entityIds: string[], recipe: TriggerRecipe) => void;
 }) {
@@ -569,6 +628,10 @@ export function TargetResultsPanel({
   const { getDeviceTriggers } = useDeviceAutomation();
   const { translations } = useTranslations();
   const { getDeviceNameById } = useHass();
+  // Only the types the connected HA offers (hooks/useHaCatalog.ts).
+  const haOffers = useHaOffers('trigger');
+  const triggerCategories = useTriggerCatalog();
+  const triggerDescriptions = useNativeDescriptions('trigger');
   const [deviceTriggers, setDeviceTriggers] = useState<DeviceTrigger[]>([]);
   const [loading, setLoading] = useState(false);
 
@@ -636,8 +699,10 @@ export function TargetResultsPanel({
   const singleEntity = selected.singleEntityId
     ? entities.find((e) => e.entity_id === selected.singleEntityId)
     : undefined;
-  const singleEntityLabel = singleEntity ? getEntityName(singleEntity) : selected.singleEntityId;
-  const SingleEntityFallbackIcon = getDomainIcon(selected.singleEntityId?.split('.')[0], Zap);
+  const singleEntityLabel = selected.singleEntityId
+    ? entityName(singleEntity, selected.singleEntityId)
+    : undefined;
+  const SingleEntityFallbackIcon = entityPickerIcon(singleEntity, Zap);
 
   // Recipe rows: synthesized client-side from each selected entity's
   // domain/device_class (see lib/triggerRecipes.ts) — this is what actually
@@ -648,26 +713,28 @@ export function TargetResultsPanel({
   // into one multi-entity trigger per recipe rather than duplicate rows.
   // Grouped by the already-resolved `heading` text (not a raw domain key),
   // since that's now device_class-specific for binary_sensor/sensor.
-  const recipesByHeading = new Map<
-    string,
-    Map<string, { recipes: TriggerRecipe[]; entityIds: string[] }>
-  >();
-  for (const entityId of selected.entityIds) {
-    const entity = entities.find((e) => e.entity_id === entityId);
-    const group = getEntityRecipeGroup(entityId, entity);
-    if (!group) continue;
-    let byGroupKey = recipesByHeading.get(group.heading);
-    if (!byGroupKey) {
-      byGroupKey = new Map();
-      recipesByHeading.set(group.heading, byGroupKey);
-    }
-    const existing = byGroupKey.get(group.groupKey);
-    if (existing) {
-      existing.entityIds.push(entityId);
-    } else {
-      byGroupKey.set(group.groupKey, { recipes: group.recipes, entityIds: [entityId] });
-    }
-  }
+  // The types HA keeps each entity for (#166).
+  const secondary = new Set(scopeSecondaryEntityIds(selected));
+  const typeOf = (r: TriggerRecipe) => r.fields.trigger;
+  const recipesByHeading = groupRecipesByHeading(
+    [...scopeTypeEntityIds(selected), ...secondary],
+    (entityId) => {
+      const entity = entities.find((e) => e.entity_id === entityId);
+      const describe = (type: string) => triggerDescriptions[type];
+      const groups = entityRecipeGroups(
+        entity,
+        getEntityRecipeGroup(entityId, entity),
+        triggerCategories,
+        'trigger',
+        typeOf,
+        haOffers,
+        describe
+      );
+      return secondary.has(entityId) ? secondaryEntityCategories(groups, typeOf, describe) : groups;
+    },
+    undefined,
+    typeOf
+  );
 
   // Device-automation rows: the genuinely device-specific triggers fetched
   // from HA's `device_automation/trigger/list` API (button presses,
@@ -684,7 +751,10 @@ export function TargetResultsPanel({
     else deviceGroupsByHeading.set(heading, [trigger]);
   }
 
-  const allHeadings = new Set<string>([...recipesByHeading.keys(), ...deviceGroupsByHeading.keys()]);
+  const allHeadings = new Set<string>([
+    ...recipesByHeading.keys(),
+    ...deviceGroupsByHeading.keys(),
+  ]);
   const sortedHeadings = Array.from(allHeadings).sort((a, b) => a.localeCompare(b));
 
   return (
@@ -696,7 +766,9 @@ export function TargetResultsPanel({
       )}
 
       {!loading && sortedHeadings.length === 0 && !selected.singleEntityId && (
-        <p className="px-1.5 text-muted-foreground text-xs">{t('nodes:triggers.picker.noResults')}</p>
+        <p className="px-1.5 text-muted-foreground text-xs">
+          {t('nodes:triggers.picker.noResults')}
+        </p>
       )}
 
       {sortedHeadings.map((heading) => {
@@ -708,6 +780,10 @@ export function TargetResultsPanel({
           // what put them in the same group), so any one of them's domain
           // is representative for the icon.
           const domain = entityIds[0]?.split('.')[0];
+          const icon = entityPickerIcon(
+            entities.find((e) => e.entity_id === entityIds[0]),
+            Zap
+          );
           for (const recipe of recipes) {
             rows.push({
               key: `recipe::${recipe.id}::${entityIds.join(',')}`,
@@ -715,7 +791,9 @@ export function TargetResultsPanel({
               description: recipe.description,
               chip: selected.label,
               domain,
+              icon,
               onSelect: () => onSelectRecipe(entityIds, recipe),
+              choiceKey: recipeChoiceKey(recipe.id, entityIds),
             });
           }
         }
@@ -731,6 +809,7 @@ export function TargetResultsPanel({
             ),
             chip: getDeviceNameById(trigger.device_id),
             domain: trigger.entity_id?.split('.')[0] ?? trigger.domain,
+            icon: getPickerIcon(trigger.entity_id?.split('.')[0] ?? trigger.domain, Zap),
             onSelect: () => onSelectDeviceTrigger(trigger),
           });
         }
@@ -742,12 +821,13 @@ export function TargetResultsPanel({
               {rows.map((row) => (
                 <TriggerResultRow
                   key={row.key}
-                  icon={getDomainIcon(row.domain, Zap)}
+                  icon={row.icon}
                   color={getDomainColor(row.domain)}
                   label={row.label}
                   description={row.description}
                   chip={row.chip}
                   onSelect={row.onSelect}
+                  choiceKey={row.choiceKey}
                 />
               ))}
             </div>
@@ -766,6 +846,19 @@ export function TargetResultsPanel({
             label={t('nodes:triggers.platforms.state')}
             chip={singleEntityLabel ?? null}
             onSelect={() => onSelectEntityTarget(selected.singleEntityId as string)}
+          />
+        </div>
+      )}
+      {selected.room && onSelectStateTargets && selected.entityIds.length > 0 && (
+        <div>
+          <h4 className="px-1.5 py-1 font-semibold text-muted-foreground text-xs">
+            {t('nodes:triggers.picker.groups.entity')}
+          </h4>
+          <TriggerResultRow
+            icon={Zap}
+            label={t('nodes:triggers.platforms.state')}
+            chip={selected.label}
+            onSelect={() => onSelectStateTargets(selected.entityIds)}
           />
         </div>
       )}

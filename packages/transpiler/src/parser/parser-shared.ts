@@ -172,6 +172,25 @@ export function stepEnabledAsWritten(enabled: unknown): boolean | string | undef
 }
 
 /**
+ * The aliases a block's condition node holds (#143): its first (gate)
+ * condition carries the block's alias, where the canvas shows it, and the
+ * condition's own alias beside it in `_conditionAlias` (both strategies
+ * write that one back inside the condition); any other condition holds its
+ * own. With one slot for both, the condition's own alias was lost (or took
+ * the block's place) whenever it was a block's first.
+ */
+export function conditionAliases(
+  isGate: boolean,
+  blockAlias: unknown,
+  conditionAlias: unknown
+): { alias: string | undefined; _conditionAlias?: string } {
+  const text = (value: unknown) => (typeof value === 'string' ? value : undefined);
+  if (!isGate) return { alias: text(conditionAlias) };
+  const own = text(conditionAlias);
+  return { alias: text(blockAlias), ...(own !== undefined ? { _conditionAlias: own } : {}) };
+}
+
+/**
  * A condition's own `enabled`, as written (bug #64): `false`, a template
  * (HA accepts `enabled: "{{ ... }}"` on a condition), or `undefined` for
  * enabled. `true` is the default, so it's dropped. A disabled block

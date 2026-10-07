@@ -32,7 +32,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from './tooltip';
  * tooltip would render on every hover regardless of whether the label fit —
  * which is exactly the bug a user reported: hovering an untruncated
  * Miller-column row (e.g. "Living Room", no shorter than sibling rows like
- * "Master Bathroom" that never showed a tooltip) still popped a floating
+ * "Guest bathroom" that never showed a tooltip) still popped a floating
  * tooltip box over the row. Checking live at hover time (rather than once
  * on mount) also means a column that's been resized wider/narrower via
  * ResizableColumn's drag handle is always re-evaluated correctly, with no
@@ -55,7 +55,8 @@ export function TruncatedTooltip({
   const handleOpenChange = (next: boolean) => {
     if (next) {
       const el = triggerRef.current;
-      if (!el || el.scrollWidth <= el.clientWidth) {
+      // Clipped across (one line, an ellipsis) or down (a line clamp).
+      if (!el || (el.scrollWidth <= el.clientWidth && el.scrollHeight <= el.clientHeight)) {
         // Not actually clipped — refuse to open. Leaving `open` at its
         // current value (false) rather than calling setOpen(false) avoids
         // an extra no-op render on every hover of an untruncated row.

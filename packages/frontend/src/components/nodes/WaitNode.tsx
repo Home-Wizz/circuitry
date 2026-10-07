@@ -1,19 +1,18 @@
-import { Handle, type NodeProps, Position } from '@xyflow/react';
+import type { NodeProps } from '@xyflow/react';
 import { Hourglass } from 'lucide-react';
 import { memo } from 'react';
 import { useTranslation } from 'react-i18next';
-import { StepStopsHere } from '@/components/nodes/ConventionMarkers';
+import { WaitTimeoutPill } from './WaitTimeoutPill';
 import { TruncatedTooltip } from '@/components/ui/truncated-tooltip';
 import { useNodeErrors } from '@/hooks/useNodeErrors';
 import { useTraceNodeState } from '@/hooks/useTraceNodeState';
 import { useTriggerCardDisplay } from '@/hooks/useTriggerCardDisplay';
-import { getTraceStateClass, NODE_COLORS, NODE_STATE_CLASSES, SELECTED_NODE_STYLE } from '@/lib/node-colors';
-import { cn } from '@/lib/utils';
+import { getTraceStateClass } from '@/lib/node-colors';
 import type { WaitNodeData } from '@/store/flow-store';
 import { useFlowStore } from '@/store/flow-store';
-import { NodeStatusBadge } from './NodeStatusBadge';
+import { phraseAfterName, StepFrame } from './StepCard';
+import { TemplateLine } from './TemplateLine';
 
-const COLORS = NODE_COLORS.wait;
 const MAX_VISIBLE_TRIGGERS = 3;
 
 interface WaitNodeProps extends NodeProps {
@@ -21,7 +20,7 @@ interface WaitNodeProps extends NodeProps {
 }
 
 export const WaitNode = memo(function WaitNode({ id, data, selected }: WaitNodeProps) {
-  const { t } = useTranslation(['common', 'nodes']);
+  const { t, i18n } = useTranslation(['common', 'nodes']);
   const activeNodeId = useFlowStore((s) => s.activeNodeId);
   const getExecutionStepNumber = useFlowStore((s) => s.getExecutionStepNumber);
   const { hasErrors, errorMessages, warningMessages } = useNodeErrors(id);
@@ -34,59 +33,45 @@ export const WaitNode = memo(function WaitNode({ id, data, selected }: WaitNodeP
   const waitTriggers = data.wait_for_trigger ?? [];
   const visibleWaitTriggers = waitTriggers.slice(0, MAX_VISIBLE_TRIGGERS);
   const hiddenWaitTriggerCount = waitTriggers.length - visibleWaitTriggers.length;
+  // One trigger to wait for reads as a sentence: "wait until [Hallway
+  // motion] is clear"; several are listed under "wait for".
+  const [onlyTrigger] = waitTriggers.length === 1 ? waitTriggers : [];
+  const only = onlyTrigger ? getTriggerDisplayInfo(onlyTrigger) : undefined;
+  const untilSentence =
+    only?.phrase && only.title
+      ? `${t('nodes:cardVerbs.waitUntil')} ${only.title} ${phraseAfterName(only.phrase, i18n.language)}`
+      : undefined;
+  const sentence =
+    data.alias ||
+    untilSentence ||
+    t(data.wait_template ? 'nodes:cardVerbs.waitUntil' : 'nodes:cardVerbs.waitFor');
 
   return (
-    <div
-      style={selected ? SELECTED_NODE_STYLE : undefined}
-      className={cn(
-        'relative min-w-[140px] rounded-lg border-2 px-4 py-3',
-        COLORS.border,
-        COLORS.bg,
-        'transition-all duration-200',
-        isActive && NODE_STATE_CLASSES.active,
-        isDisabled && 'border-dashed opacity-50 grayscale',
-        hasErrors && NODE_STATE_CLASSES.error,
-        getTraceStateClass(traceState)
-      )}
+    <StepFrame
+      nodeId={id}
+      tone="wait"
+      icon={Hourglass}
+      iconKey="wait"
+      lead={t('nodes:picker.kinds.then')}
+      sentence={
+        <>
+          {sentence}
+          <WaitTimeoutPill nodeId={id} data={data} />
+        </>
+      }
+      stepNumber={stepNumber}
+      selected={selected ?? false}
+      isActive={isActive}
+      isDisabled={isDisabled}
+      hasErrors={hasErrors}
+      errorMessages={errorMessages}
+      warningMessages={warningMessages}
+      traceClass={getTraceStateClass(traceState)}
+      roleLabel={null}
+      hasSourceHandle
     >
-      <NodeStatusBadge
-        errorMessages={errorMessages}
-        warningMessages={warningMessages}
-        isDisabled={isDisabled}
-      />
-      <Handle type="target" position={Position.Left} className={cn('w-3! h-3!', COLORS.handle)} />
-
-      <div className="mb-1 flex items-center gap-2">
-        <div className={cn('rounded p-1', COLORS.chip)}>
-          <Hourglass className={cn('h-4 w-4', COLORS.text)} />
-        </div>
-        <span className={cn('font-semibold text-sm', COLORS.text)}>
-          {data.alias || t('nodes:types.wait')}
-        </span>
-        {stepNumber && (
-          <div
-            className={cn(
-              'ml-auto flex h-5 w-5 items-center justify-center rounded-full font-bold text-xs',
-              COLORS.badge
-            )}
-          >
-            {stepNumber}
-          </div>
-        )}
-      </div>
-
-      <div className={cn('space-y-0.5 text-xs', COLORS.text)}>
-        {data.wait_template && (
-          <TruncatedTooltip content={data.wait_template}>
-            <div className="truncate font-mono text-[10px] opacity-75">
-              {data.wait_template.slice(0, 30)}
-              {'...'}
-            </div>
-          </TruncatedTooltip>
-        )}
-      </div>
-
-      {waitTriggers.length > 0 && (
+      {data.wait_template && <TemplateLine template={data.wait_template} />}
+      {waitTriggers.length > 0 && !untilSentence && (
         <div className="mt-2 space-y-1">
           {visibleWaitTriggers.map((trigger, idx) => {
             const info = getTriggerDisplayInfo(trigger);
@@ -114,9 +99,6 @@ export const WaitNode = memo(function WaitNode({ id, data, selected }: WaitNodeP
           )}
         </div>
       )}
-
-      <Handle type="source" position={Position.Right} className={cn('w-3! h-3!', COLORS.handle)} />
-      <StepStopsHere nodeId={id} />
-    </div>
+    </StepFrame>
   );
 });

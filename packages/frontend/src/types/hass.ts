@@ -1,3 +1,4 @@
+import type { AutomationMode, MaxExceeded } from '@circuitry/shared';
 import type { HomeAssistant as CustomCardHomeAssistant } from 'custom-card-helpers';
 import type { HassServices } from 'home-assistant-js-websocket';
 
@@ -67,9 +68,9 @@ export interface AutomationConfig {
   id?: string;
   alias?: string;
   description?: string;
-  mode?: 'single' | 'restart' | 'queued' | 'parallel';
+  mode?: AutomationMode;
   max?: number;
-  max_exceeded?: 'silent' | 'warning' | 'critical';
+  max_exceeded?: MaxExceeded;
   trigger?: unknown[];
   triggers?: unknown[];
   condition?: unknown[];
