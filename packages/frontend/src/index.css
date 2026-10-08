@@ -404,27 +404,23 @@
 }
 
 /* A node colour as a small round icon (StepIcon.tsx). `--tone` is the
-   node's colour (toneStyle in lib/node-colors.ts); where the browser can,
-   it's pushed brighter and more saturated first.
-   .node-neon: a solid disc with a white symbol (the side panel's rows),
-   without a glow.
+   node's colour (toneStyle in lib/node-colors.ts).
+   .node-neon: a flat disc in the plain step colour with a white symbol
+   (the side panel, its dock, the pickers' headings), the same colour as
+   the canvas cards: no boost, inner ring or glow.
    .node-neon-soft: a circle tinted with the colour, no ring, for a colour
-   emoji (the canvas cards). Neither glows. */
-.node-neon,
+   emoji (the canvas cards); where the browser can, the colour is pushed
+   brighter and more saturated first. Neither glows. */
+.node-neon {
+  background-color: var(--tone);
+  color: white;
+}
 .node-neon-soft {
   --neon: var(--tone);
-}
-.node-neon {
-  background-color: var(--neon);
-  color: white;
-  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.28);
-}
-.node-neon-soft {
   background-color: color-mix(in srgb, var(--neon) 18%, transparent);
   color: var(--neon);
 }
 @supports (color: oklch(from red l c h)) {
-  .node-neon,
   .node-neon-soft {
     --neon: oklch(from var(--tone) clamp(0.6, l, 0.74) calc(c * 1.3 + 0.04) h);
   }
@@ -432,7 +428,9 @@
 
 /* A step's card on the canvas (StepCard.tsx): a pill edged in the step's
    colour (`--tone`, toneStyle in lib/node-colors.ts), a darker lip under it
-   and a soft shadow in the same colour. It sits in the components layer so
+   and a faint neutral shadow. The empty canvas's first pill
+   (EmptyCanvasPrompt.tsx) adds .step-pill-glow, a soft shadow in its own
+   colour instead. It sits in the components layer so
    a card's state classes (an error, a dashed placeholder) still win. The
    shadow goes through `--tw-shadow`, so the rings for a run or an error add
    to it rather than replacing it. The radius is fixed rather than full, so
@@ -446,10 +444,16 @@
     --tw-shadow:
       0 2px 0 color-mix(in srgb, var(--tone) 70%, black),
       0 0 0 1px color-mix(in srgb, var(--tone) 30%, transparent),
-      0 7px 18px color-mix(in srgb, var(--tone) 38%, transparent);
+      0 4px 10px rgb(15 23 42 / 0.1);
     box-shadow:
       var(--tw-ring-offset-shadow, 0 0 #0000), var(--tw-ring-shadow, 0 0 #0000),
       var(--tw-shadow);
+  }
+  .step-pill-glow {
+    --tw-shadow:
+      0 2px 0 color-mix(in srgb, var(--tone) 70%, black),
+      0 0 0 1px color-mix(in srgb, var(--tone) 30%, transparent),
+      0 7px 18px color-mix(in srgb, var(--tone) 38%, transparent);
   }
 }
 
@@ -486,8 +490,8 @@
    Save, the main action, in ink like the dock's menu button. Unlayered so
    they win over the ghost button's own hover fill. */
 .header-actions > button {
-  width: 34px;
-  height: 34px;
+  width: 30px;
+  height: 30px;
   border-radius: 9999px;
   background-color: hsl(var(--muted));
   box-shadow: inset 0 0 0 1px hsl(var(--foreground) / 0.1);
@@ -498,8 +502,8 @@
   box-shadow: inset 0 0 0 1px hsl(var(--foreground) / 0.25);
 }
 .header-actions > button svg {
-  width: 16px;
-  height: 16px;
+  width: 13px;
+  height: 13px;
 }
 .header-actions > button.header-save,
 .header-actions > button.header-save:hover {

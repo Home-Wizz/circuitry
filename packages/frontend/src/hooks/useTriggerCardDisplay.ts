@@ -26,6 +26,11 @@ export interface TriggerDisplayInfo {
   phrase?: string;
 }
 
+/** A trigger in one line, as its card reads: its device and what happens
+ * ("Hall · turns off"). */
+export const triggerSummary = (info: TriggerDisplayInfo): string =>
+  [info.title, info.subtitle].filter(Boolean).join(' · ');
+
 /**
  * Device-name-plus-plain-language-phrase resolution for a
  * trigger — originally lived inline in TriggerNode.tsx's own getDisplayInfo,

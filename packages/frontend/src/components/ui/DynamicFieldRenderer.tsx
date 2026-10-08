@@ -28,6 +28,7 @@ import type { FieldConfig } from '@/config/triggerFields';
 import { HaEntityPicker, HaSelect, HaSelector, HaSwitch } from '@/ha';
 import type { TriggerField } from '@/hooks/useDeviceAutomation';
 import type { HassEntity } from '@/types/hass';
+import { cn } from '@/lib/utils';
 
 interface DynamicFieldRendererProps {
   /**
@@ -72,6 +73,13 @@ interface DynamicFieldRendererProps {
    * actual attributes instead of listing every attribute name HA knows.
    */
   entityIdContext?: string | string[];
+
+  /** Shown but not editable, its label faded (a duration field so far: a
+   * "for" the step can't use, #182). */
+  disabled?: boolean;
+
+  /** Said under the field in place of its description (why it's off). */
+  note?: string;
 }
 
 /**
@@ -87,6 +95,8 @@ export function DynamicFieldRenderer({
   translations = {},
   error,
   entityIdContext,
+  disabled,
+  note,
 }: DynamicFieldRendererProps) {
   const { t } = useTranslation(['common', 'nodes']);
   // Extract common properties
@@ -551,7 +561,13 @@ export function DynamicFieldRenderer({
 
       // Duration input - supports both string (HH:MM:SS) and object ({ hours, minutes, seconds }) formats
       case 'duration':
-        return <DurationInput value={(value as DurationValue) ?? ''} onChange={onChange} />;
+        return (
+          <DurationInput
+            value={(value as DurationValue) ?? ''}
+            onChange={onChange}
+            disabled={disabled}
+          />
+        );
 
       // Object/JSON input
       case 'object':
@@ -681,13 +697,15 @@ export function DynamicFieldRenderer({
 
   return (
     <div className="space-y-2">
-      <Label className="font-medium text-muted-foreground text-xs">
+      <Label className={cn('font-medium text-muted-foreground text-xs', disabled && 'opacity-50')}>
         {label}
         {required && <span className="ml-1 text-destructive">{t('labels.requiredAsterisk')}</span>}
       </Label>
       {renderField()}
       <FieldError message={error} />
-      {description && <p className="text-muted-foreground text-xs">{description}</p>}
+      {(note ?? description) && (
+        <p className="text-muted-foreground text-xs">{note ?? description}</p>
+      )}
     </div>
   );
 }

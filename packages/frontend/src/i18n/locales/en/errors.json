@@ -91,7 +91,17 @@
       "boundEmpty": "This is empty: set a number or an entity, or clear it (Home Assistant refuses an empty value)",
       "timeRequired": "Set After, Before or weekdays (Home Assistant needs at least one)",
       "timeBlank": "This is empty: set a value or clear it (Home Assistant refuses an empty value)",
-      "weekdayEmpty": "No weekdays are selected, so this condition is never true"
+      "weekdayEmpty": "No weekdays are selected, so this condition is never true",
+      "forRefused": {
+        "states": "Home Assistant 2026.10 and later refuse \"for\" with more than one state. Clear it, or keep one state.",
+        "attribute": "Home Assistant 2026.10 and later refuse \"for\" with an attribute. Clear it, or clear the attribute.",
+        "helper": "Home Assistant 2026.10 and later refuse \"for\" with a state taken from a helper. Clear it, or type the state itself."
+      },
+      "forRefusedLater": {
+        "states": "Home Assistant 2026.10 and later refuse \"for\" with more than one state: this stops working when Home Assistant updates. Clear it, or keep one state.",
+        "attribute": "Home Assistant 2026.10 and later refuse \"for\" with an attribute: this stops working when Home Assistant updates. Clear it, or clear the attribute.",
+        "helper": "Home Assistant 2026.10 and later refuse \"for\" with a state taken from a helper: this stops working when Home Assistant updates. Clear it, or type the state itself."
+      }
     },
     "setVariables": {
       "atLeastOne": "At least one variable must be defined",

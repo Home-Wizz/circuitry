@@ -1016,6 +1016,11 @@
     "fillIn": "Ausfüllen",
     "level": "Wert",
     "forAtLeast": "Mindestens (optional)",
+    "forBlocked": {
+      "states": "Nur mit einem Zustand. Home Assistant kann nur einen einzelnen Zustand zeitlich messen, daher ist dies aus, solange mehr als einer gewählt ist.",
+      "attribute": "Nicht mit einem Attribut. Home Assistant kann nur den Zustand selbst zeitlich messen, daher ist dies aus, solange ein Attribut gesetzt ist.",
+      "helper": "Nicht mit einem Zustand aus einem Helfer. Home Assistant kann nur einen eingegebenen Zustand zeitlich messen, daher ist dies aus, solange ein Helfer gewählt ist."
+    },
     "moreOptions": "Weitere Optionen",
     "back": "Zurück",
     "nextSettings": "Weiter: Einstellungen",

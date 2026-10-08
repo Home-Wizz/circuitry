@@ -1,8 +1,13 @@
+import { type StateForRefusal, stateForBlocked } from '@circuitry/shared';
 import { useTranslation } from 'react-i18next';
-import { DurationInput, type DurationValue } from '@/components/panels/node-fields/DurationField';
+import {
+  DurationInput,
+  type DurationValue,
+  hasMilliseconds,
+} from '@/components/panels/node-fields/DurationField';
 import { FieldHeading } from '@/components/ui/field-heading';
 import type { NativeDescription } from '@/lib/nativeDescriptions';
-import { isRecord } from '@/lib/utils';
+import { cn, isRecord } from '@/lib/utils';
 
 type Kind = 'trigger' | 'condition';
 
@@ -61,8 +66,24 @@ export function canHoldFor(
   return type.includes('.') && isRecord(fields) && 'for' in fields;
 }
 
+/** Why the step can't be asked to hold (bug #182: a State condition with
+ * several states, an attribute or a helper's state, which HA 2026.10
+ * refuses with a "for"), or null. */
+export function holdForBlocked(
+  kind: Kind,
+  data: Readonly<Record<string, unknown>>
+): StateForRefusal | null {
+  return kind === 'condition' ? stateForBlocked(data) : null;
+}
+
+/** The i18n key of what's said under a "for" the step can't use. */
+export const holdForBlockedNote = (
+  reason: StateForRefusal
+): `nodes:pickerConfig.forBlocked.${StateForRefusal}` => `nodes:pickerConfig.forBlocked.${reason}`;
+
 /** "For at least (optional)" and its duration, as the Fill in column and
- * the card's pills ask it. */
+ * the card's pills ask it. Off, with the reason, where the step can't use
+ * one; one already set stays editable (to clear it), the reason in red. */
 export function HoldForField({
   kind,
   data,
@@ -73,12 +94,25 @@ export function HoldForField({
   onPatch: (patch: Record<string, unknown>) => void;
 }) {
   const { t } = useTranslation(['nodes']);
+  const value = holdForValue(kind, data);
+  const blocked = holdForBlocked(kind, data);
+  const off = blocked !== null && value === undefined;
   return (
     <FieldHeading label={t('nodes:pickerConfig.forAtLeast')}>
       <DurationInput
-        value={holdForValue(kind, data) ?? ''}
+        value={value ?? ''}
         onChange={(next) => onPatch(holdForPatch(kind, data, next))}
+        disabled={off}
+        milliseconds={hasMilliseconds(value)}
       />
+      {blocked && (
+        <p
+          data-testid="hold-for-blocked"
+          className={cn('text-xs', off ? 'text-muted-foreground' : 'text-destructive')}
+        >
+          {t(holdForBlockedNote(blocked))}
+        </p>
+      )}
     </FieldHeading>
   );
 }

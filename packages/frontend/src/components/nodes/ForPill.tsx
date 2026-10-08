@@ -1,5 +1,5 @@
 import { useTranslation } from 'react-i18next';
-import { DurationInput } from '@/components/panels/node-fields/DurationField';
+import { DurationInput, hasMilliseconds } from '@/components/panels/node-fields/DurationField';
 import type { NodeColorToken } from '@/lib/node-colors';
 import { useFlowStore } from '@/store/flow-store';
 import { EditPill, PILL_TEXT } from './EditPill';
@@ -34,10 +34,12 @@ export function ForPill({
         tone={tone}
         testId="for-pill"
         ariaLabel={t('nodes:pill.editFor')}
+        contentClassName="w-80"
         editor={() => (
           <DurationInput
             value={value}
             onChange={(next) => updateNodeData(nodeId, holdForPatch(kind, data, next))}
+            milliseconds={hasMilliseconds(value)}
           />
         )}
       >

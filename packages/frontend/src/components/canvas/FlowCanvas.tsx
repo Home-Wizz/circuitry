@@ -10,6 +10,7 @@ import {
   Panel,
   ReactFlow,
   useReactFlow,
+  useStoreApi,
 } from '@xyflow/react';
 import {
   type DragEvent,
@@ -23,7 +24,11 @@ import { useTranslation } from 'react-i18next';
 import { CanvasContextMenu, type ContextMenuTarget } from '@/components/canvas/CanvasContextMenu';
 import { type Point, useRightDragSelect } from '@/components/canvas/useRightDragSelect';
 import { nodesInBox } from '@/lib/canvasEdits';
-import { type CanvasExtent, CanvasScrollbars } from '@/components/canvas/CanvasScrollbars';
+import {
+  type CanvasExtent,
+  CanvasScrollbars,
+  extentWithVisible,
+} from '@/components/canvas/CanvasScrollbars';
 import { QuickAddMenu, type QuickAddPosition } from '@/components/canvas/QuickAddMenu';
 import {
   ChooseChainEdge,
@@ -88,7 +93,8 @@ export function FlowCanvas() {
   } = useFlowStore();
 
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
-  const { screenToFlowPosition, getNodesBounds } = useReactFlow();
+  const { screenToFlowPosition, getNodesBounds, getViewport } = useReactFlow();
+  const flowStore = useStoreApi();
   const [quickAdd, setQuickAdd] = useState<QuickAddState | null>(null);
   const [contextMenuTarget, setContextMenuTarget] = useState<ContextMenuTarget | null>(null);
   const closeContextMenu = useCallback(() => setContextMenuTarget(null), []);
@@ -197,6 +203,11 @@ export function FlowCanvas() {
     minY: number;
   } | null>(null);
 
+  // Bumped when a pan or zoom ends, so the pan limit takes in what's on
+  // screen then (extentWithVisible).
+  const [viewEnded, setViewEnded] = useState(0);
+  const onMoveEnd = useCallback(() => setViewEnded((n) => n + 1), []);
+
   const contentExtent = useMemo((): CanvasExtent => {
     const CONTENT_MARGIN = 400;
     const DEFAULT_EXTENT: CanvasExtent = { minX: -1000, minY: -1000, maxX: 1000, maxY: 1000 };
@@ -244,12 +255,28 @@ export function FlowCanvas() {
     };
   }, [nodes, getNodesBounds, flowId]);
 
+  // ...taking in what's on screen (bug #184: smaller than the screen, the
+  // limit made the next pan or click re-centre a lone node, which seemed to
+  // move by itself). Read when the nodes change or a pan or zoom ends.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: viewEnded stands for the viewport, read with getViewport
+  const panExtent = useMemo((): CanvasExtent => {
+    const { width, height } = flowStore.getState();
+    if (!(width > 0 && height > 0)) return contentExtent;
+    const { x, y, zoom } = getViewport();
+    return extentWithVisible(contentExtent, {
+      minX: -x / zoom,
+      minY: -y / zoom,
+      maxX: (width - x) / zoom,
+      maxY: (height - y) / zoom,
+    });
+  }, [contentExtent, viewEnded, getViewport, flowStore]);
+
   const translateExtent = useMemo(
     (): [[number, number], [number, number]] => [
-      [contentExtent.minX, contentExtent.minY],
-      [contentExtent.maxX, contentExtent.maxY],
+      [panExtent.minX, panExtent.minY],
+      [panExtent.maxX, panExtent.maxY],
     ],
-    [contentExtent]
+    [panExtent]
   );
 
   // Initial framing is handled entirely by the `fitView`/`fitViewOptions`
@@ -561,6 +588,7 @@ export function FlowCanvas() {
         maxZoom={2}
         minZoom={0.3}
         translateExtent={translateExtent}
+        onMoveEnd={onMoveEnd}
         fitView
         fitViewOptions={{ padding: 0.2, maxZoom: 1 }}
         snapToGrid
@@ -634,7 +662,7 @@ export function FlowCanvas() {
         )}
       </ReactFlow>
 
-      <CanvasScrollbars wrapperRef={reactFlowWrapper} extent={contentExtent} />
+      <CanvasScrollbars wrapperRef={reactFlowWrapper} extent={panExtent} />
 
       {rightDragBox && (
         <div

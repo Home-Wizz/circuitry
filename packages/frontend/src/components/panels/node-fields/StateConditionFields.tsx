@@ -2,6 +2,7 @@ import type { FlowNode } from '@circuitry/shared';
 import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { FieldError } from '@/components/forms/FieldError';
+import { holdForBlocked, holdForBlockedNote, holdForValue } from '@/components/nodes/holdFor';
 import { FormField } from '@/components/forms/FormField';
 import { DynamicFieldRenderer } from '@/components/ui/DynamicFieldRenderer';
 import { Input } from '@/components/ui/input';
@@ -129,6 +130,11 @@ export function StateConditionFields({ node, onChange, entities }: StateConditio
   const attributeValue = getNodeDataString(node, 'attribute');
 
   const forField = getConditionFields('state').find((f) => f.name === 'for');
+  // Off with the reason where HA 2026.10 refuses a "for" (bug #182); one
+  // already set stays editable, with its error where HA refuses it.
+  const forValue = holdForValue('condition', nodeData);
+  const forBlocked = holdForBlocked('condition', nodeData);
+  const forError = getFieldError('for');
 
   return (
     <>
@@ -172,7 +178,9 @@ export function StateConditionFields({ node, onChange, entities }: StateConditio
           value={nodeData[forField.name]}
           onChange={(value) => onChange(forField.name, value)}
           entities={allEntities}
-          error={getFieldError(forField.name)}
+          error={forError}
+          disabled={forBlocked !== null && forValue === undefined}
+          note={forBlocked && !forError ? t(holdForBlockedNote(forBlocked)) : undefined}
         />
       )}
     </>

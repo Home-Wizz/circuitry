@@ -83,6 +83,8 @@ import { useHaThemeSync } from './hooks/useHaThemeSync';
 import { useLanguage } from './hooks/useLanguage';
 import { useLoadAutomation } from './hooks/useLoadAutomation';
 import { useFlowStore } from './store/flow-store';
+import logoBadgeDark from './assets/circuitry-round-dark.svg';
+import logoBadgeLight from './assets/circuitry-round-light.svg';
 
 const PALETTE_RAIL_KEY = 'circuitry_palette_rail';
 
@@ -98,7 +100,8 @@ function PanelLoading() {
 /**
  * Keeps the store's service checks in step with the connected HA: each
  * service's required fields (#125: an action step leaving one empty gets a
- * warning) and which entities each service takes (#130).
+ * warning), which entities each service takes (#130), and HA's version
+ * (#182).
  */
 function ServiceChecksSync() {
   const { hass } = useHass();
@@ -114,6 +117,11 @@ function ServiceChecksSync() {
   useEffect(() => {
     if (services) useFlowStore.getState().setServiceTargets({ services, features });
   }, [services, features]);
+  // Its version: what HA 2026.10 refuses is an error there (#182).
+  const version = hass?.config?.version;
+  useEffect(() => {
+    useFlowStore.getState().setHaVersion(version);
+  }, [version]);
   return null;
 }
 
@@ -410,9 +418,15 @@ function App() {
                 </Button>
               ) : (
                 <h1
-                  className="whitespace-nowrap font-bold text-foreground text-lg"
+                  className="flex items-center gap-2.5 whitespace-nowrap font-bold text-foreground text-lg"
                   title={t('titles.appFullName')}
                 >
+                  <img
+                    src={isDark ? logoBadgeDark : logoBadgeLight}
+                    alt=""
+                    className="h-9 w-9 shrink-0"
+                    data-testid="header-logo"
+                  />
                   {t('titles.appName')}
                 </h1>
               )}

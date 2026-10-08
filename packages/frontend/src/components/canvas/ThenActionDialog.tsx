@@ -1214,12 +1214,6 @@ function ThenTargetResultsPanel({
 
   return (
     <div className="space-y-3">
-      {loading && (
-        <p className="px-1.5 text-muted-foreground text-xs">
-          {t('nodes:triggers.picker.loadingTriggers')}
-        </p>
-      )}
-
       {sortedHeadings.map((heading) => {
         const offers = recipesByHeading.get(heading) ?? [];
         return (
@@ -1264,6 +1258,13 @@ function ThenTargetResultsPanel({
           </div>
         );
       })}
+      {/* Below the list, so the rows don't move when HA's device
+          automations arrive and the line goes. */}
+      {loading && (
+        <p className="px-1.5 text-muted-foreground text-xs">
+          {t('nodes:triggers.picker.loadingTriggers')}
+        </p>
+      )}
     </div>
   );
 }

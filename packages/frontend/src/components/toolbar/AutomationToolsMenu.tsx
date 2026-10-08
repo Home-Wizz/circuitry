@@ -23,6 +23,7 @@ import { AutomationSettingsPanel } from '@/components/panels/AutomationSettingsP
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useHass } from '@/contexts/HassContext';
 import { CategoryFallback, HaCategoryPicker } from '@/ha';
+import { useHassConnection } from '@/hooks/useHassConnection';
 import { deleteGraph } from '@/lib/graph-storage';
 import { getHomeAssistantAPI } from '@/lib/ha-api';
 import { showErrorToast, showSuccessToast } from '@/lib/haToast';
@@ -322,13 +323,18 @@ function AssignCategoryDialog({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Keyed on HA's connection, not `hass` (a new object every few seconds):
+  // keyed on `hass`, the stored category came back over the one being
+  // picked (bug #183).
+  const { getHass, connection } = useHassConnection(hass);
   useEffect(() => {
-    if (!open || !hass) return;
+    const current = getHass();
+    if (!open || !current || !connection) return;
     setError(null);
-    getHomeAssistantAPI(hass)
+    getHomeAssistantAPI(current)
       .getEntityRegistryEntry(entityId)
       .then((entry) => setCategory(entry?.categories?.automation ?? ''));
-  }, [open, hass, entityId]);
+  }, [open, connection, getHass, entityId]);
 
   const handleSave = async () => {
     if (!hass) return;

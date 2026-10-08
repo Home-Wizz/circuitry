@@ -1,5 +1,6 @@
 import Fuse from 'fuse.js';
 import { useEffect, useMemo, useState } from 'react';
+import { useHassConnection } from '@/hooks/useHassConnection';
 import type { AreaRegistryEntry, AutomationCatalogItem, EntityRegistryEntry } from '@/lib/ha-api';
 import { getHomeAssistantAPI } from '@/lib/ha-api';
 import type { HassEntity, HomeAssistant } from '@/types/hass';
@@ -174,8 +175,12 @@ export function useAutomationCatalog({
   const [areas, setAreas] = useState<AreaRegistryEntry[]>([]);
   const [entityRegistry, setEntityRegistry] = useState<EntityRegistryEntry[]>([]);
 
+  // Keyed on HA's connection, not `hass` (a new object every few seconds,
+  // which re-fetched the registries each time; bug #183).
+  const { getHass, connection } = useHassConnection(hass);
   useEffect(() => {
-    if (!isOpen || !hass) return;
+    const hass = getHass();
+    if (!isOpen || !hass || !connection) return;
 
     const api = getHomeAssistantAPI(hass, hassConfig);
     let cancelled = false;
@@ -203,7 +208,7 @@ export function useAutomationCatalog({
     return () => {
       cancelled = true;
     };
-  }, [isOpen, hass, hassConfig]);
+  }, [isOpen, connection, getHass, hassConfig]);
 
   const entityIdToAreaId = useMemo(() => {
     const map: Record<string, string | undefined> = {};

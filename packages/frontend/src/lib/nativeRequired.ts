@@ -1,4 +1,4 @@
-import { type NodeValidationError, validateNodeData } from '@circuitry/shared';
+import { type NodeValidationError, type ValidationEnv, validateNodeData } from '@circuitry/shared';
 import { getConditionEnumField, hasConditionSingleValueField } from '@/lib/conditionEnumField';
 import { describedThresholdShape, type NativeDescription } from '@/lib/nativeDescriptions';
 import { conditionIsTargetless, triggerIsTargetless } from '@/lib/nativeThreshold';
@@ -134,10 +134,11 @@ export function editorNodeIssues(
   data: Record<string, unknown>,
   serviceRequired: ServiceRequiredFields = {},
   serviceTargets?: ServiceTargetContext,
-  description?: NativeDescription | null
+  description?: NativeDescription | null,
+  env: ValidationEnv = {}
 ): NodeValidationError[] {
   return [
-    ...validateNodeData(nodeType, data),
+    ...validateNodeData(nodeType, data, env),
     ...nativeNodeIssues(nodeType, data, description),
     ...(nodeType === 'action'
       ? [...serviceFieldIssues(data, serviceRequired), ...unsupportedTargetIssues(data, serviceTargets)]

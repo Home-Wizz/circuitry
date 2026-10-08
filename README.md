@@ -1,11 +1,11 @@
 <div align="center">
-  <img src="custom_components/circuitry/brand/icon.png" width="100" alt="Circuitry Logo" />
+  <img src="docs/images/icon.png" width="100" alt="Circuitry Logo" />
 
   <h1>Circuitry</h1>
 
   <p><strong>Visual Flow + Node Editor for Home Assistant</strong></p>
 
-  [![Release](https://img.shields.io/badge/version-2.3.0-2F81F7?style=flat-square)](https://github.com/Home-Wizz/circuitry/releases/latest)
+  [![Release](https://img.shields.io/badge/version-2.3.1-2F81F7?style=flat-square)](https://github.com/Home-Wizz/circuitry/releases/latest)
   [![HA Version](https://img.shields.io/badge/HA-2025.8%2B-brightgreen?style=flat-square)](https://www.home-assistant.io)
   [![License](https://img.shields.io/badge/license-Apache%202.0-orange?style=flat-square)](LICENSE)
   [![HACS](https://img.shields.io/badge/HACS-custom%20repository-41BDF5?style=flat-square)](https://hacs.xyz)
@@ -19,6 +19,8 @@
   | Light Mode | Dark Mode |
   |:---:|:---:|
   | ![Circuitry Light Mode](docs/images/circuitry-light.png) | ![Circuitry Dark Mode](docs/images/circuitry-dark.png) |
+
+  <img src="docs/images/circuitry-start.png" width="49%" alt="Circuitry's empty canvas" />
 
 </div>
 

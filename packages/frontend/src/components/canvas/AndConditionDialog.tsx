@@ -1101,12 +1101,6 @@ function ConditionTargetResultsPanel({
 
   return (
     <div className="space-y-3">
-      {loading && (
-        <p className="px-1.5 text-muted-foreground text-xs">
-          {t('nodes:triggers.picker.loadingTriggers')}
-        </p>
-      )}
-
       {!loading && sortedHeadings.length === 0 && !selected.singleEntityId && (
         <p className="px-1.5 text-muted-foreground text-xs">
           {t('nodes:conditions.picker.noResults')}
@@ -1186,6 +1180,13 @@ function ConditionTargetResultsPanel({
             onSelect={() => onSelectStateTargets(selected.entityIds)}
           />
         </div>
+      )}
+      {/* Below the list, so the rows don't move when HA's device
+          automations arrive and the line goes. */}
+      {loading && (
+        <p className="px-1.5 text-muted-foreground text-xs">
+          {t('nodes:triggers.picker.loadingTriggers')}
+        </p>
       )}
     </div>
   );

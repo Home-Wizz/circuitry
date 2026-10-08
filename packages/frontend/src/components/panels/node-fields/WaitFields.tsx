@@ -19,7 +19,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { HaSelect, HaSelector, HaSwitch } from '@/ha';
 import { useNodeErrors } from '@/hooks/useNodeErrors';
 import { useResolvedEntities } from '@/hooks/useResolvedEntities';
-import { useTriggerCardDisplay } from '@/hooks/useTriggerCardDisplay';
+import { triggerSummary, useTriggerCardDisplay } from '@/hooks/useTriggerCardDisplay';
 import { getDomainIcon } from '@/lib/domain-icons';
 import { clearedToUnset } from '@/lib/utils';
 import type { TriggerNodeData } from '@/store/flow-store';
@@ -136,7 +136,7 @@ export function WaitFields({ node, onChange }: WaitFieldsProps) {
               // As the wait card reads it (its title and subtitle): names,
               // never an entity's id.
               const info = getTriggerDisplayInfo(trigger);
-              const summary = [info.title, info.subtitle].filter(Boolean).join(' · ');
+              const summary = triggerSummary(info);
               return (
                 <div
                   key={index}

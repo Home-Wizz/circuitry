@@ -320,6 +320,68 @@ function checkBounds(data: Record<string, unknown>, report: Report, kind: 'trigg
   }
 }
 
+/** What the editor knows of the connected Home Assistant, where a check
+ * depends on its version. */
+export interface ValidationEnv {
+  /** `hass.config.version`, e.g. "2026.10.0". Unknown: checks that
+   * depend on it take the older HA's side (never stricter than HA). */
+  haVersion?: string;
+}
+
+/** Whether a Home Assistant version string ("2026.10.0", "2026.10.0b1",
+ * "2026.10.0.dev2026...") is the given release or later. */
+export function haVersionAtLeast(version: string, year: number, month: number): boolean {
+  const m = /^(\d+)\.(\d+)/.exec(version);
+  if (!m) return false;
+  const [y, mo] = [Number(m[1]), Number(m[2])];
+  return y > year || (y === year && mo >= month);
+}
+
+/** An input helper's entity id, as HA 2026.10 matches a State condition's
+ * `state` against it (config_validation.INPUT_ENTITY_ID). */
+const INPUT_ENTITY_ID =
+  /^input_(?:select|text|number|boolean|datetime)\.(?!.+__)(?!_)[\da-z_]+(?<!_)$/;
+
+/** Why Home Assistant 2026.10 and later refuse a `for` on a State
+ * condition: with an attribute, with anything but one state, or with a
+ * state naming an input helper (`for` times the entity's last change of
+ * one state; config_validation.STATE_CONDITION_SCHEMA). Older HA runs all
+ * three. */
+export type StateForRefusal = 'attribute' | 'states' | 'helper';
+
+/** Why a `for` can't be used on this condition, whether or not it has one:
+ * the panel offers none then (bug #182). Null for anything but a State
+ * condition. */
+export function stateForBlocked(c: Readonly<Record<string, unknown>>): StateForRefusal | null {
+  if (c.condition !== 'state') return null;
+  if (c.attribute !== undefined) return 'attribute';
+  let state = c.state;
+  if (Array.isArray(state)) {
+    if (state.length !== 1) return 'states';
+    state = state[0];
+  }
+  return typeof state === 'string' && INPUT_ENTITY_ID.test(state) ? 'helper' : null;
+}
+
+/** Why HA 2026.10 and later refuse this condition's `for`, or null (it has
+ * none, or HA takes it). */
+export function stateForRefusal(c: Readonly<Record<string, unknown>>): StateForRefusal | null {
+  return c.for === undefined || c.for === null ? null : stateForBlocked(c);
+}
+
+/** A State condition's `for` that HA 2026.10 refuses (bug #182): an error
+ * there, a warning on an older or unknown HA, which runs it (it stops
+ * working once HA updates). */
+function checkStateFor(c: Record<string, unknown>, report: Report, env: ValidationEnv) {
+  const refusal = stateForRefusal(c);
+  if (!refusal) return;
+  if (env.haVersion && haVersionAtLeast(env.haVersion, 2026, 10)) {
+    report.error(`errors:validation.condition.forRefused.${refusal}`, 'for');
+  } else {
+    report.warn(`errors:validation.condition.forRefusedLater.${refusal}`, 'for');
+  }
+}
+
 /**
  * Checks one condition the way Home Assistant does (decision D3: never
  * stricter than HA; bug #65). An error is something HA refuses -- the
@@ -330,7 +392,12 @@ function checkBounds(data: Record<string, unknown>, report: Report, kind: 'trigg
  * accepts was checked in a real HA 2026.9.3. Groups are checked all the way down: a blank entity inside an
  * `or` is refused by HA the same as one at the top.
  */
-function checkCondition(data: unknown, ctx: IssueContext, at: (string | number)[]): void {
+function checkCondition(
+  data: unknown,
+  ctx: IssueContext,
+  at: (string | number)[],
+  env: ValidationEnv = {}
+): void {
   // A template string shorthand, or anything else that isn't an object:
   // HA reads it, nothing to check here.
   if (!data || typeof data !== 'object' || Array.isArray(data)) return;
@@ -349,6 +416,7 @@ function checkCondition(data: unknown, ctx: IssueContext, at: (string | number)[
       entities('errors:validation.condition.entityRequired.state');
       if (c.state === undefined) error('errors:validation.condition.stateRequired', 'state');
       else if (isBlank(c.state)) warn('errors:validation.condition.stateEmpty', 'state');
+      checkStateFor(c, report, env);
       break;
 
     case 'numeric_state':
@@ -405,7 +473,7 @@ function checkCondition(data: unknown, ctx: IssueContext, at: (string | number)[
         warn('errors:validation.condition.groupEmpty', 'conditions');
       } else {
         c.conditions.forEach((nested, i) => {
-          checkCondition(nested, ctx, [...at, 'conditions', i]);
+          checkCondition(nested, ctx, [...at, 'conditions', i], env);
         });
       }
       break;
@@ -417,10 +485,13 @@ function checkCondition(data: unknown, ctx: IssueContext, at: (string | number)[
  * Condition node validation: see checkCondition. Every other field passes
  * through unchecked (Home Assistant checks them).
  */
-export const ConditionNodeValidationSchema = z
-  .object({})
-  .passthrough()
-  .superRefine((data, ctx) => checkCondition(data, ctx, []));
+export function conditionNodeValidationSchema(env: ValidationEnv = {}) {
+  return z
+    .object({})
+    .passthrough()
+    .superRefine((data, ctx) => checkCondition(data, ctx, [], env));
+}
+export const ConditionNodeValidationSchema = conditionNodeValidationSchema();
 
 /**
  * SetVariables node validation (decision D3): HA requires `variables:` but
@@ -479,9 +550,13 @@ export interface NodeValidationError {
  */
 export function validateNodeData(
   nodeType: string,
-  data: Record<string, unknown>
+  data: Record<string, unknown>,
+  env: ValidationEnv = {}
 ): NodeValidationError[] {
-  const schema = getNodeValidationSchema(nodeType);
+  const schema =
+    nodeType === 'condition'
+      ? conditionNodeValidationSchema(env)
+      : getNodeValidationSchema(nodeType);
   if (!schema) {
     return []; // No validation schema for this node type
   }

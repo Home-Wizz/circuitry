@@ -5,6 +5,30 @@ rebrand below were written under this project's previous name — FLODE —
 and are kept exactly as originally written for historical accuracy rather
 than edited to say "Circuitry" throughout.
 
+## [2.3.1] — 2026-10-08
+
+Home Assistant 2026.10 support, a new icon and a flatter look.
+
+### Changed
+- **A new icon**, in light and dark versions, on Home Assistant's
+  integrations page, in the browser tab and beside the name in the header.
+- **A flatter look**: step icons in the side panel, the dock and the
+  pickers use the plain step colour, canvas cards have a faint shadow
+  instead of a coloured glow, and the header buttons are smaller.
+- **"Triggered by"** names the triggers it means instead of the ids Home
+  Assistant 2026.10 generates.
+
+### Fixed
+- **A State condition's "For at least" on Home Assistant 2026.10**: it's
+  off where Home Assistant refuses it (several states, an attribute or a
+  helper's state), and one already set is flagged.
+- **The pickers no longer jump** when a room or device is picked, or every
+  few seconds in the Home Assistant app.
+- **Dialogs keep what's being typed**, and the trace viewer stays on the
+  run being looked at.
+- **A lone step stays where it's put** on the canvas.
+- **"For at least" fits its editor** inside Home Assistant.
+
 ## [2.3.0] — 2026-10-07
 
 A redesigned editor: steps read as sentences on the canvas, the pickers are
@@ -63,6 +87,7 @@ exactly as written.
 - Home Assistant 2026.10 refuses a State condition that combines "for" with
   several states, an attribute or another entity's state, and disables the
   automation. Circuitry still lets you build one; avoid it until a fix.
+  (Fixed in 2.3.1.)
 
 ## [2.2.0] — 2026-09-28
 

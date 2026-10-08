@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { FormField } from '@/components/forms/FormField';
 import { ConditionGroupEditor } from '@/components/panels/node-fields/ConditionGroupEditor';
 import { DynamicFieldRenderer } from '@/components/ui/DynamicFieldRenderer';
+import { useTriggerIdNames } from '@/hooks/useTriggerIdNames';
 import {
   Select,
   SelectContent,
@@ -56,6 +57,13 @@ export function ConditionFields({ node, onChange, entities }: ConditionFieldsPro
   const { getFieldError } = useNodeErrors(node.id);
   const conditionType = getNodeDataString(node, 'condition', 'state') as ConditionType;
   const nodeData = node.data as Record<string, unknown>;
+  // A "Triggered by" condition's ids, in words under the field: the
+  // triggers they mean (HA 2026.10 writes ids like `generated-a1B2`).
+  const triggerIdNames = useTriggerIdNames();
+  const triggeredByNote = (field: string) =>
+    field === 'id' && nodeData.condition === 'trigger'
+      ? triggerIdNames(nodeData.id).join(', ') || undefined
+      : undefined;
   const hasNestedConditions = Array.isArray(nodeData.conditions) && nodeData.conditions.length > 0;
   const isGroupType = isLogicalGroupType(conditionType);
   // Every field edit below: a cleared field is stored unset, not "" (bug #65).
@@ -124,6 +132,7 @@ export function ConditionFields({ node, onChange, entities }: ConditionFieldsPro
         entities={entities}
         error={getFieldError(field.name)}
         entityIdContext={entityIdContext}
+        note={triggeredByNote(field.name)}
       />
     ));
   };

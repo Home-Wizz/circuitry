@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useHass } from '../contexts/HassContext';
+import { useHassConnection } from './useHassConnection';
 
 /**
  * Device trigger definition from HA API
@@ -134,13 +135,17 @@ export type ActionCapabilities = TriggerCapabilities;
  * Hook to interact with Home Assistant Device Automation API
  */
 export function useDeviceAutomation() {
-  const { hass } = useHass();
+  // Keyed on HA's connection, not on `hass` (a new object every few
+  // seconds): the pickers' effects call these (bug #183).
+  const { getHass, connection } = useHassConnection(useHass().hass);
 
   /**
    * Fetch available triggers for a specific device
    */
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new connection is a new HA to ask; getHass reads the latest `hass`
   const getDeviceTriggers = useCallback(
     async (deviceId: string): Promise<DeviceTrigger[]> => {
+      const hass = getHass();
       if (!hass?.callWS) {
         console.warn('callWS not available');
         return [];
@@ -157,15 +162,17 @@ export function useDeviceAutomation() {
         throw error;
       }
     },
-    [hass]
+    [connection]
   );
 
   /**
    * Fetch available actions for a specific device — the action-side sibling
    * of getDeviceTriggers above, see DeviceAction's doc comment.
    */
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new connection is a new HA to ask; getHass reads the latest `hass`
   const getDeviceActions = useCallback(
     async (deviceId: string): Promise<DeviceAction[]> => {
+      const hass = getHass();
       if (!hass?.callWS) {
         console.warn('callWS not available');
         return [];
@@ -182,7 +189,7 @@ export function useDeviceAutomation() {
         throw error;
       }
     },
-    [hass]
+    [connection]
   );
 
   /**
@@ -190,8 +197,10 @@ export function useDeviceAutomation() {
    * sibling of getDeviceTriggers/getDeviceActions above, see DeviceCondition's
    * doc comment.
    */
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new connection is a new HA to ask; getHass reads the latest `hass`
   const getDeviceConditions = useCallback(
     async (deviceId: string): Promise<DeviceCondition[]> => {
+      const hass = getHass();
       if (!hass?.callWS) {
         console.warn('callWS not available');
         return [];
@@ -208,14 +217,16 @@ export function useDeviceAutomation() {
         throw error;
       }
     },
-    [hass]
+    [connection]
   );
 
   /**
    * Fetch trigger capabilities (field schema) for a specific trigger
    */
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new connection is a new HA to ask; getHass reads the latest `hass`
   const getTriggerCapabilities = useCallback(
     async (trigger: Partial<DeviceTrigger>): Promise<TriggerCapabilities> => {
+      const hass = getHass();
       if (!hass?.callWS) {
         console.warn('callWS not available');
         return { extra_fields: [] };
@@ -231,7 +242,7 @@ export function useDeviceAutomation() {
         throw error;
       }
     },
-    [hass]
+    [connection]
   );
 
   /**
@@ -240,8 +251,10 @@ export function useDeviceAutomation() {
    * Real HA websocket command, same shape as trigger/capabilities
    * (`device_automation/condition/capabilities`).
    */
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new connection is a new HA to ask; getHass reads the latest `hass`
   const getConditionCapabilities = useCallback(
     async (condition: Partial<DeviceCondition>): Promise<ConditionCapabilities> => {
+      const hass = getHass();
       if (!hass?.callWS) {
         console.warn('callWS not available');
         return { extra_fields: [] };
@@ -257,7 +270,7 @@ export function useDeviceAutomation() {
         throw error;
       }
     },
-    [hass]
+    [connection]
   );
 
   /**
@@ -265,8 +278,10 @@ export function useDeviceAutomation() {
    * the action-side sibling of getTriggerCapabilities above. Real HA
    * websocket command (`device_automation/action/capabilities`).
    */
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new connection is a new HA to ask; getHass reads the latest `hass`
   const getActionCapabilities = useCallback(
     async (action: Partial<DeviceAction>): Promise<ActionCapabilities> => {
+      const hass = getHass();
       if (!hass?.callWS) {
         console.warn('callWS not available');
         return { extra_fields: [] };
@@ -282,7 +297,7 @@ export function useDeviceAutomation() {
         throw error;
       }
     },
-    [hass]
+    [connection]
   );
 
   return {

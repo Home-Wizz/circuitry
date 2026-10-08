@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <title>Circuitry</title>
+  <defs>
+  <g id="radio"><path d="M16.247 7.761a6 6 0 0 1 0 8.478"/><path d="M19.075 4.933a10 10 0 0 1 0 14.134"/><path d="M4.925 19.067a10 10 0 0 1 0-14.134"/><path d="M7.753 16.239a6 6 0 0 1 0-8.478"/><circle cx="12" cy="12" r="2"/></g>
+  <g id="sign"><path d="M12 13v8"/><path d="M12 3v3"/><path d="M2.354 10.354a1.207 1.207 0 0 1 0-1.708l2.06-2.06A2 2 0 0 1 5.828 6h12.344a2 2 0 0 1 1.414.586l2.06 2.06a1.207 1.207 0 0 1 0 1.708l-2.06 2.06a2 2 0 0 1-1.414.586H5.828a2 2 0 0 1-1.414-.586z"/></g>
+  <path id="play" d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z"/>
+    <linearGradient id="edge" x1="0" y1="0" x2="0" y2="1"><stop offset=".1" stop-color="#F7D2B4"/><stop offset=".5" stop-color="#E9DDC9"/><stop offset=".9" stop-color="#BDE8D1"/></linearGradient>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fdfbf7"/><stop offset="1" stop-color="#eef8f1"/></linearGradient>
+    <linearGradient id="bevel" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity="0.7"/><stop offset=".03" stop-color="#fff" stop-opacity="0"/><stop offset=".86" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity="0.06"/></linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity="0"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>
+    <linearGradient id="pillhi" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity="0.35"/><stop offset=".55" stop-color="#fff" stop-opacity="0"/></linearGradient>
+    <linearGradient id="pillfill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#ffffff"/></linearGradient>
+    <radialGradient id="dot" cx=".35" cy=".3" r=".7"><stop offset="0" stop-color="#fff" stop-opacity=".55"/><stop offset=".5" stop-color="#fff" stop-opacity="0"/></radialGradient>
+    <filter id="drop" x="-20%" y="-20%" width="140%" height="160%"><feDropShadow dx="0" dy="1.6" stdDeviation="1.4" flood-color="#5b4a3a" flood-opacity="0.12"/></filter>
+    <clipPath id="inner"><circle cx="256" cy="250.88" r="228.301"/></clipPath></defs>
+  <circle cx="256" cy="261.12" r="250.88" fill="#d6e8db"/><circle cx="256" cy="250.88" r="250.88" fill="url(#edge)"/>
+  <circle cx="256" cy="250.88" r="228.301" fill="url(#tile)"/>
+  <g clip-path="url(#inner)">
+    <g transform="translate(68.7933 63.6733) scale(3.74413)"><path d="M14 24 C 3 24, 3 50, 14 50 H26" stroke="#D9D2C8" stroke-width="3" fill="none" stroke-linecap="round"/><path d="M68 50 H80 C 95 50, 95 76, 80 76" stroke="#D3D9D6" stroke-width="3" fill="none" stroke-linecap="round"/><g filter="url(#drop)"><rect x="15" y="15" width="41" height="18" rx="9" fill="#F8C6A0"/><rect x="27" y="41" width="41" height="18" rx="9" fill="#B9D2F2"/><rect x="39" y="67" width="41" height="18" rx="9" fill="#A9E0BF"/></g><circle cx="24" cy="24" r="6.4" fill="#FBF1DE"/><g transform="translate(19.2 19.2) scale(.4)" fill="none" stroke="#D8853A" stroke-width="3.2" stroke-linecap="round"><use href="#radio"/></g><circle cx="36" cy="50" r="6.4" fill="#FBF1DE"/><g transform="translate(31.2 45.2) scale(.4)" fill="none" stroke="#6E9BD3" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><use href="#sign"/></g><circle cx="48" cy="76" r="6.4" fill="#FBF1DE"/><g transform="translate(43.6 71.2) scale(.4)" fill="#4FA873" stroke="#4FA873" stroke-width="1.5" stroke-linejoin="round"><use href="#play"/></g><rect x="15" y="15" width="41" height="18" rx="9" fill="url(#pillhi)"/><circle cx="24" cy="24" r="6.4" fill="url(#dot)"/><rect x="27" y="41" width="41" height="18" rx="9" fill="url(#pillhi)"/><circle cx="36" cy="50" r="6.4" fill="url(#dot)"/><rect x="39" y="67" width="41" height="18" rx="9" fill="url(#pillhi)"/><circle cx="48" cy="76" r="6.4" fill="url(#dot)"/><circle cx="14" cy="24" r="2.6" fill="#F3BE98"/><circle cx="68" cy="50" r="2.6" fill="#F3BE98"/></g>
+    <g transform="translate(27.6992 22.5792) scale(4.56602)"></g>
+    <rect x="27.6992" y="22.5792" width="456.602" height="456.602" fill="url(#bevel)"/>
+  </g>
+</svg>

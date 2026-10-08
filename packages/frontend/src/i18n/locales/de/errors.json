@@ -91,7 +91,17 @@
       "boundEmpty": "Dieses Feld ist leer: eine Zahl oder Entität angeben oder es leeren (Home Assistant lehnt einen leeren Wert ab)",
       "timeRequired": "Nach, Vor oder Wochentage angeben (Home Assistant braucht mindestens eines)",
       "timeBlank": "Dieses Feld ist leer: einen Wert angeben oder es leeren (Home Assistant lehnt einen leeren Wert ab)",
-      "weekdayEmpty": "Keine Wochentage ausgewählt, daher ist diese Bedingung nie erfüllt"
+      "weekdayEmpty": "Keine Wochentage ausgewählt, daher ist diese Bedingung nie erfüllt",
+      "forRefused": {
+        "states": "Home Assistant ab 2026.10 lehnt eine Dauer bei mehr als einem Zustand ab. Entferne die Dauer oder behalte einen Zustand.",
+        "attribute": "Home Assistant ab 2026.10 lehnt eine Dauer bei einem Attribut ab. Entferne die Dauer oder entferne das Attribut.",
+        "helper": "Home Assistant ab 2026.10 lehnt eine Dauer bei einem Zustand aus einem Helfer ab. Entferne die Dauer oder gib den Zustand selbst ein."
+      },
+      "forRefusedLater": {
+        "states": "Home Assistant ab 2026.10 lehnt eine Dauer bei mehr als einem Zustand ab: Nach dem Update von Home Assistant funktioniert das nicht mehr. Entferne die Dauer oder behalte einen Zustand.",
+        "attribute": "Home Assistant ab 2026.10 lehnt eine Dauer bei einem Attribut ab: Nach dem Update von Home Assistant funktioniert das nicht mehr. Entferne die Dauer oder entferne das Attribut.",
+        "helper": "Home Assistant ab 2026.10 lehnt eine Dauer bei einem Zustand aus einem Helfer ab: Nach dem Update von Home Assistant funktioniert das nicht mehr. Entferne die Dauer oder gib den Zustand selbst ein."
+      }
     },
     "setVariables": {
       "atLeastOne": "Mindestens eine Variable muss definiert werden",

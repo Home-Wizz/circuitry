@@ -6,7 +6,7 @@ import { useFlowStore } from '@/store/flow-store';
 
 /**
  * What an empty canvas shows: a large "When… add a trigger" pill in the
- * cards' own style (.step-pill), opening the trigger picker, and a link to
+ * cards' own style with a soft glow (.step-pill-glow), opening the trigger picker, and a link to
  * open an existing automation instead (both through the left panel).
  */
 export function EmptyCanvasPrompt() {
@@ -23,7 +23,7 @@ export function EmptyCanvasPrompt() {
           type="button"
           onClick={() => requestFromPalette('when')}
           style={toneStyle('trigger')}
-          className="step-pill pointer-events-auto flex items-center gap-3 bg-card py-2.5 pr-6 pl-2.5 font-semibold text-base transition-transform hover:scale-[1.03]"
+          className="step-pill step-pill-glow pointer-events-auto flex items-center gap-3 bg-card py-2.5 pr-6 pl-2.5 font-semibold text-base transition-transform hover:scale-[1.03]"
         >
           <StepIcon tone="trigger" icon={Radio} size="xl" />
           <span>

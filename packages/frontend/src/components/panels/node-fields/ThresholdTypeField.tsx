@@ -13,7 +13,7 @@ import {
   type ThresholdCrossingType,
   type TypedThreshold,
 } from '@/lib/nativeThreshold';
-import { DurationInput, type DurationValue } from './DurationField';
+import { DurationInput, type DurationValue, hasMilliseconds } from './DurationField';
 import { ThresholdValueField } from './ThresholdValueField';
 
 interface ThresholdTypeFieldProps {
@@ -147,7 +147,11 @@ export function ThresholdTypeField({
           label={t('nodes:triggers.native.thresholdForLabel')}
           description={t('nodes:triggers.native.thresholdForDescription')}
         >
-          <DurationInput value={forValue ?? {}} onChange={onForChange} />
+          <DurationInput
+            value={forValue ?? {}}
+            onChange={onForChange}
+            milliseconds={hasMilliseconds(forValue)}
+          />
         </FormField>
       )}
     </>

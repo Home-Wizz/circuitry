@@ -10,7 +10,7 @@ import { cn } from '@/lib/utils';
 import type { DelayNodeData } from '@/store/flow-store';
 import { useFlowStore } from '@/store/flow-store';
 import { DelayFields } from '@/components/panels/node-fields/DelayFields';
-import { EditPill, PILL_TEXT } from './EditPill';
+import { DURATION_POPOVER, EditPill, PILL_TEXT } from './EditPill';
 import { durationUnits, formatDuration } from './formatDuration';
 import { StepFrame } from './StepCard';
 
@@ -123,7 +123,7 @@ export const DelayNode = memo(function DelayNode({ id, data, selected }: DelayNo
           tone="delay"
           testId="delay-pill"
           ariaLabel={t('nodes:pill.editFor')}
-          contentClassName="w-80"
+          contentClassName={DURATION_POPOVER}
           editor={fullEditor}
         >
           <span className={PILL_TEXT}>{delayDisplay}</span>

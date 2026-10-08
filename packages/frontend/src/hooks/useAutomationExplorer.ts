@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useHassConnection } from '@/hooks/useHassConnection';
 import type { AutomationCatalogItem, ZoneCatalogItem } from '@/lib/ha-api';
 import { getHomeAssistantAPI } from '@/lib/ha-api';
 import type { HassEntity, HomeAssistant } from '@/types/hass';
@@ -285,8 +286,12 @@ export function useAutomationExplorer({
     labels,
   });
 
+  // Keyed on HA's connection, not `hass` (a new object every few seconds,
+  // which re-fetched the zones and re-ran the inference each time; #183).
+  const { getHass, connection } = useHassConnection(hass);
   useEffect(() => {
-    if (!hass) return;
+    const hass = getHass();
+    if (!hass || !connection) return;
     const api = getHomeAssistantAPI(hass, hassConfig);
     let cancelled = false;
 
@@ -300,10 +305,11 @@ export function useAutomationExplorer({
     return () => {
       cancelled = true;
     };
-  }, [hass, hassConfig]);
+  }, [connection, getHass, hassConfig]);
 
   useEffect(() => {
-    if (!hass || catalogItems.length === 0) {
+    const hass = getHass();
+    if (!hass || !connection || catalogItems.length === 0) {
       return;
     }
 
@@ -379,7 +385,7 @@ export function useAutomationExplorer({
     return () => {
       cancelled = true;
     };
-  }, [hass, hassConfig, catalogItems, entityRegistry, entities, zones]);
+  }, [connection, getHass, hassConfig, catalogItems, entityRegistry, entities, zones]);
 
   const explorerItems: ExplorerAutomationItem[] = useMemo(() => {
     return sortedCatalogItems.map((item) => {

@@ -8,6 +8,11 @@ import { cn } from '@/lib/utils';
  * cut off. Every pill's text uses it. */
 export const PILL_TEXT = 'min-w-0 break-words';
 
+/** A pill editor holding a duration with milliseconds (a delay, a wait's
+ * timeout): HA's duration picker is wider than the usual editor with its
+ * four fields and ran past the edge. */
+export const DURATION_POPOVER = 'w-96';
+
 interface EditPillProps {
   /** Tinted in the step's colour. */
   tone: NodeColorToken;

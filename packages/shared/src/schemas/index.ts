@@ -132,11 +132,17 @@ export {
 export {
   ActionNodeValidationSchema,
   ConditionNodeValidationSchema,
+  conditionNodeValidationSchema,
   DelayNodeValidationSchema,
   getNodeValidationSchema,
+  haVersionAtLeast,
   type NodeValidationError,
   SetVariablesNodeValidationSchema,
+  type StateForRefusal,
+  stateForBlocked,
+  stateForRefusal,
   TriggerNodeValidationSchema,
+  type ValidationEnv,
   validateNodeData,
   WaitNodeValidationSchema,
 } from './validation';

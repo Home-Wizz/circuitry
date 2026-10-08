@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Input } from '@/components/ui/input';
 import { useHass } from '@/contexts/HassContext';
+import { useHassConnection } from '@/hooks/useHassConnection';
 import { getHomeAssistantAPI } from '@/lib/ha-api';
 
 export interface CategoryFallbackProps {
@@ -31,10 +32,15 @@ export function CategoryFallback({ label, value, onChange, disabled }: CategoryF
   const [categories, setCategories] = useState<{ category_id: string; name: string }[]>([]);
   const [text, setText] = useState('');
 
+  // Keyed on HA's connection, not `hass` (a new object every few seconds):
+  // keyed on `hass`, the categories were fetched again and the name being
+  // typed was put back (bug #183).
+  const { getHass, connection } = useHassConnection(hass);
   useEffect(() => {
-    if (!hass) return;
-    getHomeAssistantAPI(hass).getCategories('automation').then(setCategories);
-  }, [hass]);
+    const current = getHass();
+    if (!current || !connection) return;
+    getHomeAssistantAPI(current).getCategories('automation').then(setCategories);
+  }, [connection, getHass]);
 
   useEffect(() => {
     setText(categories.find((c) => c.category_id === value)?.name ?? '');

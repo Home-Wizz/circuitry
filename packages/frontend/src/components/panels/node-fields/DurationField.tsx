@@ -61,6 +61,17 @@ export function durationToObject(value: DurationValue | undefined): DurationObje
 export interface DurationInputProps {
   value: DurationValue;
   onChange: (val: DurationValue) => void;
+  /** Shown but not editable (a "for" the step can't use, #182). */
+  disabled?: boolean;
+  /** Whether it asks for milliseconds too (default yes). A "for" doesn't,
+   * as HA's own editor doesn't, unless it already has some. */
+  milliseconds?: boolean;
+}
+
+/** Whether a duration has milliseconds (`{milliseconds: 500}`, "0:00:01.5", 1.5). */
+export function hasMilliseconds(value: DurationValue | undefined): boolean {
+  const ms = durationToObject(value)?.milliseconds;
+  return ms !== undefined && Number(ms) !== 0;
 }
 
 /**
@@ -71,7 +82,12 @@ export interface DurationInputProps {
  * native duration selector uses — both formats are equally valid in HA
  * automation YAML, and only the object form has a native picker.
  */
-export function DurationInput({ value, onChange }: DurationInputProps) {
+export function DurationInput({
+  value,
+  onChange,
+  disabled,
+  milliseconds = true,
+}: DurationInputProps) {
   const { t } = useTranslation(['common', 'nodes']);
   const obj: DurationObject = durationToObject(value) ?? {};
 
@@ -92,8 +108,9 @@ export function DurationInput({ value, onChange }: DurationInputProps) {
 
   return (
     <HaSelector
-      selector={{ duration: { enable_millisecond: true } }}
+      selector={{ duration: milliseconds ? { enable_millisecond: true } : {} }}
       value={obj}
+      disabled={disabled}
       onChange={(v) => {
         if (!v || typeof v !== 'object') return;
         const cleaned = Object.fromEntries(
@@ -116,6 +133,7 @@ export function DurationInput({ value, onChange }: DurationInputProps) {
               onChange={(e) => handleObjChange('hours', e.target.value)}
               placeholder="0"
               className="mt-1"
+              disabled={disabled}
             />
           </div>
           <div className="flex-1">
@@ -129,6 +147,7 @@ export function DurationInput({ value, onChange }: DurationInputProps) {
               onChange={(e) => handleObjChange('minutes', e.target.value)}
               placeholder="0"
               className="mt-1"
+              disabled={disabled}
             />
           </div>
           <div className="flex-1">
@@ -142,21 +161,25 @@ export function DurationInput({ value, onChange }: DurationInputProps) {
               onChange={(e) => handleObjChange('seconds', e.target.value)}
               placeholder="0"
               className="mt-1"
+              disabled={disabled}
             />
           </div>
-          <div className="flex-1">
-            <Label className="text-muted-foreground text-xs">
-              {t('nodes:durationField.milliseconds')}
-            </Label>
-            <Input
-              type="number"
-              min={0}
-              value={obj.milliseconds ?? ''}
-              onChange={(e) => handleObjChange('milliseconds', e.target.value)}
-              placeholder="0"
-              className="mt-1"
-            />
-          </div>
+          {milliseconds && (
+            <div className="flex-1">
+              <Label className="text-muted-foreground text-xs">
+                {t('nodes:durationField.milliseconds')}
+              </Label>
+              <Input
+                type="number"
+                min={0}
+                value={obj.milliseconds ?? ''}
+                onChange={(e) => handleObjChange('milliseconds', e.target.value)}
+                placeholder="0"
+                className="mt-1"
+                disabled={disabled}
+              />
+            </div>
+          )}
         </div>
       }
     />

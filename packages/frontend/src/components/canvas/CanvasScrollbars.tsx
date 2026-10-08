@@ -13,6 +13,27 @@ export interface CanvasExtent {
   maxY: number;
 }
 
+/**
+ * The pan limit, grown to take in what's on screen. When the content is
+ * smaller than the screen (a single node), a limit smaller than the screen
+ * makes the canvas library centre the content on the next pan or click,
+ * so the canvas jumped and the node seemed to move by itself after being
+ * put down (bug #184). Taking in the visible area, the limit only stops a
+ * pan from going further, never moves the view.
+ */
+export function extentWithVisible(
+  extent: CanvasExtent,
+  visible: CanvasExtent | null
+): CanvasExtent {
+  if (!visible) return extent;
+  return {
+    minX: Math.min(extent.minX, visible.minX),
+    minY: Math.min(extent.minY, visible.minY),
+    maxX: Math.max(extent.maxX, visible.maxX),
+    maxY: Math.max(extent.maxY, visible.maxY),
+  };
+}
+
 interface CanvasScrollbarsProps {
   wrapperRef: RefObject<HTMLDivElement | null>;
   extent: CanvasExtent;

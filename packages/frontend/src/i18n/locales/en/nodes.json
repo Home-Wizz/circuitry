@@ -1017,6 +1017,11 @@
     "fillIn": "Fill in",
     "level": "Level",
     "forAtLeast": "For at least (optional)",
+    "forBlocked": {
+      "states": "Only with one state. Home Assistant can only time a single state, so this is off while more than one is picked.",
+      "attribute": "Not with an attribute. Home Assistant can only time the state itself, so this is off while an attribute is set.",
+      "helper": "Not with a state taken from a helper. Home Assistant can only time a state you type in, so this is off while a helper is picked."
+    },
     "moreOptions": "More options",
     "back": "Back",
     "nextSettings": "Next: settings",

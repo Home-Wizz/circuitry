@@ -2,7 +2,7 @@ import type { WaitNode } from '@circuitry/shared';
 import { useTranslation } from 'react-i18next';
 import { WaitTimeoutFields } from '@/components/panels/node-fields/WaitFields';
 import { useFlowStore } from '@/store/flow-store';
-import { EditPill, PILL_TEXT } from './EditPill';
+import { DURATION_POPOVER, EditPill, PILL_TEXT } from './EditPill';
 import { durationUnits, formatDuration } from './formatDuration';
 
 /**
@@ -23,7 +23,7 @@ export function WaitTimeoutPill({ nodeId, data }: { nodeId: string; data: WaitNo
         tone="wait"
         testId="wait-timeout-pill"
         ariaLabel={t('nodes:wait.timeoutLabel')}
-        contentClassName="w-80"
+        contentClassName={DURATION_POPOVER}
         editor={() => (
           <div className="flex flex-col gap-3">
             <WaitTimeoutFields

@@ -7,7 +7,7 @@ import type {
   HAScriptField,
   NodeValidationError,
 } from '@circuitry/shared';
-import { validateNodeData } from '@circuitry/shared';
+import { type ValidationEnv, validateNodeData } from '@circuitry/shared';
 import {
   addEdge,
   applyEdgeChanges,
@@ -444,6 +444,10 @@ export interface FlowState {
    * action step naming an entity that can't do it gets a warning. Set as
    * they change; kept across tabs and resets like the above. */
   setServiceTargets: (context: ServiceTargetContext) => void;
+  /** The connected HA's version (`hass.config.version`): some checks
+   * depend on it (#182: what 2026.10 refuses is an error there, a warning
+   * on older HA). Kept across tabs and resets like the above. */
+  setHaVersion: (version: string | undefined) => void;
   clearNodeErrors: (nodeId: string) => void;
   hasValidationErrors: () => boolean;
 }
@@ -782,6 +786,8 @@ function snapshotAsTab(state: FlowState): FlowTabState {
 let serviceRequiredFields: ServiceRequiredFields = {};
 /** See FlowState.setServiceTargets. */
 let serviceTargets: ServiceTargetContext | undefined;
+/** See FlowState.setHaVersion. */
+let validationEnv: ValidationEnv = {};
 
 /** Everything the editor flags on a node's data, with the connected HA's
  * service checks and its descriptions of purpose-specific types: what the
@@ -793,7 +799,7 @@ export function nodeIssues(nodeType: string, data: Record<string, unknown>): Nod
   // description alone (the tables have nothing for it).
   if (described?.discovered) {
     return [
-      ...validateNodeData(nodeType, data),
+      ...validateNodeData(nodeType, data, validationEnv),
       ...describedNodeIssues(described.description, data),
       ...ignoredTargetIssues(data, described.description, serviceTargets),
     ];
@@ -803,7 +809,8 @@ export function nodeIssues(nodeType: string, data: Record<string, unknown>): Nod
     data,
     serviceRequiredFields,
     serviceTargets,
-    described?.description
+    described?.description,
+    validationEnv
   );
   // One of the catalog's own: the tables' checks, read as the connected HA
   // describes it, and any field it describes that the panel has no editor
@@ -1805,6 +1812,12 @@ export const useFlowStore = create<FlowState>()(
 
         setServiceTargets: (context) => {
           serviceTargets = context;
+          get().validateAllNodes();
+        },
+
+        setHaVersion: (version) => {
+          if (version === validationEnv.haVersion) return;
+          validationEnv = { haVersion: version };
           get().validateAllNodes();
         },
 

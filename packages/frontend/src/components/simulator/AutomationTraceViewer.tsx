@@ -11,6 +11,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { useHass } from '@/contexts/HassContext';
+import { useHassConnection } from '@/hooks/useHassConnection';
 import { getHomeAssistantAPI, type TraceListItem } from '@/lib/ha-api';
 import { logger } from '@/lib/logger';
 import { cn } from '@/lib/utils';
@@ -18,7 +19,10 @@ import { useFlowStore } from '@/store/flow-store';
 
 export function AutomationTraceViewer() {
   const { t } = useTranslation(['common', 'dialogs']);
-  const { hass } = useHass();
+  // Keyed on HA's connection, not `hass` (a new object every few seconds):
+  // keyed on `hass`, the list reloaded and jumped back to the latest run
+  // while one was being looked at (bug #183).
+  const { getHass, connection } = useHassConnection(useHass().hass);
   const {
     automationId,
     traceData,
@@ -39,6 +43,7 @@ export function AutomationTraceViewer() {
   const [isAnimating, setIsAnimating] = useState(false);
 
   const loadTraceList = useCallback(async () => {
+    const hass = getHass();
     if (!automationId || !hass) return;
 
     setIsLoading(true);
@@ -64,17 +69,18 @@ export function AutomationTraceViewer() {
       setTraces([]);
     }
     setIsLoading(false);
-  }, [automationId, hass, showTrace]);
+  }, [automationId, getHass, showTrace]);
 
   // Load trace list when component mounts or automation ID changes
   useEffect(() => {
-    if (automationId && hass) {
+    if (automationId && connection) {
       loadTraceList();
     }
-  }, [automationId, hass, loadTraceList]);
+  }, [automationId, connection, loadTraceList]);
 
   const loadTraceDetails = useCallback(
     async (runId: string) => {
+      const hass = getHass();
       if (!automationId || !hass || !runId) return;
 
       setIsLoading(true);
@@ -91,7 +97,7 @@ export function AutomationTraceViewer() {
       }
       setIsLoading(false);
     },
-    [automationId, hass, showTrace]
+    [automationId, getHass, showTrace]
   );
 
   const handleTraceSelection = useCallback(

@@ -12,6 +12,7 @@ import { useConventionMarkers } from '@/hooks/useConventionMarkers';
 import { useMoreInfo } from '@/hooks/useMoreInfo';
 import { useEditableTargets, useWholeArea } from '@/hooks/useStepTargets';
 import { type EntityTargetDisplay, useNodeCardDisplay } from '@/hooks/useNodeCardDisplay';
+import { useTriggerIdNames } from '@/hooks/useTriggerIdNames';
 import { useNodeErrors } from '@/hooks/useNodeErrors';
 import { useTraceNodeState } from '@/hooks/useTraceNodeState';
 import { getConditionRoleLabel } from '@/lib/block-role-label';
@@ -200,6 +201,7 @@ export const ConditionNode = memo(function ConditionNode({
   const openMoreInfo = useMoreInfo();
   const editableTargets = useEditableTargets('condition', data);
   const { resolveEntityTarget, entityNames } = useNodeCardDisplay();
+  const triggerIdNames = useTriggerIdNames();
   const traceState = useTraceNodeState(id);
   const markers = useConventionMarkers(id);
   const isActive = activeNodeId === id;
@@ -695,10 +697,11 @@ export const ConditionNode = memo(function ConditionNode({
           )}
           {data.template && <TemplateLine template={data.template} />}
           {data.value_template && <TemplateLine template={data.value_template} />}
+          {/* The triggers it means, as their cards read, not their ids
+              (HA 2026.10 writes ids like `generated-a1B2`). */}
           {data.id !== undefined && data.id !== null && (
-            <div className="opacity-75">
-              {'id: '}
-              {Array.isArray(data.id) ? (data.id as string[]).join(', ') : String(data.id)}
+            <div className="opacity-75" data-testid="triggered-by-names">
+              {triggerIdNames(data.id).join(', ')}
             </div>
           )}
           {/* isGroup's empty case ("0 Nested Conditions") is no longer reachable here —

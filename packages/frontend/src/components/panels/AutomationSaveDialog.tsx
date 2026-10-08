@@ -15,6 +15,7 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { useHass } from '@/contexts/HassContext';
 import { CategoryFallback, HaAreaPicker, HaCategoryPicker, HaIconPicker, HaLabelsPicker } from '@/ha';
+import { useHassConnection } from '@/hooks/useHassConnection';
 import { getHomeAssistantAPI } from '@/lib/ha-api';
 import { useFlowStore } from '@/store/flow-store';
 
@@ -65,8 +66,14 @@ export function AutomationSaveDialog({ isOpen, onClose, onSaved }: AutomationSav
     setMetadata((prev) => ({ ...prev, [field]: value }));
   };
 
+  // Reads the latest `hass` without being keyed on it (a new object every
+  // few seconds): keyed on `hass`, this ran again while the dialog was open
+  // and put back the description being typed (bug #183).
+  const { getHass } = useHassConnection(hass);
+
   // Sync local description with store when dialog opens
   useEffect(() => {
+    const hass = getHass();
     if (isOpen) {
       setLocalDescription(flowDescription);
       setError(null);
@@ -93,7 +100,7 @@ export function AutomationSaveDialog({ isOpen, onClose, onSaved }: AutomationSav
         setMetadata(EMPTY_METADATA);
       }
     }
-  }, [isOpen, automationId, hass, flowDescription, isUpdate]);
+  }, [isOpen, automationId, getHass, flowDescription, isUpdate]);
 
   // Check for name conflicts when name changes
   const checkNameConflict = async (name: string) => {
