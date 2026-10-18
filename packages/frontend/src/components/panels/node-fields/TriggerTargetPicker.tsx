@@ -18,9 +18,11 @@ import { getEntityRecipeGroup, type TriggerRecipe } from '@/lib/triggerRecipes';
 import { groupRecipesByHeading } from '@/lib/recipeRows';
 import { entityName } from '@/lib/entityNames';
 import { cn } from '@/lib/utils';
+import { offersNumericState } from '@/lib/entityNumeric';
 import type { HassEntity } from '@/types/hass';
 import { entityPickerIcon, getPickerIcon, type PickerIcon } from '@/components/nodes/StepIcon';
 import { TriggerResultRow } from './TriggerResultRow';
+import type { PlaceTarget } from '@/lib/stepTargets';
 
 /**
  * The "By target" tab of the trigger picker (see TriggerTypePicker.tsx),
@@ -111,9 +113,9 @@ export function groupByDevice(
 /** A room (an area) or a label whose types are listed together. */
 export interface RoomScope {
   label: string;
-  /** Set for an area: the types that can target it offer "Anything in
-   * <room>" (a label has no area target). */
-  areaId?: string;
+  /** The place itself, which the types that take a target offer as a
+   * whole ("Anything in <room>", "Anything labelled <label>"). */
+  place?: PlaceTarget;
 }
 
 export interface SelectedScope {
@@ -254,7 +256,7 @@ export function buildUnassignedGroups(
 interface TriggerTargetPickerProps {
   entities: HassEntity[];
   onSelectPlatform: (platform: TriggerPlatform) => void;
-  onSelectEntityTarget: (entityId: string) => void;
+  onSelectEntityTarget: (entityId: string, platform?: 'state' | 'numeric_state') => void;
   onSelectDeviceTrigger: (trigger: DeviceTrigger) => void;
   onSelectRecipe: (entityIds: string[], recipe: TriggerRecipe) => void;
 }
@@ -618,7 +620,7 @@ export function TargetResultsPanel({
 }: {
   selected: SelectedScope | null;
   entities: HassEntity[];
-  onSelectEntityTarget: (entityId: string) => void;
+  onSelectEntityTarget: (entityId: string, platform?: 'state' | 'numeric_state') => void;
   /** A room's State row: its entities, to tick. */
   onSelectStateTargets?: (entityIds: string[]) => void;
   onSelectDeviceTrigger: (trigger: DeviceTrigger) => void;
@@ -841,6 +843,17 @@ export function TargetResultsPanel({
             chip={singleEntityLabel ?? null}
             onSelect={() => onSelectEntityTarget(selected.singleEntityId as string)}
           />
+          {offersNumericState(selected.singleEntityId, singleEntity) && (
+            <TriggerResultRow
+              icon={SingleEntityFallbackIcon}
+              color={getDomainColor(selected.singleEntityId?.split('.')[0])}
+              label={t('nodes:triggers.platforms.numeric_state')}
+              chip={singleEntityLabel ?? null}
+              onSelect={() =>
+                onSelectEntityTarget(selected.singleEntityId as string, 'numeric_state')
+              }
+            />
+          )}
         </div>
       )}
       {selected.room && onSelectStateTargets && selected.entityIds.length > 0 && (

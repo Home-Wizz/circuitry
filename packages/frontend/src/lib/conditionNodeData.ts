@@ -3,6 +3,7 @@ import type { ConditionBlock, ConditionRecipe } from '@/lib/conditionRecipes';
 import { conditionIsTargetless, defaultThreshold } from '@/lib/nativeThreshold';
 import { picksZone } from '@/lib/nativeZone';
 import { isRecord } from '@/lib/utils';
+import { type PlaceTarget, placeTarget } from '@/lib/stepTargets';
 
 /**
  * The outcomes AndConditionDialog.tsx's Miller-column picker can produce —
@@ -17,13 +18,14 @@ import { isRecord } from '@/lib/utils';
  */
 export type ConditionSelection =
   | { kind: 'block'; block: ConditionBlock }
-  | { kind: 'entityTarget'; entityIds: string[] }
+  | { kind: 'entityTarget'; entityIds: string[]; condition?: 'state' | 'numeric_state' }
   | {
       kind: 'recipe';
       entityIds: string[];
       recipe: ConditionRecipe;
-      /** A whole area as its target ("Anything in <room>"), instead of entities. */
-      areaId?: string;
+      /** A whole place as its target ("Anything in <room>", on a floor,
+       * labelled), instead of entities. */
+      place?: PlaceTarget;
     }
   | { kind: 'deviceCondition'; condition: DeviceCondition };
 
@@ -90,7 +92,7 @@ export function buildConditionNodeData(selection: ConditionSelection): Record<st
     // with the chosen entity, matching nodeTypeCatalog's own condition
     // node default shape (`{ condition: 'state', entity_id: '' }').
     case 'entityTarget':
-      return { condition: 'state', entity_id: selection.entityIds };
+      return { condition: selection.condition ?? 'state', entity_id: selection.entityIds };
 
     case 'recipe': {
       const { entityIds, recipe } = selection;
@@ -112,8 +114,8 @@ export function buildConditionNodeData(selection: ConditionSelection): Record<st
           ? {}
           : {
               target:
-                selection.areaId && conditionRecipeTakesArea(recipe)
-                  ? { area_id: selection.areaId }
+                selection.place && conditionRecipeTakesArea(recipe)
+                  ? placeTarget(selection.place)
                   : { entity_id: zone ? [] : entityIds },
             }),
         ...(options ? { options } : {}),

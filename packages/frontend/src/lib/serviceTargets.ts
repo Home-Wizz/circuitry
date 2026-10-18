@@ -1,6 +1,12 @@
 import type { NodeValidationError } from '@circuitry/shared';
 import type { HassEntity, HassServices } from 'home-assistant-js-websocket';
-import { type ActionRecipe, getEntityActionCategory } from '@/lib/actionRecipes';
+import {
+  type ActionRecipe,
+  actionCatalog,
+  type EntityActionCategory,
+  getEntityActionCategory,
+} from '@/lib/actionRecipes';
+import { serviceTakesEntities } from '@/lib/actionNodeData';
 import { isRecord } from '@/lib/utils';
 
 /**
@@ -200,7 +206,10 @@ export interface ActionRecipeOffer {
 export function actionRecipeOffers(
   entityIds: string[],
   entities: HassEntity[],
-  services: HassServices | undefined
+  services: HassServices | undefined,
+  // The categories as the connected HA has them (every service of a
+  // domain); the picker passes its own, in the editor's language.
+  categories: readonly EntityActionCategory[] = actionCatalog(services)
 ): Map<string, ActionRecipeOffer[]> {
   const byId = new Map(entities.map((e) => [e.entity_id, e]));
   const groups = new Map<
@@ -208,7 +217,7 @@ export function actionRecipeOffers(
     { heading: string; recipes: ActionRecipe[]; entityIds: string[] }
   >();
   for (const entityId of entityIds) {
-    const category = getEntityActionCategory(entityId);
+    const category = getEntityActionCategory(entityId, categories);
     if (!category) continue;
     const key = `${category.heading}\u0000${category.groupKey}`;
     const group = groups.get(key);
@@ -223,6 +232,9 @@ export function actionRecipeOffers(
   const out = new Map<string, ActionRecipeOffer[]>();
   for (const group of groups.values()) {
     const offers = group.recipes
+      // Only actions that act on entities: one that acts on none isn't
+      // something to do to a room's entities (bug #236).
+      .filter((recipe) => serviceTakesEntities(recipe.service, services))
       .map((recipe) => ({
         recipe,
         entityIds: group.entityIds.filter((id) => {

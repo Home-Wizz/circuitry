@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isHaActionName } from './base';
 import { isOpaqueStepData } from './nodes';
 
 /**
@@ -82,7 +83,9 @@ export const ActionNodeValidationSchema = z
       error('errors:validation.action.serviceOrEventRequired', 'service');
       return;
     }
-    if (hasService && !data.service!.includes('.')) {
+    // HA's own test of the name: a service name or a template (bug #234:
+    // it used to be "has a dot", which refused `{{ name }}`).
+    if (hasService && !isHaActionName(data.service!)) {
       error('errors:validation.action.serviceFormat', 'service');
     }
   });
@@ -95,6 +98,62 @@ export const ActionNodeValidationSchema = z
  * tag id and an empty entity list, and refused an event type given as a
  * list, all of which HA accepts. Accepts `platform:`, the older key.
  */
+/** Python's int() of a string: digits, a sign, spaces around (HA parses with it). */
+const PY_INT = /^\s*[+-]?\d+(?:_\d+)*\s*$/;
+
+/** Python's float() of a string, for the seconds of a time period. */
+function isPyFloat(text: string): boolean {
+  const t = text.trim();
+  if (/^[+-]?(?:inf|infinity|nan)$/i.test(t)) return true;
+  return /^[+-]?(?:\d+(?:_\d+)*(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(t);
+}
+
+/**
+ * A time pattern value as HA's TimePattern takes it (HA 2026.10,
+ * time_pattern.py): `*`; `/N`, N a whole number from 1 to `most`; or a whole
+ * number from 0 to `most` (a number is truncated, as Python's int() does).
+ * Anything else (a boolean, a list) is left to HA.
+ */
+function isTimePatternValue(value: unknown, most: number): boolean {
+  if (value === '*') return true;
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) return false;
+    const n = Math.trunc(value);
+    return n >= 0 && n <= most;
+  }
+  if (typeof value !== 'string') return true;
+  const every = value.startsWith('/');
+  const text = every ? value.slice(1) : value;
+  if (!PY_INT.test(text)) return false;
+  const n = Number(text.replace(/_/g, '').trim());
+  if (every && n === 0) return false;
+  return n >= 0 && n <= most;
+}
+
+/** The longest time span HA can hold (Python's timedelta), in seconds. */
+const MAX_TIMEDELTA_SECONDS = 86_399_999_913_600;
+
+/**
+ * A time period written as text, as HA's time_period reads it (HA
+ * 2026.10): time_period_str's optional sign, then `H:MM` or `H:MM:SS`,
+ * hours and minutes whole, seconds possibly with a fraction; or
+ * time_period_seconds' number of seconds (`"-90"`, `"1.5"`, `"1e3"`; bug
+ * #250: refused, though HA takes it), not `nan`, `inf` or one too long for
+ * a time span, which HA refuses.
+ */
+function isTimePeriodText(value: string): boolean {
+  if (isPyFloat(value)) {
+    const seconds = Number(value.trim().replace(/_/g, ''));
+    return Number.isFinite(seconds) && Math.abs(seconds) <= MAX_TIMEDELTA_SECONDS;
+  }
+  const unsigned = value.startsWith('-') || value.startsWith('+') ? value.slice(1) : value;
+  const parts = unsigned.split(':');
+  if (parts.length !== 2 && parts.length !== 3) return false;
+  return (
+    PY_INT.test(parts[0]) && PY_INT.test(parts[1]) && (parts.length === 2 || isPyFloat(parts[2]))
+  );
+}
+
 function checkTrigger(data: Record<string, unknown>, ctx: IssueContext): void {
   const report = reporter(ctx, [], data);
   const { error, warn } = report;
@@ -162,6 +221,10 @@ function checkTrigger(data: Record<string, unknown>, ctx: IssueContext): void {
       break;
     case 'sun':
       requireFilled('event', 'errors:validation.trigger.sunEventRequired');
+      // An offset written as text, as HA's time_period_str reads it (#212).
+      if (typeof data.offset === 'string' && data.offset !== '' && !isTimePeriodText(data.offset)) {
+        error('errors:validation.trigger.sunOffsetInvalid', 'offset');
+      }
       break;
     case 'homeassistant':
       requireFilled('event', 'errors:validation.trigger.haEventRequired');
@@ -198,6 +261,17 @@ function checkTrigger(data: Record<string, unknown>, ctx: IssueContext): void {
     case 'time_pattern':
       if (['hours', 'minutes', 'seconds'].every((f) => isMissing(data[f]) || blankValue(data[f]))) {
         error('errors:validation.trigger.timePatternRequired', 'hours');
+      }
+      // Each value as HA's TimePattern reads it (bug #212).
+      for (const [field, most] of [
+        ['hours', 23],
+        ['minutes', 59],
+        ['seconds', 59],
+      ] as const) {
+        const v = data[field];
+        if (!isMissing(v) && !blankValue(v) && !isTimePatternValue(v, most)) {
+          error('errors:validation.trigger.timePatternInvalid', field);
+        }
       }
       break;
     case 'calendar':

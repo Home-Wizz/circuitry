@@ -23,6 +23,7 @@ import voluptuous as vol
 
 from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 
 from .const import DOMAIN
 from .storage import GraphStore
@@ -50,6 +51,7 @@ def _get_store(hass: HomeAssistant) -> GraphStore:
         vol.Required("source_hash"): str,
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 async def websocket_save_graph(
     hass: HomeAssistant,
@@ -67,7 +69,12 @@ async def websocket_save_graph(
     """
     store = _get_store(hass)
     saved_at = datetime.now(timezone.utc).isoformat()
-    await store.async_save(msg["automation_id"], msg["graph"], msg["source_hash"], saved_at)
+    try:
+        await store.async_save(msg["automation_id"], msg["graph"], msg["source_hash"], saved_at)
+    except HomeAssistantError as err:
+        # Said, not reported as saved (bug #247).
+        connection.send_error(msg["id"], "store_failed", str(err))
+        return
     connection.send_result(msg["id"], {"saved_at": saved_at})
 
 
@@ -77,6 +84,7 @@ async def websocket_save_graph(
         vol.Required("automation_id"): str,
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 async def websocket_load_graph(
     hass: HomeAssistant,
@@ -104,6 +112,7 @@ async def websocket_load_graph(
         vol.Required("automation_id"): str,
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 async def websocket_delete_graph(
     hass: HomeAssistant,

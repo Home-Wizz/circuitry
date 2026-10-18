@@ -181,7 +181,6 @@ export function mergeAutomationGraphs(sources: MergeAutomationSource[]): FlowGra
 
   const baseMetadata: FlowMetadata = {
     mode: 'single',
-    initial_state: true,
     ...(sources[0]?.graph.metadata || {}),
   };
 

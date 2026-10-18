@@ -7,7 +7,7 @@ import { useResolvedEntities } from '@/hooks/useResolvedEntities';
 import { categoryEntityDomains } from '@/lib/haCatalog';
 import { entitiesForType } from '@/lib/nativeTargets';
 import { entitiesForService, serviceHasTarget } from '@/lib/serviceTargets';
-import { type EditableTargets, editableTargets, wholeAreaIds } from '@/lib/stepTargets';
+import { ANYTHING_IN, type EditableTargets, editableTargets, wholePlace } from '@/lib/stepTargets';
 import { prettify } from '@/lib/utils';
 import type { HassEntity } from '@/types/hass';
 
@@ -97,17 +97,21 @@ export function useOfferedEntities(
 }
 
 /**
- * A step whose target is a whole area ("Anything in <room>"): its label for
- * the card ("Anything in Hallway") and the area's name for the context line;
- * undefined for any other target.
+ * A step whose target is a whole place -- an area ("Anything in <room>"), a
+ * floor or a label: its label for the card ("Anything in Hallway") and the
+ * place's name for the context line; undefined for any other target.
  */
-export function useWholeArea(target: unknown): { label: string; place: string } | undefined {
+export function useWholePlace(target: unknown): { label: string; place: string } | undefined {
   const { t } = useTranslation(['nodes']);
-  const { areas } = useHass();
-  const ids = wholeAreaIds(target);
-  if (!ids) return undefined;
-  const place = ids
-    .map((id) => areas.find((a) => a.area_id === id)?.name ?? prettify(id))
-    .join(', ');
-  return { label: t('nodes:picker.rows.anythingIn', { name: place }), place };
+  const { areas, floors, labels } = useHass();
+  const whole = wholePlace(target);
+  if (!whole) return undefined;
+  const nameOf = (id: string): string =>
+    (whole.key === 'area_id'
+      ? areas.find((a) => a.area_id === id)?.name
+      : whole.key === 'floor_id'
+        ? floors.find((f) => f.floor_id === id)?.name
+        : labels.find((l) => l.label_id === id)?.name) ?? prettify(id);
+  const place = whole.ids.map(nameOf).join(', ');
+  return { label: t(ANYTHING_IN[whole.key], { name: place }), place };
 }

@@ -484,6 +484,24 @@ const REMOVED_BY_HA = new Set(['note', 'metadata']);
 export const isMapping = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === 'object' && !Array.isArray(value);
 
+/** A Choose option HA always runs when it gets to it: no conditions. */
+export function isAlwaysTrueOption(option: unknown): option is Record<string, unknown> {
+  return isMapping(option) && conditionList(option.conditions).length === 0;
+}
+
+/**
+ * The one option of a `choose:` whose only option is always true (bug
+ * #193), else undefined. HA runs its steps every time, as a script of their
+ * own, exactly like a `sequence:` group.
+ */
+export function onlyAlwaysTrueOption(action: unknown): Record<string, unknown> | undefined {
+  if (!isChooseAction(action)) return undefined;
+  const options = toList(action.choose);
+  if (options.length !== 1 || toList(action.default).length > 0) return undefined;
+  const [option] = options;
+  return isAlwaysTrueOption(option) ? option : undefined;
+}
+
 /**
  * True for a step HA accepts that the node it would become can't hold
  * whole, so it is kept exactly as written, as an opaque step (H5.1's
@@ -524,11 +542,7 @@ export function isStepKeptAsWritten(action: unknown): action is Record<string, u
   if (isChooseAction(action)) {
     const options = toList(step.choose);
     if (options.length === 0 || !options.every(isMapping)) return true;
-    const always = options.findIndex(
-      (option) =>
-        isMapping(option) &&
-        conditionList((option as Record<string, unknown>).conditions).length === 0
-    );
+    const always = options.findIndex(isAlwaysTrueOption);
     if (always !== -1 && (always < options.length - 1 || toList(step.default).length > 0)) {
       return true;
     }

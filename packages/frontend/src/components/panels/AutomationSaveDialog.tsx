@@ -13,18 +13,25 @@ import {
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useHass } from '@/contexts/HassContext';
-import { CategoryFallback, HaAreaPicker, HaCategoryPicker, HaIconPicker, HaLabelsPicker } from '@/ha';
+import {
+  CategoryFallback,
+  HaAreaPicker,
+  HaCategoryPicker,
+  HaIconPicker,
+  HaLabelsPicker,
+} from '@/ha';
 import { useHassConnection } from '@/hooks/useHassConnection';
+import { ChangedElsewhereError } from '@/lib/changed-elsewhere';
 import { getHomeAssistantAPI } from '@/lib/ha-api';
-import { useFlowStore } from '@/store/flow-store';
-
-interface RegistryMetadata {
-  icon: string;
-  category: string;
-  labels: string[];
-  area: string;
-}
+import { showWarningToast } from '@/lib/haToast';
+import {
+  hasRegistryChoices,
+  type RegistryMetadata,
+  applyRegistryMetadata as setRegistryMetadata,
+} from '@/lib/registryMetadata';
+import { selectIsSaving, useFlowStore } from '@/store/flow-store';
 
 const EMPTY_METADATA: RegistryMetadata = { icon: '', category: '', labels: [], area: '' };
 
@@ -40,13 +47,15 @@ export function AutomationSaveDialog({ isOpen, onClose, onSaved }: AutomationSav
     flowName,
     flowDescription,
     automationId,
-    isSaving,
+    keptElsewhere,
     setFlowName,
     setFlowDescription,
-    setAutomationId,
     saveAutomation,
+    saveAsNewAutomation,
     updateAutomation,
   } = useFlowStore();
+  // The active tab's own save (bug #239).
+  const isSaving = useFlowStore(selectIsSaving);
 
   const { hass } = useHass();
 
@@ -55,6 +64,12 @@ export function AutomationSaveDialog({ isOpen, onClose, onSaved }: AutomationSav
   const [suggestedName, setSuggestedName] = useState<string | null>(null);
   const [metadata, setMetadata] = useState<RegistryMetadata>(EMPTY_METADATA);
   const touchedFields = useRef<Set<keyof RegistryMetadata>>(new Set());
+  // Whether the automation's area, labels, ... were read from HA: until
+  // then only what the user sets is written (bug #238).
+  const loadedFromHa = useRef(false);
+  // Set once an Update was held back for a change made in Home Assistant
+  // since the tab opened it: the next Update, now knowing, replaces it.
+  const replaceOutsideChanges = useRef(false);
 
   const isUpdate = !!automationId;
 
@@ -79,6 +94,7 @@ export function AutomationSaveDialog({ isOpen, onClose, onSaved }: AutomationSav
       setError(null);
       setSuggestedName(null);
       touchedFields.current = new Set();
+      loadedFromHa.current = false;
 
       if (isUpdate && automationId && hass) {
         const api = getHomeAssistantAPI(hass);
@@ -86,6 +102,7 @@ export function AutomationSaveDialog({ isOpen, onClose, onSaved }: AutomationSav
         if (entityId) {
           api.getEntityRegistryEntry(entityId).then((entry) => {
             if (!entry) return;
+            loadedFromHa.current = true;
             setMetadata((prev) => ({
               icon: touchedFields.current.has('icon') ? prev.icon : entry.icon || '',
               category: touchedFields.current.has('category')
@@ -124,32 +141,25 @@ export function AutomationSaveDialog({ isOpen, onClose, onSaved }: AutomationSav
   };
 
   // Registry metadata is a nice-to-have on top of the automation itself — a
-  // failure here shouldn't surface as a save failure the user has to retry.
-  // Returns the resolved entity_id (if any) so the caller can also fire the
-  // `circuitry_automation_saved` bus event against it.
+  // failure here shouldn't surface as a save failure the user has to retry,
+  // but it is said (bug #214). Returns the resolved entity_id (if any) so the
+  // caller can also fire the `circuitry_automation_saved` bus event against it.
   const applyRegistryMetadata = async (
     resultId: string,
     isNewAutomation: boolean
   ): Promise<string | undefined> => {
     if (!hass) return undefined;
-    const api = getHomeAssistantAPI(hass);
-    try {
-      const entityId = isNewAutomation
-        ? await api.waitForAutomationEntity(resultId)
-        : api.findAutomationEntityId(resultId);
-      if (!entityId) return undefined;
-
-      await api.updateEntityRegistryEntry(entityId, {
-        icon: metadata.icon || null,
-        area_id: metadata.area || null,
-        labels: metadata.labels,
-        categories: { automation: metadata.category || null },
-      });
-      return entityId;
-    } catch (err) {
-      console.warn('Failed to apply registry metadata:', err);
-      return undefined;
+    const { entityId, applied } = await setRegistryMetadata(
+      getHomeAssistantAPI(hass),
+      resultId,
+      isNewAutomation,
+      metadata,
+      isNewAutomation || loadedFromHa.current ? undefined : touchedFields.current
+    );
+    if (!applied && hasRegistryChoices(metadata)) {
+      showWarningToast(t('dialogs:save.registryNotSet'));
     }
+    return entityId;
   };
 
   // Lets other automations/scripts react to Circuitry saves. Best-effort, same
@@ -184,7 +194,7 @@ export function AutomationSaveDialog({ isOpen, onClose, onSaved }: AutomationSav
 
       let resultId: string;
       if (isUpdate) {
-        await updateAutomation(hass);
+        await updateAutomation(hass, { replaceOutsideChanges: replaceOutsideChanges.current });
         resultId = automationId || '';
       } else {
         resultId = await saveAutomation(hass);
@@ -193,15 +203,21 @@ export function AutomationSaveDialog({ isOpen, onClose, onSaved }: AutomationSav
       const entityId = await applyRegistryMetadata(resultId, !isUpdate);
       await notifyAutomationSaved(entityId);
 
+      replaceOutsideChanges.current = false;
       onSaved?.(resultId);
       onClose();
     } catch (err) {
+      if (err instanceof ChangedElsewhereError) replaceOutsideChanges.current = true;
       const errorMessage = err instanceof Error ? err.message : t('errors:api.unknownError');
       setError(errorMessage);
     }
   };
 
   const handleClose = () => {
+    // Stays open while saving, as its Cancel button does: closed then,
+    // HA's refusal was shown in a dialog no longer there (bug #241).
+    if (isSaving) return;
+    replaceOutsideChanges.current = false;
     setError(null);
     setSuggestedName(null);
     onClose();
@@ -230,14 +246,11 @@ export function AutomationSaveDialog({ isOpen, onClose, onSaved }: AutomationSav
     try {
       // Get a unique name for the copy
       const copyName = await getHomeAssistantAPI(hass).getUniqueAutomationAlias(flowName);
-      setFlowName(copyName);
       setFlowDescription(localDescription.trim());
 
-      // Clear the automation ID to force creating a new one
-      setAutomationId(null);
-
-      // Save as new automation
-      const resultId = await saveAutomation(hass);
+      // Save as a new automation; the tab becomes the copy (or stays as it
+      // was if the save fails).
+      const resultId = await saveAsNewAutomation(hass, copyName);
 
       const entityId = await applyRegistryMetadata(resultId, true);
       await notifyAutomationSaved(entityId);
@@ -347,7 +360,7 @@ export function AutomationSaveDialog({ isOpen, onClose, onSaved }: AutomationSav
             <Button variant="outline" onClick={handleClose} disabled={isSaving}>
               {t('buttons.cancel')}
             </Button>
-            {isUpdate && (
+            {(isUpdate || keptElsewhere) && (
               <Button
                 variant="outline"
                 onClick={handleSaveAsCopy}
@@ -361,19 +374,52 @@ export function AutomationSaveDialog({ isOpen, onClose, onSaved }: AutomationSav
                 {t('buttons.saveAsCopy')}
               </Button>
             )}
-            <Button onClick={handleSave} disabled={isSaving || !flowName.trim()}>
-              {isSaving ? (
-                <>
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  {isUpdate ? t('status.updating') : t('status.saving')}
-                </>
-              ) : (
-                <>
-                  <Check className="mr-2 h-4 w-4" />
-                  {isUpdate ? t('buttons.update') : t('buttons.save')}
-                </>
-              )}
-            </Button>
+            {keptElsewhere ? (
+              // Kept outside automations.yaml (bug #226): Save stays in
+              // view, greyed, saying why; Save as Copy beside it works.
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  {/* biome-ignore lint/a11y/noNoninteractiveTabindex: a disabled button takes no focus or hover, so its tooltip hangs on this wrapper (Radix's own advice) */}
+                  <span tabIndex={0}>
+                    <Button
+                      onClick={handleSave}
+                      disabled={isSaving || !flowName.trim() || Boolean(keptElsewhere)}
+                    >
+                      {isSaving ? (
+                        <>
+                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          {isUpdate ? t('status.updating') : t('status.saving')}
+                        </>
+                      ) : (
+                        <>
+                          <Check className="mr-2 h-4 w-4" />
+                          {isUpdate ? t('buttons.update') : t('buttons.save')}
+                        </>
+                      )}
+                    </Button>
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent>
+                  {keptElsewhere === 'readingDiffers'
+                    ? t('dialogs:save.readingDiffers')
+                    : t('dialogs:save.keptElsewhere')}
+                </TooltipContent>
+              </Tooltip>
+            ) : (
+              <Button onClick={handleSave} disabled={isSaving || !flowName.trim()}>
+                {isSaving ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    {isUpdate ? t('status.updating') : t('status.saving')}
+                  </>
+                ) : (
+                  <>
+                    <Check className="mr-2 h-4 w-4" />
+                    {isUpdate ? t('buttons.update') : t('buttons.save')}
+                  </>
+                )}
+              </Button>
+            )}
           </div>
         </div>
       </DialogContent>

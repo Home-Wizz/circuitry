@@ -1,11 +1,10 @@
-import { transpiler } from '@circuitry/transpiler';
 import { useReactFlow } from '@xyflow/react';
-import { dump as yamlDump } from 'js-yaml';
 import { useTranslation } from 'react-i18next';
 import { useHass } from '@/contexts/HassContext';
-import { computeSourceHash, loadGraphIfFresh, saveGraph } from '@/lib/graph-storage';
+import { saveGraph } from '@/lib/graph-storage';
 import { getHomeAssistantAPI } from '@/lib/ha-api';
 import { showErrorToast, showSuccessToast, showWarningToast } from '@/lib/haToast';
+import { readAutomationAsGraph } from '@/lib/read-automation';
 import { useFlowStore } from '@/store/flow-store';
 
 export interface LoadableAutomation {
@@ -29,7 +28,15 @@ export interface LoadableAutomation {
 export function useLoadAutomation() {
   const { t } = useTranslation(['dialogs', 'errors']);
   const { hass, config: hassConfig } = useHass();
-  const { reset, openInNewTab, fromFlowGraph, setFlowName, setAutomationId } = useFlowStore();
+  const {
+    reset,
+    openInNewTab,
+    fromFlowGraph,
+    setFlowName,
+    setAutomationId,
+    setSavedConfigHash,
+    setKeptElsewhere,
+  } = useFlowStore();
   const { fitView } = useReactFlow();
 
   return async (
@@ -37,6 +44,9 @@ export function useLoadAutomation() {
     openMode: 'current' | 'new' = 'current'
   ): Promise<boolean> => {
     const displayName = automation.friendly_name || automation.automation_id;
+    // The tab Open was pressed in: replaced only if it's still the active
+    // one when the automation arrives (bug #203).
+    const startTab = useFlowStore.getState().flowId;
     try {
       const api = getHomeAssistantAPI(hass, hassConfig);
 
@@ -44,148 +54,119 @@ export function useLoadAutomation() {
         throw new Error(t('errors:connection.noConnection'));
       }
 
-      const config = await api.getAutomationConfigWithFallback(
-        automation.automation_id,
-        automation.friendly_name
-      );
+      const reading = await readAutomationAsGraph(api, automation.automation_id, displayName);
+      if (!reading.ok) {
+        // HA couldn't give it: open nothing. An empty canvas linked to the
+        // automation was saved over it (bug #204).
+        if (reading.reason === 'unavailable')
+          throw new Error(t('dialogs:import.configUnavailable'));
+        throw new Error(reading.errors.join('\n') || t('errors:import.parseFailed'));
+      }
+      const { config, editable, sourceHash, graph, decompiled, importCheck } = reading;
+      const readingDiffers = importCheck.verdict === 'different';
 
-      if (openMode === 'new') {
+      // Only now, with the automation read: replace the tab, or open a new
+      // one -- also when another tab became active meanwhile, which must
+      // not be replaced.
+      if (openMode === 'new' || useFlowStore.getState().flowId !== startTab) {
         openInNewTab();
       } else {
         reset();
       }
-
-      if (config) {
-        // Option 1 fast path: if Circuitry itself saved this automation and
-        // nothing has touched it since (the stored canonical graph's hash
-        // still matches this live config), load that graph back verbatim --
-        // no heuristic YAML decompilation involved at all. Any mismatch
-        // (hand-edited YAML, the native HA UI, another tool, or simply an
-        // automation Circuitry never saved) falls through to the existing
-        // decompiler below, exactly as it always has.
-        const sourceHash = computeSourceHash(config as unknown as Record<string, unknown>);
-        const canonicalGraph = await loadGraphIfFresh(
-          api,
-          automation.automation_id,
-          sourceHash
-        ).catch((lookupError) => {
-          console.warn(
-            'Circuitry: canonical graph lookup failed, falling back to YAML decompile:',
-            lookupError
-          );
-          return null;
+      fromFlowGraph(graph);
+      setTimeout(() => {
+        fitView({ padding: 0.2, duration: 300, maxZoom: 0.75 });
+      }, 150);
+      // The automation's own alias: the entity's name can differ (renamed
+      // in HA's entity settings), and putting it here opened the tab as
+      // changed and renamed the automation at its next save (bug #240).
+      setFlowName(typeof config.alias === 'string' && config.alias ? config.alias : displayName);
+      if (readingDiffers) {
+        setKeptElsewhere('readingDiffers');
+        showWarningToast(t('dialogs:import.readingDiffers', { name: displayName }), {
+          description: t('dialogs:import.readingDiffersDescription', {
+            detail: importCheck.detail ?? '',
+          }),
         });
-
-        if (canonicalGraph) {
-          // eslint-disable-next-line no-console -- deliberate, user-facing
-          // diagnostic for verifying Option 1: makes which load path fired
-          // visible in the browser console without needing to inspect raw
-          // websocket frames.
-          console.info(
-            `Circuitry: loaded "${displayName}" via the canonical graph (Option 1 fast path) -- no YAML decompile.`
-          );
-          fromFlowGraph(canonicalGraph);
-          setTimeout(() => {
-            fitView({ padding: 0.2, duration: 300, maxZoom: 0.75 });
-          }, 150);
-
-          setFlowName(displayName);
-          setAutomationId(automation.automation_id);
-
-          showSuccessToast(t('dialogs:import.importSuccess', { name: displayName }));
-        } else {
-          // eslint-disable-next-line no-console -- see the matching log in
-          // the canonicalGraph branch above.
-          console.info(
-            `Circuitry: loaded "${displayName}" via YAML decompile (no canonical graph, or it's stale).`
-          );
-          const yamlString = yamlDump(config, {
-            indent: 2,
-            lineWidth: -1,
-            quotingType: '"',
-            forceQuotes: false,
-          });
-
-          const result = await transpiler.fromYaml(yamlString);
-          if (!result.success || !result.graph) {
-            throw new Error(result.errors?.join('\n') || t('errors:import.parseFailed'));
-          }
-
-          fromFlowGraph(result.graph);
-          setTimeout(() => {
-            fitView({ padding: 0.2, duration: 300, maxZoom: 0.75 });
-          }, 150);
-
-          setFlowName(displayName);
-          setAutomationId(automation.automation_id);
-
-          showSuccessToast(t('dialogs:import.importSuccess', { name: displayName }));
-
-          // Close the JSON-canonical-store staleness gap (Phase B): this
-          // branch is reached whenever the stored canonical graph was
-          // missing, schema-invalid, or stale (this automation was edited
-          // outside Circuitry -- by hand, via HA's native UI, or by
-          // another tool -- since Circuitry last saved it). Until now, the
-          // freshly decompiled graph above was only ever loaded into
-          // memory for this editor session; the STORED canonical JSON
-          // stayed exactly as stale as it was before this load, silently,
-          // until the user happened to make and save a further edit from
-          // inside Circuitry. Re-persisting it here the moment the
-          // mismatch is caught keeps the "canonical JSON always matches
-          // what's actually running" invariant from lapsing indefinitely
-          // just from opening (and not touching) an externally-edited
-          // automation -- and, as a side benefit, means the *next* load of
-          // this same unmodified automation takes the fast canonical-graph
-          // path instead of decompiling all over again.
-          //
-          // `sourceHash` (computed above, before the canonical-graph
-          // lookup) was hashed from this exact `config` -- the same
-          // automation config this decompile just parsed -- so it's
-          // exactly the hash the next load's freshness check needs to see
-          // to treat this newly-stored graph as fresh. Best-effort, same
-          // rationale as flow-store.ts's own saveAutomation/updateAutomation
-          // calls to saveGraph: a failure here never blocks anything the
-          // user is doing, it just means the next load decompiles again,
-          // exactly as it did before this fix.
-          try {
-            await saveGraph(api, automation.automation_id, result.graph, sourceHash);
-            // eslint-disable-next-line no-console -- deliberate diagnostic,
-            // matching flow-store.ts's identical log for the save path.
-            console.info(
-              'Circuitry: re-synced canonical graph after stale-hash decompile fallback for automation',
-              automation.automation_id
-            );
-          } catch (graphStoreError) {
-            console.warn(
-              'Circuitry: failed to re-sync canonical graph after decompile fallback (will decompile again on next load):',
-              graphStoreError
-            );
-          }
-
-          // Parsed successfully, but not losslessly — file a Repair issue so this
-          // survives past the toast instead of being a one-time UI warning only.
-          if (result.warnings.length > 0 && automation.entity_id) {
-            showWarningToast(t('dialogs:import.lossyImportWarning', { name: displayName }), {
-              description: t('dialogs:import.lossyImportWarningDescription', {
-                count: result.warnings.length,
-              }),
-            });
-            void api.reportImportIssue(automation.entity_id, result.warnings);
-          }
-        }
-      } else {
-        setFlowName(displayName);
+      } else if (editable) {
         setAutomationId(automation.automation_id);
-
-        showWarningToast(t('dialogs:import.openedWarning', { name: displayName }), {
-          description: t('dialogs:import.openedWarningDescription'),
+        // What HA held when this tab opened it: an Update warns if it
+        // changed since.
+        setSavedConfigHash(sourceHash);
+        showSuccessToast(t('dialogs:import.importSuccess', { name: displayName }));
+      } else {
+        // Kept outside automations.yaml (a package, another file): HA can't
+        // save over it, so the tab isn't linked to it (bug #205), and only a
+        // copy can be saved -- a plain save made a second automation beside
+        // it, both running (bug #226).
+        setKeptElsewhere(true);
+        showWarningToast(t('dialogs:import.notEditable', { name: displayName }), {
+          description: t('dialogs:import.notEditableDescription'),
         });
+      }
+
+      if (decompiled?.graph) {
+        // Close the canonical store's staleness gap: this automation was
+        // edited outside Circuitry since Circuitry last saved it (or never
+        // saved by it), so the stored graph is re-persisted with this
+        // config's hash, and the next load of the unchanged automation
+        // takes the fast path. Best-effort, as the save path's saveGraph.
+        try {
+          await saveGraph(api, automation.automation_id, decompiled.graph, sourceHash);
+          // eslint-disable-next-line no-console -- deliberate diagnostic,
+          // matching flow-store.ts's identical log for the save path.
+          console.info(
+            'Circuitry: re-synced canonical graph after stale-hash decompile fallback for automation',
+            automation.automation_id
+          );
+        } catch (graphStoreError) {
+          console.warn(
+            'Circuitry: failed to re-sync canonical graph after decompile fallback (will decompile again on next load):',
+            graphStoreError
+          );
+        }
+
+        // Parsed, but not losslessly: a Repair issue outlives the toast.
+        if (decompiled.warnings.length > 0 && automation.entity_id) {
+          showWarningToast(t('dialogs:import.lossyImportWarning', { name: displayName }), {
+            description: t('dialogs:import.lossyImportWarningDescription', {
+              count: decompiled.warnings.length,
+            }),
+          });
+          void api.reportImportIssue(automation.entity_id, decompiled.warnings);
+        }
+      }
+
+      // A reading that runs differently outlives the toast as a Repair
+      // issue too (the lossy-import one, with this as its text).
+      if (
+        readingDiffers &&
+        automation.entity_id &&
+        !(decompiled && decompiled.warnings.length > 0)
+      ) {
+        void api.reportImportIssue(automation.entity_id, [
+          t('dialogs:import.readingDiffersDescription', { detail: importCheck.detail ?? '' }),
+        ]);
+      }
+
+      // Read in full: an earlier lossy-import Repair for it is cleared (it
+      // stayed until HA restarted; bug #216).
+      if (
+        automation.entity_id &&
+        !readingDiffers &&
+        !(decompiled && decompiled.warnings.length > 0)
+      ) {
+        void api.reportImportIssue(automation.entity_id, []);
       }
 
       return true;
     } catch (error) {
       console.error('Circuitry: Failed to open automation:', error);
-      showErrorToast(t('dialogs:import.importFailed', { message: (error as Error).message }));
+      showErrorToast(
+        t('dialogs:import.importFailed', {
+          message: error instanceof Error ? error.message : String(error),
+        })
+      );
       return false;
     }
   };

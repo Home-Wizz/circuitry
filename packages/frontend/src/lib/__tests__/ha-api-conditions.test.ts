@@ -16,7 +16,12 @@ describe('HomeAssistantAPI - Conditions Preservation (Issue #163)', () => {
   let mockCallService: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
-    mockCallApi = vi.fn().mockResolvedValue({});
+    // HA stores what it's sent and serves it back (the save reads it back).
+    let stored: unknown = {};
+    mockCallApi = vi.fn(async (method: string, _path: string, body?: unknown) => {
+      if (method === 'POST') stored = body;
+      return method === 'GET' ? stored : {};
+    });
     mockCallService = vi.fn().mockResolvedValue({});
 
     // Create API with mocked hass object
@@ -218,7 +223,8 @@ describe('HomeAssistantAPI - Conditions Preservation (Issue #163)', () => {
 
       await api.updateAutomation('123456789', config);
 
-      const call = mockCallApi.mock.calls[0];
+      // The save first checks the automation is in automations.yaml (#205).
+      const call = mockCallApi.mock.calls.find((c) => c[0] === 'POST')!;
       const payload = call[2];
 
       // Verify the condition is present in the payload

@@ -165,6 +165,62 @@ export class IndexedDBStorage implements StateStorage<Promise<void>> {
   }
 }
 
+interface DraftStorage<V> {
+  getItem: (name: string) => Promise<V | null>;
+  setItem: (name: string, value: V) => Promise<void>;
+  removeItem: (name: string) => Promise<void>;
+}
+
+/**
+ * `storage` with its writes coalesced: the store saves the draft on every
+ * change (every frame of a drag, every key), so a write waits until the
+ * changes have paused for `delayMs` and then writes only the latest draft.
+ * It is written at once when the page is hidden or closed, a read sees a
+ * draft still waiting, and a failed write is logged (the draft is a
+ * convenience; it used to be an unhandled rejection). Bug #208.
+ */
+export function coalescedWrites<V>(storage: DraftStorage<V>, delayMs: number): DraftStorage<V> {
+  const waiting = new Map<string, V>();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  const flush = async (): Promise<void> => {
+    if (timer !== undefined) clearTimeout(timer);
+    timer = undefined;
+    const drafts = [...waiting];
+    waiting.clear();
+    for (const [name, value] of drafts) {
+      try {
+        await storage.setItem(name, value);
+      } catch (error) {
+        console.warn('Circuitry: could not keep the draft in the browser:', error);
+      }
+    }
+  };
+
+  if (typeof window !== 'undefined') {
+    window.addEventListener('pagehide', () => void flush());
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') void flush();
+    });
+  }
+
+  return {
+    getItem: async (name) => (waiting.has(name) ? (waiting.get(name) as V) : storage.getItem(name)),
+    setItem: async (name, value) => {
+      waiting.set(name, value);
+      if (timer !== undefined) clearTimeout(timer);
+      timer = setTimeout(() => void flush(), delayMs);
+    },
+    removeItem: async (name) => {
+      waiting.delete(name);
+      await storage.removeItem(name);
+    },
+  };
+}
+
+/** How long the draft waits for the changes to pause before it is written. */
+const DRAFT_WRITE_DELAY_MS = 400;
+
 /**
  * Default IndexedDB storage instance for Circuitry.
  *
@@ -174,7 +230,7 @@ export class IndexedDBStorage implements StateStorage<Promise<void>> {
  * key there's no round-trip compat concern here — worst case an existing
  * user's unsaved draft resets once under the new key.
  */
-export const circuitryIndexedDBStorage = IndexedDBStorage.createJSONStorage<PersistedFlowState>(
-  'circuitry-flow-storage',
-  'flow-store'
+export const circuitryIndexedDBStorage = coalescedWrites(
+  IndexedDBStorage.createJSONStorage<PersistedFlowState>('circuitry-flow-storage', 'flow-store'),
+  DRAFT_WRITE_DELAY_MS
 );

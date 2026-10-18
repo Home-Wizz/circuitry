@@ -46,7 +46,11 @@ mode: single
     expect(triggers.length).toBeGreaterThanOrEqual(1);
   });
 
-  it('handles dict-keyed trigger format (novel HA format)', async () => {
+  // A trigger keyed by its type (`- state: {...}`) is refused by HA
+  // (2026.2 to 2026.10: "required key not provided at trigger"), so it is
+  // refused here too, with that reason (#245, decision D3); it was read as
+  // a state trigger holding its options as a `state:` value.
+  it('a dict-keyed trigger, which HA refuses, is refused with the reason', async () => {
     const yaml = `
 alias: Test
 triggers:
@@ -61,10 +65,10 @@ actions:
 mode: single
 `;
     const result = await parser.parse(yaml);
-    // Should not fail with "must have at least one trigger node"
-    expect(result.success).toBe(true);
-    const triggers = result.graph!.nodes.filter((n) => n.type === 'trigger');
-    expect(triggers.length).toBeGreaterThanOrEqual(1);
+    expect(result.success).toBe(false);
+    expect((result.errors ?? []).join('\n')).toMatch(
+      /Could not read trigger 1: it has no trigger type/
+    );
   });
 
   it('handles for: with template string value in duration object', async () => {

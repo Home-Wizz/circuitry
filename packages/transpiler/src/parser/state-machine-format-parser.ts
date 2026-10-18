@@ -15,8 +15,10 @@ import type {
   WaitNode,
 } from '@circuitry/shared';
 import { findBackEdges } from '../analyzer/topology';
+import { branchMachineIn } from '../utils/branchMachine';
 import { fanOutHash } from '../utils/fanOutHash';
 import { generateNodeId } from '../utils/generateIds';
+import { isNoStepsStop } from '../utils/stateMachineEntry';
 import { withoutLoopBookkeeping } from '../utils/stateMachineLoops';
 import { parseActions } from './action-block-parser';
 import { expandConditionShorthand, isMapping, normalizeActionLists } from './action-type-guards';
@@ -203,13 +205,16 @@ export function parseStateMachineStructure(
     // Check if entryNodeId is a Jinja2 template for trigger routing
     const triggerRouting = parseEntryNodeTemplate(entryNodeId);
 
-    if (triggerRouting && triggerRouting.size > 0) {
-      // Different triggers route to different nodes
+    if (triggerRouting) {
+      // Different triggers route to different nodes. HA takes the
+      // `{% else %}` route for every trigger the chain doesn't name (it
+      // used to go to the one after the last named only), and a trigger
+      // routed to END has nothing joined to it (bug #195).
       for (let i = 0; i < triggerNodes.length; i++) {
-        const targetNodeId = triggerRouting.get(i);
-        if (targetNodeId) routeTrigger(triggerNodes[i].id, targetNodeId);
+        const targetNodeId = triggerRouting.named.get(i) ?? triggerRouting.otherwise;
+        if (targetNodeId && targetNodeId !== 'END') routeTrigger(triggerNodes[i].id, targetNodeId);
       }
-    } else {
+    } else if (entryNodeId !== 'END') {
       // All triggers route to same node (simple case)
       for (const trigger of triggerNodes) routeTrigger(trigger.id, entryNodeId);
     }
@@ -231,6 +236,9 @@ export function parseStateMachineStructure(
   const rebuiltNodes: FlowNode[] = [];
   const rebuiltEdges: FlowEdge[] = [];
   const rebuiltByContent = new Map<string, { to: string; type?: FlowEdge['type'] }[]>();
+  /** Set when a branch machine's states can't be read (#284). */
+  let unreadFanOut: string | null = null;
+  let machineCount = 0;
   const wireThrough = (
     fromIds: string[],
     steps: unknown[],
@@ -257,13 +265,26 @@ export function parseStateMachineStructure(
     const shared = rebuiltByContent.get(key);
     if (shared) return { nodes: [], edges: entryEdges(shared) };
     const onlyFrom = fromIds.length === 1 ? fromIds[0] : null;
-    const result = parseActions(steps as never, {
+    // #284: each branch machine read as a stand-in step, then rebuilt from
+    // its own states in that step's place.
+    const placed = withMachineStandIns(steps);
+    const parsed = parseActions(placed.steps as never, {
       warnings,
       previousNodeIds: fromIds,
       getNextNodeId: scopedIdFactory(`${fromIds[0]}_${handle ?? 'then'}`),
       conditionNodeIds: new Set(handle === 'true' && onlyFrom ? [onlyFrom] : []),
       falsePathConditionIds: new Set(handle === 'false' && onlyFrom ? [onlyFrom] : []),
     });
+    const result = placed.machines.size === 0 ? parsed : { ...parsed };
+    for (const [key, machine] of placed.machines) {
+      const scope = `${fromIds[0]}_${handle ?? 'then'}_m${machineCount++}`;
+      const rebuilt = rebuildBranchMachine(machine, warnings, scopedIdFactory(scope));
+      if (rebuilt === null) {
+        unreadFanOut = "a branch's own state machine";
+        continue;
+      }
+      spliceMachine(result, key, rebuilt, target);
+    }
     const fromSet = new Set(fromIds);
     const seenEntries = new Set<string>();
     const entries: Entry[] = [];
@@ -339,6 +360,7 @@ export function parseStateMachineStructure(
         wireThrough(fromIds, info.extras, info.trueTarget)
     );
   }
+  if (unreadFanOut !== null) return { nodes: [], edges: [], unread: unreadFanOut };
   const inlineIds = new Set<string>(rebuiltNodes.map((n) => n.id));
   nodes.push(...rebuiltNodes);
   edges.push(...rebuiltEdges);
@@ -457,6 +479,184 @@ export function parseStateMachineStructure(
   return { nodes, edges };
 }
 
+/** The variable a stand-in step for a branch machine sets (#284). */
+const MACHINE_STAND_IN = '__circuitry_branch_machine__';
+/** The state a branch machine's moves to END are rebuilt to, then dropped
+ * (where the branch ends: what follows it). */
+const MACHINE_EXIT = '__circuitry_branch_exit__';
+
+/** `steps` (a state's inline fan-out) with each branch machine in it --
+ * wherever the state machine writes one: among the steps, or as a branch
+ * of a `parallel:` at any depth (the branches of one beside the steps of
+ * a second meeting, #12) -- a stand-in step of its own, and the machines
+ * by stand-in. */
+function withMachineStandIns(steps: unknown[]): {
+  steps: unknown[];
+  machines: Map<string, NonNullable<ReturnType<typeof branchMachineIn>>>;
+} {
+  const machines = new Map<string, NonNullable<ReturnType<typeof branchMachineIn>>>();
+  const standIn = (machine: NonNullable<ReturnType<typeof branchMachineIn>>) => {
+    const key = `m${machines.size}`;
+    machines.set(key, machine);
+    return { variables: { [MACHINE_STAND_IN]: key } };
+  };
+  const inList = (list: unknown[]): unknown[] => {
+    const out: unknown[] = [];
+    for (let i = 0; i < list.length; i++) {
+      const machine = branchMachineIn(list.slice(i, i + 2));
+      if (machine) {
+        out.push(standIn(machine));
+        i++;
+        continue;
+      }
+      out.push(inStep(list[i]));
+    }
+    return out;
+  };
+  const inStep = (step: unknown): unknown => {
+    if (!isMapping(step)) return step;
+    // A branch that is only a machine (written `sequence: [start, loop]`):
+    // the stand-in itself, no group around it.
+    if (Object.keys(step).join() === 'sequence' && Array.isArray(step.sequence)) {
+      const machine = branchMachineIn(step.sequence);
+      if (machine) return standIn(machine);
+    }
+    if (Array.isArray(step.parallel)) {
+      return {
+        ...step,
+        parallel: step.parallel.map((branch) =>
+          Array.isArray(branch) ? inList(branch) : inStep(branch)
+        ),
+      };
+    }
+    if (
+      Array.isArray(step.sequence) &&
+      Object.keys(step).every((k) => k === 'sequence' || k === 'alias')
+    ) {
+      return { ...step, sequence: inList(step.sequence) };
+    }
+    return step;
+  };
+  const placed = inList(steps);
+  return { steps: machines.size === 0 ? steps : placed, machines };
+}
+
+/**
+ * #284: a branch machine's states rebuilt as nodes of their own (fresh
+ * ids from `nextId`), read as the main dispatcher's are: its first node,
+ * and the lines that leave the branch (its moves to END: the branch ends
+ * there, and what follows it in the drawing comes next). Null when its
+ * states can't be read.
+ */
+function rebuildBranchMachine(
+  machine: NonNullable<ReturnType<typeof branchMachineIn>>,
+  warnings: string[],
+  nextId: (type: string) => string
+): { nodes: FlowNode[]; edges: FlowEdge[]; entry: string; exits: FlowEdge[] } | null {
+  const toExit = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(toExit);
+    if (!isMapping(value)) return value;
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) {
+      out[k] =
+        k === 'variables' && isMapping(v) && v.current_node === 'END'
+          ? { ...v, current_node: MACHINE_EXIT }
+          : toExit(v);
+    }
+    return out;
+  };
+  const cases = toExit(machine.cases) as unknown[];
+  const exitState = {
+    conditions: [
+      { condition: 'template', value_template: `{{ current_node == "${MACHINE_EXIT}" }}` },
+    ],
+    sequence: [{ variables: { current_node: 'END' } }],
+  };
+  const content = {
+    triggers: [{ trigger: 'event', event_type: MACHINE_EXIT }],
+    actions: [
+      { variables: { current_node: machine.entry } },
+      {
+        repeat: {
+          until: '{{ current_node == "END" }}',
+          sequence: [{ choose: [...cases, exitState] }],
+        },
+      },
+    ],
+  };
+  const sub = parseStateMachineStructure(content, warnings, []);
+  if (sub.unread) return null;
+  const trigger = sub.nodes.find((n) => n.type === 'trigger');
+  const ids = new Map<string, string>();
+  const isExit = (id: string) => id === MACHINE_EXIT;
+  for (const n of sub.nodes) {
+    if (n === trigger || isExit(n.id)) continue;
+    ids.set(n.id, nextId(n.type));
+  }
+  const entry = ids.get(machine.entry);
+  if (entry === undefined) return null;
+  const nodes = sub.nodes
+    .filter((n) => ids.has(n.id))
+    .map((n) => ({ ...n, id: ids.get(n.id)! }) as FlowNode);
+  const moved = (e: FlowEdge, source: string, target: string): FlowEdge => ({
+    ...createEdge(source, target, e.sourceHandle ?? undefined),
+    ...(e.type !== undefined ? { type: e.type } : {}),
+  });
+  const edges: FlowEdge[] = [];
+  const exits: FlowEdge[] = [];
+  for (const e of sub.edges) {
+    const source = ids.get(e.source);
+    if (source === undefined) continue;
+    if (isExit(e.target)) exits.push(moved(e, source, MACHINE_EXIT));
+    else if (ids.has(e.target)) edges.push(moved(e, source, ids.get(e.target)!));
+  }
+  return { nodes, edges, entry, exits };
+}
+
+/**
+ * #284: `result` (a fan-out's steps as parsed, a branch machine as the
+ * stand-in step `key`) with the machine's rebuilt nodes in the stand-in's
+ * place: the lines into it lead to the machine's first node, the lines out
+ * of it leave from where the machine ends; a stand-in the steps end with
+ * ends them where the machine does (on to `target`).
+ */
+function spliceMachine(
+  result: {
+    nodes: FlowNode[];
+    edges: FlowEdge[];
+    terminalNodeIds: string[];
+    truePathConditionTerminalIds: string[];
+    falsePathTerminalNodeIds: string[];
+  },
+  key: string,
+  machine: { nodes: FlowNode[]; edges: FlowEdge[]; entry: string; exits: FlowEdge[] },
+  target: string | null
+): void {
+  const standIn = result.nodes.find(
+    (n) =>
+      n.type === 'set_variables' &&
+      (n.data as { variables?: Record<string, unknown> }).variables?.[MACHINE_STAND_IN] === key
+  );
+  if (!standIn) return;
+  const id = standIn.id;
+  const exitTo = (to: string): FlowEdge[] =>
+    machine.exits.map((x) => createEdge(x.source, to, x.sourceHandle ?? undefined));
+  const edges: FlowEdge[] = [];
+  for (const e of result.edges) {
+    if (e.target === id)
+      edges.push({ ...e, id: createEdge(e.source, machine.entry).id, target: machine.entry });
+    else if (e.source === id) edges.push(...exitTo(e.target));
+    else edges.push(e);
+  }
+  result.edges = [...edges, ...machine.edges];
+  result.nodes = [...result.nodes.filter((n) => n !== standIn), ...machine.nodes];
+  if (result.terminalNodeIds.includes(id)) {
+    result.terminalNodeIds = result.terminalNodeIds.filter((t) => t !== id);
+    // Where the machine ends is where these steps end: on to the target.
+    if (target && target !== 'END') result.edges.push(...exitTo(target));
+  }
+}
+
 /** The entry state (from the initial `current_node`) and every dispatch
  * state, keyed by node id. */
 function collectStates(actions: unknown[]): {
@@ -515,14 +715,20 @@ function unreadStateMachineContent(actions: unknown[]): string | null {
   const isInit = (step: Record<string, unknown>) =>
     isMapping(step.variables) && 'current_node' in step.variables;
   const loop = top.filter((step) => isMapping(step.repeat));
-  if (loop.length !== 1 || top.some((step) => !isInit(step) && step !== loop[0])) {
+  if (
+    loop.length !== 1 ||
+    top.some((step) => !isInit(step) && step !== loop[0] && !isNoStepsStop(step))
+  ) {
     return 'steps beside the state machine';
   }
   const repeat = loop[0].repeat as Record<string, unknown>;
   for (const step of loopSteps(repeat)) {
     if (!isMapping(step)) return 'a step in the loop that is not a mapping';
     if (isMapping(step.repeat)) continue;
-    if (isMapping(step.variables) && Object.keys(step.variables).every((k) => LOOP_VARIABLES.has(k))) {
+    if (
+      isMapping(step.variables) &&
+      Object.keys(step.variables).every((k) => LOOP_VARIABLES.has(k))
+    ) {
       continue;
     }
     if (!Array.isArray(step.choose)) return 'a step in the state machine loop';
@@ -654,7 +860,6 @@ function dropInheritedAndMemberElse(
   stateIds: Set<string>
 ): void {
   const byId = new Map(nodes.map((n) => [n.id, n]));
-  const backEdgeIds = findBackEdges({ id: '', name: '', nodes, edges, version: 1 } as never);
   const falseOf = (id: string): string[] =>
     edges
       .filter((e) => e.source === id && e.sourceHandle === 'false')
@@ -663,7 +868,10 @@ function dropInheritedAndMemberElse(
   const parentOf = (n: FlowNode): FlowNode | null => {
     if (n.type !== 'condition' || typeof (n.data as Record<string, unknown>)._blockKey === 'string')
       return null;
-    const incoming = edges.filter((e) => e.target === n.id && !backEdgeIds.has(e.id));
+    // Its one way in the parent's "yes" line: a step lines go back to (a
+    // loop's head) is no member of the list before it (#284), whichever
+    // line a search met first.
+    const incoming = edges.filter((e) => e.target === n.id);
     if (incoming.length !== 1 || incoming[0].sourceHandle !== 'true') return null;
     const parent = byId.get(incoming[0].source);
     if (parent?.type !== 'condition') return null;
@@ -721,6 +929,72 @@ function restoreConstructMarkers(
   const byId = new Map(nodes.map((n) => [n.id, n]));
   const isCountTest = (n: FlowNode): boolean =>
     String((n.data as Record<string, unknown>).value_template ?? '').includes('_repeat_counter_');
+  // Bug #259: a do-while's test -- a plain condition whose yes edge goes
+  // back to the body's start and whose no side leaves the loop (nothing
+  // its no side leads to goes back there). Not a while body's last if
+  // (#87: both its sides go back to the head): left unmarked, and its
+  // loop-back is no evidence of a while head.
+  const forwardFrom = (starts: string[]): Set<string> => {
+    const seen = new Set<string>();
+    const queue = [...starts];
+    while (queue.length > 0) {
+      const id = queue.shift()!;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      for (const e of edges) if (e.source === id && !backEdgeIds.has(e.id)) queue.push(e.target);
+    }
+    return seen;
+  };
+  // A condition list's member (2.2): its one way in the one "yes" line of
+  // a condition, its "no" lines (the state machine writes them out) the
+  // ones that condition has. The list's first condition.
+  const noTargets = (id: string) =>
+    edges
+      .filter((o) => o.source === id && o.sourceHandle === 'false')
+      .map((o) => o.target)
+      .sort()
+      .join('\u0000');
+  const listHead = (id: string): string => {
+    let at = id;
+    const seen = new Set<string>();
+    for (;;) {
+      if (seen.has(at)) return at;
+      seen.add(at);
+      const ways = edges.filter((o) => o.target === at);
+      if (ways.length !== 1 || ways[0].sourceHandle !== 'true') return at;
+      const up = ways[0].source;
+      if (byId.get(up)?.type !== 'condition') return at;
+      if (edges.filter((o) => o.source === up && o.sourceHandle === 'true').length !== 1) return at;
+      if (noTargets(at) !== '' && noTargets(at) !== noTargets(up)) return at;
+      at = up;
+    }
+  };
+  const isDoWhileBackEdge = (e: FlowEdge): boolean => {
+    const source = byId.get(e.source);
+    if (!backEdgeIds.has(e.id) || e.sourceHandle !== 'true' || source?.type !== 'condition') {
+      return false;
+    }
+    if (isCountTest(source)) return false;
+    // A list going back to its own first condition from its last member's
+    // "yes": a while on the list whose body is empty (one whose only step
+    // was disabled, #284's branch machines rebuilt), not a do-while.
+    if (e.target !== source.id && listHead(source.id) === e.target) return false;
+    // No "no" edge: nothing comes after the loop (the state machine writes a
+    // while body's last if with both its sides going back).
+    const no = edges.filter((o) => o.source === source.id && o.sourceHandle === 'false');
+    // A no edge that loops back leaves for an enclosing loop's head: one
+    // the body's start is inside (an until test is the mirror image: its no
+    // side is the loop-back, its yes side the exit to the outer head).
+    const outerExits = no.filter((o) => backEdgeIds.has(o.id));
+    if (outerExits.some((o) => o.target === e.target || !forwardFrom([o.target]).has(e.target))) {
+      return false;
+    }
+    const after = forwardFrom(no.filter((o) => !backEdgeIds.has(o.id)).map((o) => o.target));
+    return !edges.some(
+      (o) => backEdgeIds.has(o.id) && o.target === e.target && after.has(o.source)
+    );
+  };
+  const doWhileTests = new Set(edges.filter(isDoWhileBackEdge).map((e) => e.source));
   const backTargets = new Set<string>();
   const untilTests = new Set<string>();
   for (const e of edges) {
@@ -742,7 +1016,7 @@ function restoreConstructMarkers(
   // as an until test and was refused after reopening.
   const whileHeadsByStep = new Set<string>();
   for (const e of edges) {
-    if (!backEdgeIds.has(e.id)) continue;
+    if (!backEdgeIds.has(e.id) || isDoWhileBackEdge(e)) continue;
     const source = byId.get(e.source);
     if (
       source?.type !== 'condition' ||
@@ -755,6 +1029,7 @@ function restoreConstructMarkers(
   for (const e of edges) {
     if (!backEdgeIds.has(e.id) || e.sourceHandle !== 'false') continue;
     if (whileHeadsByStep.has(e.target) && byId.get(e.target)?.type === 'condition') continue;
+    if (doWhileTests.has(e.source)) continue;
     const source = byId.get(e.source);
     if (source?.type === 'condition' && !backTargets.has(source.id) && !isCountTest(source)) {
       untilTests.add(source.id);
@@ -798,19 +1073,47 @@ function restoreConstructMarkers(
     if (e.sourceHandle === 'false' && (untilTests.has(e.source) || untilMembers.has(e.source)))
       continue;
     const source = byId.get(e.source);
-    if (source?.type === 'condition' && isCountTest(source)) continue; // a count loop's re-entry
+    // A count loop's re-entry (its test's yes edge back to its init) marks
+    // nothing; its "no" edge back to a while's head is that while body's
+    // end and marks the head (bug #266: skipped too, the head came back
+    // unmarked, read as a list member of the if before it, and its exit
+    // was lost).
+    if (source?.type === 'condition' && isCountTest(source) && e.sourceHandle === 'true') continue;
+    if (isDoWhileBackEdge(e)) continue;
     const target = byId.get(e.target);
     if (target?.type === 'condition' && !isCountTest(target)) whileHeads.add(target.id);
   }
+  // (A branch machine's move out of its branch, #284, is END to the
+  // machine: read as the main dispatcher's END is -- a canvas fuzz case at
+  // seed 20261023 had a Choose test after an until in a branch come back
+  // as the until's list member, so the loop went round on its "no".)
   const falseTargets = (id: string): string[] =>
-    edges.filter((e) => e.source === id && e.sourceHandle === 'false').map((e) => e.target);
+    edges
+      .filter((e) => e.source === id && e.sourceHandle === 'false' && e.target !== MACHINE_EXIT)
+      .map((e) => e.target);
+  /** The edge into a run of disabled pass-through steps ending at `edge`'s
+   * target, standing for `edge` (one way in, one way out, `enabled: false`). */
+  const throughDisabled = (edge: FlowEdge): FlowEdge => {
+    let current = edge;
+    for (let hops = 0; hops < nodes.length; hops++) {
+      const source = byId.get(current.source);
+      const data = (source?.data ?? {}) as Record<string, unknown>;
+      if (!source || source.type === 'condition' || source.type === 'trigger') return current;
+      if (data.enabled !== false) return current;
+      const into = edges.filter((e) => e.target === source.id && !backEdgeIds.has(e.id));
+      const outOf = edges.filter((e) => e.source === source.id);
+      if (into.length !== 1 || outOf.length !== 1) return current;
+      current = into[0];
+    }
+    return current;
+  };
   for (const n of nodes) {
     // Only conditions rebuilt from dispatch states. Nodes parsed from a
     // state's inline fan-out came through the native parser, which already
     // marks them (and deliberately leaves AND-list members unmarked).
     if (n.type !== 'condition' || isCountTest(n) || !stateIds.has(n.id)) continue;
     const data = n.data as Record<string, unknown>;
-    if (typeof data._blockKey === 'string') continue;
+    if (typeof data._blockKey === 'string' || doWhileTests.has(n.id)) continue;
     if (untilTests.has(n.id)) {
       data._blockKey = 'repeat_until';
       continue;
@@ -848,7 +1151,12 @@ function restoreConstructMarkers(
     // reading it as a list member means the same thing and keeps it in the
     // list (e.g. a `while: [A, B]`). Mark it as an if head only then.
     if (falseTargets(n.id).length > 0) continue;
-    const incoming = edges.filter((e) => e.target === n.id && !backEdgeIds.has(e.id));
+    // Bug #266: through disabled steps, which the strategies take out
+    // before reading the graph (analyzer/disabled-steps.ts): a condition
+    // after one is, by then, right after the condition before it.
+    const incoming = edges
+      .filter((e) => e.target === n.id && !backEdgeIds.has(e.id))
+      .map((e) => throughDisabled(e));
     const fromConditionYes = incoming.some(
       (e) => e.sourceHandle === 'true' && byId.get(e.source)?.type === 'condition'
     );
@@ -872,38 +1180,33 @@ function restoreConstructMarkers(
  *
  * Template format: {% if trigger.idx == "0" %}action_0{% elif trigger.idx == "1" %}action_1{% else %}action_2{% endif %}
  * Note: trigger.idx is a string in HA, so comparisons use quoted values
- * Returns a Map where key = trigger index, value = target node ID
+ * Returns the target of each trigger index the chain names, and the
+ * `{% else %}` target, which HA takes for every other trigger.
  */
-export function parseEntryNodeTemplate(entryNodeId: string): Map<number, string> | null {
+export function parseEntryNodeTemplate(
+  entryNodeId: string
+): { named: Map<number, string>; otherwise: string | undefined } | null {
   // Check if it's a Jinja2 template
   if (!entryNodeId.includes('{%') || !entryNodeId.includes('trigger.idx')) {
     return null;
   }
 
-  const routing = new Map<number, string>();
+  const named = new Map<number, string>();
 
   // Match {% if trigger.idx == "N" %}nodeId or {% elif trigger.idx == "N" %}nodeId
   // trigger.idx is a string in HA, so index is quoted; node IDs are NOT quoted
   const ifPattern =
     /{%\s*(?:if|elif)\s+trigger\.idx\s*==\s*["'](\d+)["']\s*%}\s*([^{%]+?)(?={%|$)/g;
-  const matches = entryNodeId.matchAll(ifPattern);
-
-  for (const match of matches) {
+  for (const match of entryNodeId.matchAll(ifPattern)) {
     const triggerIdx = parseInt(match[1], 10);
-    const nodeId = match[2].trim();
-    routing.set(triggerIdx, nodeId);
+    // The first route named for an index is the one HA takes.
+    if (!named.has(triggerIdx)) named.set(triggerIdx, match[2].trim());
   }
 
-  // Match {% else %}nodeId for the default case (last trigger if not explicitly matched)
   const elseMatch = entryNodeId.match(/{%\s*else\s*%}\s*([^{%]+?)(?={%|$)/);
-  if (elseMatch && routing.size > 0) {
-    // The else branch is for the last trigger index not explicitly matched
-    // Find the highest trigger index and add 1
-    const maxIdx = Math.max(...routing.keys());
-    routing.set(maxIdx + 1, elseMatch[1].trim());
-  }
+  const otherwise = elseMatch ? elseMatch[1].trim() : undefined;
 
-  return routing.size > 0 ? routing : null;
+  return named.size > 0 || otherwise !== undefined ? { named, otherwise } : null;
 }
 
 /**

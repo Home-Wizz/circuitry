@@ -2,7 +2,7 @@ import type { FlowNode } from '@circuitry/shared';
 import { useTranslation } from 'react-i18next';
 import { useHass } from '@/contexts/HassContext';
 import { useNodeCardDisplay } from '@/hooks/useNodeCardDisplay';
-import { useWholeArea } from '@/hooks/useStepTargets';
+import { useWholePlace } from '@/hooks/useStepTargets';
 import { serviceFieldList } from '@/lib/serviceFields';
 import { isRecord } from '@/lib/utils';
 import { asServiceField } from '@/components/panels/node-fields/ServiceDataFields';
@@ -30,7 +30,7 @@ export function useOnCardSummary(node: FlowNode | undefined): string[] {
   const { getServiceDefinition } = useHass();
   const data = (node?.data ?? {}) as Record<string, unknown>;
   const kind = node?.type === 'trigger' || node?.type === 'condition' ? node.type : null;
-  const wholeArea = useWholeArea(data.target);
+  const wholeArea = useWholePlace(data.target);
   const threshold = useThreshold(data, kind ?? 'trigger', kind !== null);
   if (!node) return [];
   const items: string[] = [];

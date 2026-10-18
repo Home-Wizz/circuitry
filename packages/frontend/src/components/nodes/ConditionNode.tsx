@@ -10,7 +10,7 @@ import { compoundTypes, nodeTypes } from '@/config/nodeTypeCatalog';
 import { getDomainIcon, iconKeyFor } from '@/lib/domain-icons';
 import { useConventionMarkers } from '@/hooks/useConventionMarkers';
 import { useMoreInfo } from '@/hooks/useMoreInfo';
-import { useEditableTargets, useWholeArea } from '@/hooks/useStepTargets';
+import { useEditableTargets, useWholePlace } from '@/hooks/useStepTargets';
 import { type EntityTargetDisplay, useNodeCardDisplay } from '@/hooks/useNodeCardDisplay';
 import { useTriggerIdNames } from '@/hooks/useTriggerIdNames';
 import { useNodeErrors } from '@/hooks/useNodeErrors';
@@ -461,7 +461,7 @@ export const ConditionNode = memo(function ConditionNode({
     );
   };
   // "Anything in Kitchen is on": a whole area as its target.
-  const wholeArea = useWholeArea(isDottedCondition && isPlainCondition ? data.target : undefined);
+  const wholeArea = useWholePlace(isDottedCondition && isPlainCondition ? data.target : undefined);
   const areaSentence = !data.alias && !isUnconfigured && wholeArea !== undefined;
   const areaPhrase = dottedPhrase
     ? conditionPhraseAfterName(

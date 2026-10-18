@@ -1,4 +1,7 @@
 import type { AutomationConfig, HassEntity, HomeAssistant } from '@/types/hass';
+import { restRequest } from './restApi';
+import { SavedUnconfirmedError } from './saved-unconfirmed';
+import { firstDifference } from './stableJson';
 
 export interface CircuitryMetadata {
   version: number;
@@ -154,10 +157,30 @@ function extractApiErrorMessage(error: unknown): string {
   return String(error);
 }
 
+/** A REST failure that is HA's "not found" (HA's callApi or a plain fetch). */
+function isNotFound(error: unknown): boolean {
+  if (
+    error &&
+    typeof error === 'object' &&
+    (error as { status_code?: unknown }).status_code === 404
+  ) {
+    return true;
+  }
+  return error instanceof Error && /\b404\b/.test(error.message);
+}
+
 /**
  * Home Assistant API abstraction layer
  * Works in both custom panel mode (with hass object) and standalone mode
  */
+/** The REST path of an automation's config. Its id is encoded: one with a
+ * `/`, `?` or `#` (hand-written in automations.yaml) was cut short or
+ * split, so it read as missing, or as the automation whose id is the part
+ * before it, and could be saved over (bug #242; checked in HA 2026.10,
+ * which decodes the encoded id). */
+export const automationConfigPath = (automationId: string): string =>
+  `config/automation/config/${encodeURIComponent(automationId)}`;
+
 export class HomeAssistantAPI {
   public hass: HomeAssistant | null = null;
   private baseUrl?: string;
@@ -382,151 +405,87 @@ export class HomeAssistantAPI {
       throw new Error('No authentication configured for REST API');
     }
 
-    const url = `${this.baseUrl}/api/${path}`;
-
-    const response = await fetch(url, {
-      method,
-      headers: {
-        Authorization: `Bearer ${this.token}`,
-        'Content-Type': 'application/json',
-      },
-      body: body ? JSON.stringify(body) : undefined,
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('Circuitry: REST API error response:', errorText);
-      throw new Error(`REST API error: ${response.status} ${response.statusText}`);
-    }
-
-    return await response.json();
+    return restRequest(this.baseUrl, this.token, method, path, body);
   }
 
   /**
-   * Get automation configurations
+   * The automations HA has, as id, alias and description, read from their
+   * entities (HA has no command that lists automation configs; the
+   * `config/automation/list` this used to ask first doesn't exist).
    */
   async getAutomationConfigs(): Promise<AutomationConfig[]> {
-    try {
-      // First try websocket approach
-      if (this.hass?.connection) {
-        try {
-          const result = await this.sendMessage({
-            type: 'config/automation/list',
-          });
-          if (Array.isArray(result)) {
-            return result as AutomationConfig[];
-          }
-        } catch (wsError) {
-          console.warn('WebSocket automation list failed, trying alternative:', wsError);
-        }
-      }
-
-      // Alternative: Use automation entity states to get basic info
-      const automations = this.getAutomations();
-      return automations.map((entity) => ({
-        id: entity.entity_id.replace('automation.', ''),
-        alias:
-          typeof entity.attributes.friendly_name === 'string'
-            ? entity.attributes.friendly_name
-            : entity.entity_id,
-        description:
-          typeof entity.attributes.description === 'string' ? entity.attributes.description : '',
-      }));
-    } catch (error) {
-      console.error('Failed to get automation configs:', error);
-      return [];
-    }
+    return this.getAutomations().map((entity) => ({
+      id: entity.entity_id.replace('automation.', ''),
+      alias:
+        typeof entity.attributes.friendly_name === 'string'
+          ? entity.attributes.friendly_name
+          : entity.entity_id,
+      description:
+        typeof entity.attributes.description === 'string' ? entity.attributes.description : '',
+    }));
   }
 
   /**
-   * Get a specific automation configuration
+   * The entity of the automation with this id (its `id:`), from HA's states.
    */
+  private automationEntityId(automationId: string): string | undefined {
+    if (automationId.startsWith('automation.')) return automationId;
+    return this.getAutomations().find((entity) => entity.attributes.id === automationId)?.entity_id;
+  }
+
+  /**
+   * An automation's config, and whether it is kept in automations.yaml (so
+   * it can be saved over), or null when HA can't give it. First the REST
+   * config endpoint, which serves the automations in automations.yaml, then
+   * HA's own `automation/config` (by entity id: any automation, wherever it
+   * is defined; such a one isn't editable, as in HA's own editor). Nothing
+   * else: the newest trace's config can be older than the automation, and a
+   * stub built from its entity has no triggers or steps -- opened, either was
+   * saved over the real automation (bug #204).
+   */
+  async readAutomation(
+    automationId: string
+  ): Promise<{ config: AutomationConfig; editable: boolean } | null> {
+    if (!automationId.startsWith('automation.')) {
+      try {
+        const config = await this.fetchRestAPI(automationConfigPath(automationId));
+        if (config && typeof config === 'object') {
+          return { config: config as AutomationConfig, editable: true };
+        }
+      } catch (restError) {
+        console.warn('Circuitry: REST API failed for automation %s:', automationId, restError);
+      }
+    }
+    const entityId = this.automationEntityId(automationId);
+    if (entityId && this.hass?.connection) {
+      try {
+        const result = await this.sendMessage({ type: 'automation/config', entity_id: entityId });
+        const config = (result as { config?: unknown } | null)?.config;
+        if (config && typeof config === 'object') {
+          return { config: config as AutomationConfig, editable: false };
+        }
+      } catch (wsError) {
+        console.warn('Circuitry: automation/config failed for %s:', entityId, wsError);
+      }
+    }
+    return null;
+  }
+
+  /** An automation's config, or null when HA can't give it (see readAutomation). */
   async getAutomationConfig(automationId: string): Promise<AutomationConfig | null> {
-    try {
-      // Try websocket approach first
-      if (this.hass?.connection) {
-        try {
-          const config = await this.sendMessage({
-            type: 'config/automation/get',
-            automation_id: automationId,
-          });
-          if (config) {
-            return config as AutomationConfig;
-          }
-        } catch (wsError) {
-          console.warn('WebSocket automation get failed:', wsError);
-        }
-      }
-
-      // REST API works for any automation with an `id:` field — both numeric
-      // (UI-created) and string IDs (YAML-defined automations in automations.yaml).
-      if (!automationId.startsWith('automation.')) {
-        try {
-          const config = await this.fetchRestAPI(`config/automation/config/${automationId}`);
-          if (config) {
-            return config as AutomationConfig;
-          }
-        } catch (directError) {
-          console.warn('REST API failed for automation %s:', automationId, directError);
-        }
-      }
-
-      // Fallback: get all configs and find the matching one
-      const configs = await this.getAutomationConfigs();
-      return (
-        configs.find(
-          (config) =>
-            config.id === automationId ||
-            config.alias === automationId ||
-            `automation.${config.alias}` === automationId
-        ) || null
-      );
-    } catch (error) {
-      console.error('Circuitry: Failed to get automation config:', error);
-      return null;
-    }
+    return (await this.readAutomation(automationId))?.config ?? null;
   }
 
   /**
-   * Get automation config from trace (fallback method for getting config)
+   * Whether HA's REST config endpoint says it has no automation with this
+   * id in automations.yaml (a 404) -- not merely that it couldn't be asked.
    */
-  async getAutomationConfigFromTrace(automationId: string): Promise<unknown | null> {
+  private async isMissingFromAutomationsYaml(automationId: string): Promise<boolean> {
     try {
-      // First get the list of traces
-      const traces = await this.getAutomationTraces(automationId);
-      if (!traces || traces.length === 0) {
-        return null;
-      }
-
-      // Get the most recent trace details which includes config
-      const traceDetails = await this.getAutomationTraceDetails(automationId, traces[0].run_id);
-      return traceDetails?.config || null;
+      await this.fetchRestAPI(automationConfigPath(automationId));
+      return false;
     } catch (error) {
-      console.error('Circuitry: Failed to get automation config from trace:', error);
-      return null;
-    }
-  }
-
-  /**
-   * Get automation configuration with multiple fallback methods.
-   * Falls back to extracting the config from the most recent trace when
-   * the primary lookup returns null (e.g. when neither WebSocket nor REST
-   * can serve the config).
-   */
-  async getAutomationConfigWithFallback(
-    automationId: string,
-    _alias?: string
-  ): Promise<AutomationConfig | null> {
-    try {
-      const primary = await this.getAutomationConfig(automationId);
-      if (primary) {
-        return primary;
-      }
-      const fromTrace = await this.getAutomationConfigFromTrace(automationId);
-      return (fromTrace as AutomationConfig | null) ?? null;
-    } catch (error) {
-      console.error('Circuitry: Failed to get automation config with fallback:', error);
-      return null;
+      return isNotFound(error);
     }
   }
 
@@ -555,30 +514,22 @@ export class HomeAssistantAPI {
 
       // Step 1: Create/save the automation configuration using REST API
       try {
-        await this.fetchRestAPI(`config/automation/config/${automationId}`, 'POST', configWithId);
+        await this.fetchRestAPI(automationConfigPath(automationId), 'POST', configWithId);
       } catch (saveError) {
         console.error('Circuitry: Failed to save automation config:', saveError);
         throw new Error(`Failed to save automation config: ${extractApiErrorMessage(saveError)}`);
       }
+      await this.confirmSaved(automationId, configWithId);
 
-      // Step 2: Reload automations to make it active
-      if (this.hass?.callService) {
-        await this.hass.callService('automation', 'reload', {});
-        return automationId;
-      }
-
-      if (this.hass?.connection) {
-        await this.sendMessage({
-          type: 'call_service',
-          domain: 'automation',
-          service: 'reload',
-        });
-        return automationId;
-      }
-
-      throw new Error('No working Home Assistant connection method found');
+      // No reload on top: HA's config endpoint reloads the automation it
+      // just wrote, so it is live at once. The full automation.reload this
+      // used to call reloaded every automation, and when it failed the
+      // automation was saved but reported as failed (bug #213).
+      return automationId;
     } catch (error) {
       console.error('Circuitry: Failed to create automation:', error);
+      // Taken but not confirmed: the caller needs the id it was taken under.
+      if (error instanceof SavedUnconfirmedError) throw error;
       throw new Error(`Failed to create automation: ${extractApiErrorMessage(error)}`);
     }
   }
@@ -587,41 +538,121 @@ export class HomeAssistantAPI {
    * Update an existing automation in Home Assistant
    */
   async updateAutomation(automationId: string, config: AutomationConfig): Promise<void> {
+    // HA writes a save into automations.yaml: over an automation kept
+    // anywhere else it adds a second one with the same id, and HA then
+    // ignores the real one (bug #205). HA's own editor refuses it too.
+    if (await this.isMissingFromAutomationsYaml(automationId)) {
+      // Gone from Home Assistant altogether (deleted while open), or kept
+      // in another YAML file: only the latter still has its entity (told
+      // only where the entities are known; with a token alone they aren't).
+      const deleted = Boolean(this.getStates()) && !this.findAutomationEntityId(automationId);
+      throw new Error(
+        !deleted
+          ? "Failed to update automation: it isn't kept in automations.yaml, so it can't be saved over (Home Assistant's own editor can't either). Save it as a new automation instead."
+          : 'Failed to update automation: it no longer exists in Home Assistant (it was deleted). Save it as a new automation instead.'
+      );
+    }
+    // Spread all fields from config so nothing is accidentally stripped,
+    // then normalise the keys HA requires (plural trigger/condition/action forms).
+    const { trigger, condition, action, ...rest } = config as Record<string, unknown>;
+    const configWithId = {
+      ...rest,
+      id: automationId,
+      alias: config.alias || `Circuitry Automation ${automationId}`,
+      description: config.description || '',
+      triggers: (trigger as unknown[] | undefined) || (config.triggers as unknown[]) || [],
+      conditions: (condition as unknown[] | undefined) || (config.conditions as unknown[]) || [],
+      actions: (action as unknown[] | undefined) || (config.actions as unknown[]) || [],
+      mode: config.mode || 'single',
+      variables: (config.variables as Record<string, unknown>) || {},
+    };
     try {
-      // Spread all fields from config so nothing is accidentally stripped,
-      // then normalise the keys HA requires (plural trigger/condition/action forms).
-      const { trigger, condition, action, ...rest } = config as Record<string, unknown>;
-      const configWithId = {
-        ...rest,
-        id: automationId,
-        alias: config.alias || `Circuitry Automation ${automationId}`,
-        description: config.description || '',
-        triggers: (trigger as unknown[] | undefined) || (config.triggers as unknown[]) || [],
-        conditions: (condition as unknown[] | undefined) || (config.conditions as unknown[]) || [],
-        actions: (action as unknown[] | undefined) || (config.actions as unknown[]) || [],
-        mode: config.mode || 'single',
-        variables: (config.variables as Record<string, unknown>) || {},
-      };
-
       // Use POST method for updates (HA doesn't support PUT for automation config updates)
-      await this.fetchRestAPI(`config/automation/config/${automationId}`, 'POST', configWithId);
+      await this.fetchRestAPI(automationConfigPath(automationId), 'POST', configWithId);
     } catch (error) {
       console.error('Circuitry: Failed to update automation:', error);
       throw new Error(`Failed to update automation: ${extractApiErrorMessage(error)}`);
     }
+    await this.confirmSaved(automationId, configWithId);
+  }
+
+  /**
+   * A save is confirmed, not assumed: the automation is read back from HA
+   * and must be what was sent (HA's config endpoint stores exactly the
+   * JSON it gets; checked in HA 2026.10), and its entity, once HA has set
+   * it up, must not be unavailable (HA's "could not be validated", a
+   * Repair issue with the reason). Either throws, so the tab stays unsaved
+   * and the user saves again. With a token outside HA's frontend the
+   * entities aren't known, so only the read-back decides there.
+   */
+  private async confirmSaved(automationId: string, sent: Record<string, unknown>): Promise<void> {
+    let stored: unknown;
+    try {
+      stored = await this.fetchRestAPI(automationConfigPath(automationId));
+    } catch (error) {
+      // The write was acknowledged; a read that fails right after says
+      // nothing about what was stored, so it isn't held against the save.
+      console.warn('Circuitry: the saved automation could not be read back:', error);
+      return;
+    }
+    const differs = firstDifference(sent, stored);
+    if (differs !== null) {
+      console.warn(
+        `Circuitry: what Home Assistant stored differs from what was sent, at ${differs}:`,
+        { sent, stored }
+      );
+      throw new SavedUnconfirmedError(
+        `Saved, but what Home Assistant stored differs from what was sent (at ${differs}). Save again; if it happens again, check Home Assistant's log.`,
+        automationId,
+        stored && typeof stored === 'object' ? (stored as Record<string, unknown>) : {}
+      );
+    }
+    if (!this.getStates()) return;
+    // HA reloads the automation after answering the write, not before
+    // (config/view.py schedules the hook), so its entity, and its state
+    // after the reload, arrive a moment later.
+    const entityId = await this.waitForAutomationEntity(automationId, 2000);
+    if (!entityId) return;
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    const state = this.getStates()?.[entityId]?.state;
+    if (state !== 'unavailable') return;
+    throw new SavedUnconfirmedError(
+      `Saved, but Home Assistant couldn't set the automation up: ${await this.validationReason(entityId)}`,
+      automationId,
+      sent
+    );
+  }
+
+  /** HA's reason for an automation it couldn't validate, from its Repair issue. */
+  private async validationReason(entityId: string): Promise<string> {
+    try {
+      const result = (await this.sendMessage({ type: 'repairs/list_issues' })) as {
+        issues?: { issue_id?: string; translation_placeholders?: { error?: string } }[];
+      };
+      const issue = result?.issues?.find((i) => i.issue_id?.startsWith(`${entityId}_validation_`));
+      if (issue?.translation_placeholders?.error) return issue.translation_placeholders.error;
+    } catch {
+      // No reason to be had: the state says enough.
+    }
+    return 'it is unavailable (see Settings > Repairs)';
   }
 
   /**
    * Delete an automation from Home Assistant
    */
   async deleteAutomation(automationId: string): Promise<void> {
+    // Its entity, while it still has one: a "couldn't be read in full"
+    // Repair issue for it is cleared with it (it stayed until HA
+    // restarted, bug #251).
+    const entityId = this.findAutomationEntityId(automationId);
     try {
       // Use the automation config DELETE endpoint
-      await this.fetchRestAPI(`config/automation/config/${automationId}`, 'DELETE');
+      await this.fetchRestAPI(automationConfigPath(automationId), 'DELETE');
     } catch (error) {
       console.error('Circuitry: Failed to delete automation:', error);
       throw new Error(`Failed to delete automation: ${extractApiErrorMessage(error)}`);
     }
+    if (entityId) void this.reportImportIssue(entityId, []);
   }
 
   /**
@@ -920,7 +951,7 @@ export class HomeAssistantAPI {
         }
 
         try {
-          results[nextId] = await this.getAutomationConfigWithFallback(nextId);
+          results[nextId] = await this.getAutomationConfig(nextId);
         } catch (error) {
           console.warn('Failed to fetch automation config for %s:', nextId, error);
           results[nextId] = null;

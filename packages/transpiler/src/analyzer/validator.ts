@@ -1,6 +1,7 @@
 import {
   type FlowGraph,
   FlowGraphSchema,
+  isHaActionName,
   isOpaqueStepData,
   validateGraphStructure,
 } from '@circuitry/shared';
@@ -22,6 +23,8 @@ export interface ValidationError {
   code: string;
   message: string;
   path?: string[];
+  /** The value refused, where the message is about one (an action name). */
+  value?: string;
 }
 
 /**
@@ -153,15 +156,18 @@ function validateSemantics(graph: FlowGraph): ValidationError[] {
         'if',
       ];
 
+      // HA's own test of the name, as the card's check (bug #234). The
+      // message names the action, not the card's internal id (#190).
       if (
         typeof service === 'string' &&
-        !service.includes('.') &&
-        !specialActionTypes.includes(service)
+        !specialActionTypes.includes(service) &&
+        !isHaActionName(service)
       ) {
         errors.push({
           code: 'INVALID_SERVICE',
-          message: `Action node "${node.id}" has invalid service format: "${service}". Expected "domain.service"`,
+          message: `"${service}" isn't an action name Home Assistant takes (domain.action, like light.turn_on, or a template)`,
           path: ['nodes', node.id, 'data', 'service'],
+          value: service,
         });
       }
     }

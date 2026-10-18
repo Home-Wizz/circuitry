@@ -5,6 +5,171 @@ rebrand below were written under this project's previous name — FLODE —
 and are kept exactly as originally written for historical accuracy rather
 than edited to say "Circuitry" throughout.
 
+## [2.4.0] — 2026-10-17
+
+What the canvas shows is what Home Assistant runs: a round of fixes to
+saving, opening and reading automations, found by checking the editor
+against a real Home Assistant, loops drawn freely on the canvas saved as
+drawn, plus floors and labels as targets and the Then picker in German.
+
+### Added
+- **"Anything on <floor>" and "Anything labelled <label>"** as a step's
+  target, beside "Anything in <room>".
+- **Home Assistant's own actions** for each device type in the Then
+  picker, not only Circuitry's catalog; an action that needs a response
+  variable says so.
+- **A type with no matching entities** can still be added, as in Home
+  Assistant's own editor ("Continue without a target").
+- **The Then picker in German**: action names, descriptions and headings.
+- **Start state** as a setting of its own: on, off, or as it was before
+  the restart (the default, as in Home Assistant).
+- **Numeric entities** offer their numeric trigger and condition in the
+  pickers.
+- **Check my setup** (tools menu): opens every automation the way the
+  editor does, without changing anything, and says which would open
+  read-only, which can't be saved over, and whether your Home Assistant
+  version is one Circuitry is tested against; the report can be copied.
+- **A warning before Update replaces changes made elsewhere**: if the
+  automation was changed in Home Assistant after you opened it, the first
+  Update says so; pressing Update again replaces them.
+- **Every save is checked**: after Home Assistant takes a save, Circuitry
+  reads the automation back and compares it with what was sent, and says
+  if Home Assistant left it unavailable (with the reason from its Repair
+  issue).
+- **Opening is checked too**: an automation whose canvas wouldn't run the
+  way Home Assistant runs it opens read-only, with a warning and a Repair
+  issue, and can be saved as a copy.
+- **Loops inside parallel branches** are saved as drawn, however they are
+  drawn: a branch that goes round a loop of its own is written as a small
+  state machine of its own inside the parallel.
+
+### Fixed
+
+Saved automations:
+- **A step beside the way on** -- a step whose lines go both to the next
+  shared step and to a step of its own, or beside a loop's test -- ended
+  the whole automation where that step ended: the shared next step was
+  skipped, or a loop ran once. It now runs as its own branch, and what
+  follows waits for it. Loops whose test also leads to a step each time
+  they go round are now saved too.
+- **A choose whose only option had no conditions** ran that option every
+  time; it is read and saved as written.
+- **Durations keep their days** ("for 1 day 2 hours" was saved as 2 hours).
+- **A trigger with nothing joined to it** now does nothing, instead of
+  running another trigger's branch.
+- **"Start enabled"** is saved; it was dropped.
+- **A condition placed as the first step** stays a step; saved as a
+  top-level condition, it changed how `mode: restart` behaves.
+- **Automation variables** survive a page reload; a reload used to save the
+  automation without them.
+- **Updating an automation kept its area, labels, category and icon**
+  unchanged. Before, an Update could clear all four, and the category was
+  cleared on every Update.
+- **Steps Circuitry keeps as written** (scenes, templated service names,
+  step types Home Assistant adds later) no longer get a service added, which
+  made Home Assistant refuse the save.
+- **Templated action names** (`action: "{{ svc }}"`) are accepted, as Home
+  Assistant accepts them; a sun offset given in seconds too.
+
+Opening and saving:
+- **Opening reads what Home Assistant runs**: an automation kept in a
+  package or another YAML file opens read-only and can be saved only as a
+  copy; before, the editor could read a stale copy and save over it, or
+  make a duplicate with the same id.
+- **No duplicate automations**: saving twice from one tab, or switching
+  tabs during a save, could create a second automation.
+- **A dashboard link opens beside unsaved work** instead of replacing it,
+  and the tab takes the automation's name, not the entity's.
+- **The save dialog stays open while saving**, so a refusal from Home
+  Assistant is shown; a save refused because the automation was deleted
+  meanwhile says so.
+- **Automation ids with `/`, `?` or `#`** open and save correctly.
+- **A new automation is live at once** without a full reload; a failed save
+  reports its real reason.
+- **A loop whose test's yes side goes back to its start** ("do this, and
+  while the door is open, do it again") is saved as a repeat; it used to
+  be refused beside another branch, and ran without a round limit.
+- **A loop whose last step splits into branches that end** runs every
+  round; it stopped after the first.
+- **Such a loop drawn around a Repeat While block** keeps repeating; it was
+  saved as if it were part of the inner loop.
+- **A loop on a condition's "no" side** (no: do this and ask again) is
+  saved as a loop; it was saved as an empty one.
+- **Loops whose test leads on to a step each time it goes round** (an
+  Until card's "no" side going back and also on to a step, a test going
+  back on both sides beside another branch) are saved as drawn; they were
+  saved without that step, or refused.
+- **A loop whose "yes" side goes round and on to a step its "no" side also
+  leads to** ended; saved, it never stopped.
+- **A loop entered at two places** -- two triggers joining it at different
+  steps, or a trigger joining it at its test and further round -- is saved
+  for every trigger; it was lost for one of them, or depended on the order
+  the lines were drawn in.
+- **A condition that decides whether its loop goes round ends the loop
+  when it can't be checked** (its sensor unavailable, an entity missing),
+  as Home Assistant's own while and until loops do; a loop on a
+  condition's "no" side used to keep going round until Home Assistant's
+  10,000-round limit.
+- **Some loop shapes Circuitry can't save yet are refused with the reason**
+  instead of being saved wrong: branches of a parallel that each go back
+  round a different loop, and branches that each decide on their own
+  whether their shared loop goes round.
+- **Automations saved as state machines by version 2.1.0 or older** reopen
+  as they run in more cases when Circuitry's stored copy of the canvas is
+  missing.
+- **Every line you draw counts**: a step joined straight to the trigger
+  that a condition's path also leads to runs every time, once, after that
+  path; before, the direct line was dropped and the step ran only when the
+  condition held. Where that can't be saved as drawn (the condition's path is
+  also used by another trigger), Circuitry says so instead of saving it.
+- **Long automations save without freezing** (200 steps in seconds; some
+  never finished), and automations with more than 20 distinct conditions
+  can be saved.
+- **Imports Home Assistant accepts** are no longer refused (numeric MQTT
+  payloads, lower-case webhook methods, numeric sun offsets, an empty
+  alias), and a refusal says why in words.
+- **Edits made during a save** are no longer marked saved without being
+  sent; undo after a save marks the tab unsaved again; the same automation
+  opened twice shares one tab.
+- **Rename** no longer saves unsaved canvas edits along with the name.
+- **A save Home Assistant took but didn't confirm** (a dropped connection)
+  stays the tab's own automation; saving again no longer makes a copy.
+- **A response variable named like one of Circuitry's own** (the state
+  machine's bookkeeping) is refused, saying which; the editor warns about
+  all of those names, not only three.
+
+The canvas and pickers:
+- **Editing in Home Assistant's own editor** no longer shuffles the canvas.
+- **Cards added from the dock** join the selected card, land in a free
+  spot, and stay centred inside Home Assistant.
+- **Layouts no longer grow with every choose** that has a default, and
+  cards no longer overlap.
+- **Threshold values** are kept (clicking the chosen Number button set it
+  to 0); time patterns and sun offsets are checked as Home Assistant reads
+  them.
+- **The pickers say when Home Assistant didn't answer** instead of showing
+  empty lists; a device appears once under its floor; floors, areas and
+  labels with the same name are told apart; an empty search says so.
+- **The YAML preview** updates on every change and no longer slows dragging.
+- **A long error message** wraps inside the save dialog instead of
+  widening it past the screen.
+
+The integration:
+- **The panel's files** are served again after a reinstall without a Home
+  Assistant restart, and a new version of the panel is used on the next
+  page load (one restart is needed after this update, to install the
+  loader that does it).
+- **Graphs that can't be stored** are refused with a message instead of
+  being reported saved and blocking later saves.
+- **The repair service is admin-only**, and a Repair issue is cleared when
+  its automation is deleted.
+
+### Upgrading
+- Drafts and open tabs from 2.3.1 are kept. A draft from 2.3.1 carried a
+  hidden "start enabled" setting that version never saved; it is dropped
+  on upgrade so an automation isn't turned on at every restart by its next
+  save.
+
 ## [2.3.1] — 2026-10-08
 
 Home Assistant 2026.10 support, a new icon and a flatter look.

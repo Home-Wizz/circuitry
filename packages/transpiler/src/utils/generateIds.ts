@@ -17,11 +17,15 @@ export function generateGraphId(): string {
   return uuidv4();
 }
 
+let globalEdgeCounter = 0;
+
 /**
- * Generate a unique edge ID.
+ * Generate a unique edge ID. The counter makes it unique: two edges between
+ * the same nodes in the same millisecond (an edge and its hint) shared one
+ * (bug #218).
  */
 export function generateEdgeId(source: string, target: string): string {
-  return `e-${source}-${target}-${Date.now()}`;
+  return `e-${source}-${target}-${Date.now()}_${globalEdgeCounter++}`;
 }
 
 /**

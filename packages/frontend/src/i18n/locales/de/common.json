@@ -240,8 +240,17 @@
       "debug": "Debug",
       "notset": "Niedrigste Stufe (NOTSET)"
     },
-    "initialState": "Anfangszustand",
-    "initialStateDescription": "Ob die Automatisierung beim Start von Home Assistant aktiviert oder deaktiviert ist.",
+    "initialState": "Beim Start von Home Assistant",
+    "initialStates": {
+      "keep": "Letzten Zustand behalten",
+      "on": "Einschalten",
+      "off": "Ausschalten"
+    },
+    "initialStateDescriptions": {
+      "keep": "Die Automatisierung ist wieder an oder aus, wie vor dem Neustart. Die Voreinstellung von Home Assistant.",
+      "on": "Die Automatisierung ist nach einem Neustart immer an, auch wenn sie vorher ausgeschaltet war.",
+      "off": "Die Automatisierung ist nach einem Neustart immer aus, bis sie eingeschaltet wird."
+    },
     "storedTraces": "Gespeicherte Traces",
     "storedTracesDescription": "Anzahl der Debug-Traces, die für diese Automatisierung aufbewahrt werden (Standard: 5).",
     "variables": "Automatisierungsvariablen",
@@ -255,6 +264,7 @@
     "addVariable": "Variable hinzufügen"
   },
   "toolsMenu": {
+    "selfCheck": "Einrichtung prüfen…",
     "settings": "Einstellungen…",
     "settingsDescription": "Wie sie läuft, ihre Traces und Variablen. Wird mit der Automation gespeichert.",
     "rename": "Umbenennen",
@@ -276,6 +286,29 @@
     "renamedToast": "Umbenannt in \"{{name}}\"",
     "categoryAssignedToast": "Kategorie aktualisiert",
     "deletedToast": "\"{{name}}\" gelöscht"
+  },
+  "selfCheck": {
+    "title": "Einrichtung prüfen",
+    "description": "Öffnet jede Ihrer Automationen so wie der Editor und prüft, ob ihre Darstellung so läuft wie sie. In Home Assistant wird nichts geändert, und nichts verlässt es.",
+    "progress": "Prüfe {{done}} von {{total}}…",
+    "stop": "Stopp",
+    "copy": "Bericht kopieren",
+    "copied": "Bericht kopiert",
+    "versionTested": "Home Assistant {{version}} ist eine Version, gegen die Circuitry geprüft wird",
+    "versionNewer": "Home Assistant {{version}} ist neuer als die Versionen, gegen die Circuitry geprüft wird ({{tested}}); wenn etwas nicht stimmt, melden Sie es mit dem Bericht dieser Prüfung",
+    "versionOlder": "Home Assistant {{version}} ist älter als die Versionen, gegen die Circuitry geprüft wird ({{tested}}), wird aber unterstützt",
+    "versionUnsupported": "Home Assistant {{version}} ist älter als von Circuitry unterstützt ({{oldest}} oder neuer)",
+    "versionUnknown": "Die Version von Home Assistant konnte nicht gelesen werden",
+    "integrationOk": "Die Circuitry-Integration antwortet (sie speichert die Darstellung jeder Automation)",
+    "integrationMissing": "Die Circuitry-Integration antwortet nicht, daher wird die Darstellung nicht mit den Automationen gespeichert: Starten Sie Home Assistant neu oder installieren Sie Circuitry erneut",
+    "none": "Keine Automationen zu prüfen",
+    "exact": "{{count}} von {{total}} Automationen öffnen genau so, wie sie laufen",
+    "readOnly": "{{count}} würden schreibgeschützt öffnen (die Darstellung würde sie anders ausführen, daher kann nur eine Kopie gespeichert werden): {{names}}",
+    "keptElsewhere": "{{count}} liegen außerhalb von automations.yaml (in einem Paket oder einer anderen Datei): Sie öffnen, können aber nicht überschrieben werden: {{names}}",
+    "unreadable": "{{count}} konnten nicht gelesen werden: {{names}}",
+    "unchecked": "{{count}} öffnen, konnten aber nicht mit Testwerten ausgeführt werden und wurden daher nicht geprüft: {{names}}",
+    "leftOver": "{{count}} Automations-Entitäten sind von Automationen übrig, die es nicht mehr gibt (entfernen Sie sie unter Einstellungen > Geräte & Dienste > Entitäten): {{names}}",
+    "stopped": "Nach {{done}} Automationen gestoppt"
   },
   "sidebar": {
     "backToHa": "Zurück zu Home Assistant",

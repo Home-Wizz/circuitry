@@ -6,7 +6,7 @@ import { hasShortForm } from '@/components/canvas/fillInForms';
 import { TruncatedTooltip } from '@/components/ui/truncated-tooltip';
 import { useNodeErrors } from '@/hooks/useNodeErrors';
 import { useTraceNodeState } from '@/hooks/useTraceNodeState';
-import { useEditableTargets, useWholeArea } from '@/hooks/useStepTargets';
+import { useEditableTargets, useWholePlace } from '@/hooks/useStepTargets';
 import { useTriggerCardDisplay } from '@/hooks/useTriggerCardDisplay';
 import { getDomainIcon } from '@/lib/domain-icons';
 import { stepIconKey } from '@/lib/emojiIcons';
@@ -58,7 +58,7 @@ export const TriggerNode = memo(function TriggerNode({ id, data, selected }: Tri
   // what it does on the line below; "for [5m]" when it must hold.
   const titleIsPill = !data.alias && titleIsTarget(data, pillProps.targets);
   // "Anything in Hallway opened": a whole area as its target.
-  const wholeArea = useWholeArea(data.target);
+  const wholeArea = useWholePlace(data.target);
   const areaSentence = !data.alias && wholeArea !== undefined;
   const countIsPill =
     !data.alias &&

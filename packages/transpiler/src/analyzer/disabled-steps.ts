@@ -107,14 +107,17 @@ function isRemovable(flow: FlowGraph, node: FlowNode): boolean {
   // condition's edge to a step that loops back -- a loop's exit leading to
   // the last step of an outer loop's body, say -- nor a while body made of
   // just this step, which loops back to the test itself.
-  const isUntilTest =
-    (source?.data as Record<string, unknown> | undefined)?._blockKey === 'repeat_until';
+  const sourceBlockKey = (source?.data as Record<string, unknown> | undefined)?._blockKey;
+  const isUntilTest = sourceBlockKey === 'repeat_until';
+  // A do-while's test (bug #259): a plain condition, its yes side the
+  // loop-back to the body's start.
+  const isDoWhileTest = source?.type === 'condition' && sourceBlockKey === undefined;
   if (
     source?.type === 'condition' &&
     out.target !== source.id &&
     (out.type === 'loop-back' || into.type === 'loop-back') &&
     ((into.sourceHandle === 'false' && isUntilTest) ||
-      (into.sourceHandle === 'true' && isCounterInit(target)))
+      (into.sourceHandle === 'true' && (isCounterInit(target) || isDoWhileTest)))
   ) {
     return true;
   }

@@ -35,6 +35,7 @@ import {
   ResultsColumn,
   renderStackedColumns,
 } from '@/components/canvas/PickerColumns';
+import { DevicesEmpty, RegistryLoadNote, SearchEmpty } from '@/components/canvas/PickerLoadNotes';
 import { groupSections, headed } from '@/components/canvas/pickerRoot';
 import {
   deviceEntityRows,
@@ -63,12 +64,10 @@ import { useIntegrationManifests } from '@/hooks/useIntegrationManifests';
 import { usePickNeedsSettings } from '@/hooks/usePickGaps';
 import { useTranslations } from '@/hooks/useTranslations';
 import { ACTION_BLOCKS, type ActionBlock, getActionBlockIcon } from '@/lib/actionBlocks';
+import { ANYTHING_IN, type PlaceTarget } from '@/lib/stepTargets';
 import { actionRecipeTakesEntities, buildActionNodeData } from '@/lib/actionNodeData';
-import {
-  type ActionRecipe,
-  ENTITY_ACTION_CATEGORIES,
-  type EntityActionCategory,
-} from '@/lib/actionRecipes';
+import { localizedActionCatalog } from '@/lib/actionCatalogText';
+import { type ActionRecipe, actionCatalog, type EntityActionCategory } from '@/lib/actionRecipes';
 import type { CompoundBlockKey } from '@/lib/block-factories';
 import { buildCompositeValue, getDeviceAutomationLabel } from '@/lib/deviceTriggerLabels';
 import { getDomainColor } from '@/lib/domain-colors';
@@ -129,8 +128,8 @@ type NavColumn =
       label: string;
       recipe: ActionRecipe;
       entityIds: string[];
-      /** "Anything in <room>" as the list's first line. */
-      area?: { areaId: string; label: string };
+      /** "Anything in <room>" (or labelled <label>, on <floor>) as the list's first line. */
+      place?: { target: PlaceTarget; label: string };
     }
   // The pick's settings, when it still needs something (NodeConfigColumn):
   // an action's target and fields (Automation > Turn on asks which
@@ -187,6 +186,9 @@ interface ThenActionDialogProps {
   initialQuery?: string;
 }
 
+/** HA's translations for its services' names (the catalog's discovered ones). */
+const SERVICE_TEXT_CATEGORIES = ['services'] as const;
+
 export function ThenActionDialog({
   open,
   onOpenChange,
@@ -199,7 +201,7 @@ export function ThenActionDialog({
   current,
   initialQuery,
 }: ThenActionDialogProps) {
-  const { t } = useTranslation(['nodes']);
+  const { t, i18n } = useTranslation(['nodes']);
   const { getDeviceNameById, services } = useHass();
   const { manifests, fetchManifests } = useIntegrationManifests();
   const places = usePickerPlaces(allEntities);
@@ -284,13 +286,17 @@ export function ThenActionDialog({
       data: block.commit.data,
     });
   };
-  const recipeDraft = (entityIds: string[], recipe: ActionRecipe, areaId?: string): StepDraft => ({
-    pickKey: areaId
-      ? `recipe:${recipe.id}:area:${areaId}`
+  const recipeDraft = (
+    entityIds: string[],
+    recipe: ActionRecipe,
+    place?: PlaceTarget
+  ): StepDraft => ({
+    pickKey: place
+      ? `recipe:${recipe.id}:${place.key}:${place.id}`
       : `recipe:${recipe.id}:${entityIds.join(',')}`,
     title: recipe.label,
     nodeType: 'action',
-    data: buildActionNodeData({ kind: 'recipe', entityIds, recipe, areaId }),
+    data: buildActionNodeData({ kind: 'recipe', entityIds, recipe, place }, services),
   });
   /** An action picked from a list of types: its entities first, when it acts on some. */
   const selectTypeRecipe = (
@@ -298,7 +304,7 @@ export function ThenActionDialog({
     category: EntityActionCategory,
     recipe: ActionRecipe
   ) =>
-    actionRecipeTakesEntities(recipe)
+    actionRecipeTakesEntities(recipe, services)
       ? pushColumn(
           atIndex,
           { kind: 'recipeEntities', category, recipe },
@@ -353,9 +359,25 @@ export function ThenActionDialog({
   // The integrations with actions that aren't an entity domain the catalog
   // covers or a helper (those are under Device types and Unassigned, as HA
   // classifies them). One with no manifest yet is included, as HA does.
+  // The catalog's categories with every service HA has in their domains
+  // (actionCatalog; bug #231).
+  // The catalog in the editor's language (lib/actionCatalogText.ts).
+  // HA's own services in the catalog take HA's names, in HA's language.
+  const { translations: haServiceTexts } = useTranslations(SERVICE_TEXT_CATEGORIES);
+  const actionCategories = useMemo(
+    () =>
+      localizedActionCatalog(
+        actionCatalog(services, (domain, service) => ({
+          name: haServiceTexts[`component.${domain}.services.${service}.name`],
+          description: haServiceTexts[`component.${domain}.services.${service}.description`],
+        })),
+        i18n.language
+      ),
+    [services, haServiceTexts, i18n.language]
+  );
   const coveredActionDomains = useMemo(
-    () => new Set(ENTITY_ACTION_CATEGORIES.map((c) => c.domain)),
-    []
+    () => new Set(actionCategories.map((c) => c.domain)),
+    [actionCategories]
   );
   const integrationDomains = useMemo(
     () =>
@@ -424,7 +446,7 @@ export function ThenActionDialog({
       return { columns: [root, { kind: 'blocks' }], selected: ['blocks'] };
     if (!key.startsWith('service:')) return null;
     const domain = key.slice('service:'.length).split('.')[0] ?? '';
-    const category = ENTITY_ACTION_CATEGORIES.find((c) => c.domain === domain);
+    const category = actionCategories.find((c) => c.domain === domain);
     if (category)
       return {
         columns: [root, { kind: 'deviceTypes' }, { kind: 'typeResults', category }],
@@ -438,13 +460,15 @@ export function ThenActionDialog({
 
   /** Device types: every entity domain with actions, as HA lists them all. */
   const deviceTypeRows = (atIndex: number): NavRow[] =>
-    ENTITY_ACTION_CATEGORIES.map((category) => ({
-      key: category.groupKey,
-      label: category.label,
-      icon: getPickerIcon(category.domain, Layers),
-      color: getDomainColor(category.domain),
-      onSelect: () => pushColumn(atIndex, { kind: 'typeResults', category }, category.groupKey),
-    })).sort((a, b) => a.label.localeCompare(b.label));
+    actionCategories
+      .map((category) => ({
+        key: category.groupKey,
+        label: category.label,
+        icon: getPickerIcon(category.domain, Layers),
+        color: getDomainColor(category.domain),
+        onSelect: () => pushColumn(atIndex, { kind: 'typeResults', category }, category.groupKey),
+      }))
+      .sort((a, b) => a.label.localeCompare(b.label));
 
   const nonDeviceRows = (atIndex: number): NavRow[] => [
     ...ACTION_BLOCKS.filter((b) => ACTION_NON_DEVICE_BLOCKS.has(b.key)).map((b) =>
@@ -563,7 +587,7 @@ export function ThenActionDialog({
         matches(t(`nodes:blocks.${b.key}.label`), t(`nodes:blocks.${b.key}.description`))
       ).map((b) => blockRow(b, 0)),
       ...nonDeviceRows(0).filter((r) => r.key === 'perform' && matches(r.label)),
-      ...ENTITY_ACTION_CATEGORIES.flatMap((category) =>
+      ...actionCategories.flatMap((category) =>
         category.recipes
           .filter((recipe) => matches(recipe.label, recipe.description, category.label))
           .map((recipe) => ({
@@ -597,6 +621,7 @@ export function ThenActionDialog({
         areas: t('nodes:picker.search.areas'),
         devices: t('nodes:picker.search.devices'),
         entities: t('nodes:picker.search.entities'),
+        labels: t('nodes:picker.search.labels'),
       }),
     ];
   };
@@ -611,6 +636,7 @@ export function ThenActionDialog({
             key={index}
             sections={rootSections()}
             selectedKey={selectedKeys[index]}
+            top={<RegistryLoadNote />}
           />
         );
 
@@ -620,6 +646,7 @@ export function ThenActionDialog({
             key={index}
             sections={searchSections(column.query)}
             selectedKey={selectedKeys[index]}
+            empty={<SearchEmpty />}
           />
         );
 
@@ -639,6 +666,7 @@ export function ThenActionDialog({
             title={t('nodes:picker.rows.devices')}
             sections={devicesSections(places, index, pushColumn)}
             selectedKey={selectedKeys[index]}
+            empty={<DevicesEmpty />}
           />
         );
 
@@ -820,6 +848,7 @@ export function ThenActionDialog({
             <ThenTargetResultsPanel
               selected={column.scope}
               entities={entities}
+              categories={actionCategories}
               onSelectRecipe={(entityIds, recipe) =>
                 routeScopePick(
                   column.scope,
@@ -827,7 +856,7 @@ export function ThenActionDialog({
                   serviceHasTarget(services, recipe.service),
                   {
                     pick: (ids) => configure(index, recipeDraft(ids, recipe)),
-                    tick: (ids, areaId) =>
+                    tick: (ids, place) =>
                       pushColumn(
                         index,
                         {
@@ -835,7 +864,7 @@ export function ThenActionDialog({
                           label: recipe.label,
                           recipe,
                           entityIds: ids,
-                          area: areaId ? { areaId, label: column.scope.label } : undefined,
+                          place: place ? { target: place, label: column.scope.label } : undefined,
                         },
                         recipeChoiceKey(recipe.id, entityIds)
                       ),
@@ -871,7 +900,11 @@ export function ThenActionDialog({
                 entities.filter((e) => e.entity_id.startsWith(`${column.category.domain}.`))
               )
             )}
-            labels={multiTargetLabels}
+            labels={{
+              ...multiTargetLabels,
+              // No entity to tick: on without a target, as in HA.
+              addWithoutTargetLabel: t('nodes:pickerConfig.continueWithoutTarget'),
+            }}
             onCommit={(entityIds) => configure(index, recipeDraft(entityIds, column.recipe))}
           />
         );
@@ -893,12 +926,12 @@ export function ThenActionDialog({
             labels={multiTargetLabels}
             onCommit={(entityIds) => configure(index, recipeDraft(entityIds, column.recipe))}
             wholeArea={
-              column.area && {
-                label: t('nodes:picker.rows.anythingIn', { name: column.area.label }),
+              column.place && {
+                label: t(ANYTHING_IN[column.place.target.key], { name: column.place.label }),
                 onSelect: () =>
                   configure(
                     index,
-                    recipeDraft(column.entityIds, column.recipe, column.area?.areaId)
+                    recipeDraft(column.entityIds, column.recipe, column.place?.target)
                   ),
               }
             }
@@ -1120,11 +1153,14 @@ function ThenTypeResultsPanel({
 function ThenTargetResultsPanel({
   selected,
   entities,
+  categories,
   onSelectRecipe,
   onSelectDeviceAction,
 }: {
   selected: SelectedScope | null;
   entities: HassEntity[];
+  /** The picker's catalog, in the editor's language. */
+  categories: readonly EntityActionCategory[];
   onSelectRecipe: (entityIds: string[], recipe: ActionRecipe) => void;
   onSelectDeviceAction: (action: DeviceAction) => void;
 }) {
@@ -1190,7 +1226,12 @@ function ThenTargetResultsPanel({
   }
 
   // Each action with the selected entities that can do it (#130).
-  const recipesByHeading = actionRecipeOffers(scopeTypeEntityIds(selected), entities, services);
+  const recipesByHeading = actionRecipeOffers(
+    scopeTypeEntityIds(selected),
+    entities,
+    services,
+    categories
+  );
 
   const deviceActionsByHeading = new Map<string, DeviceAction[]>();
   for (const action of deviceActions) {

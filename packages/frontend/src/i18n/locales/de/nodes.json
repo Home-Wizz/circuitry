@@ -587,6 +587,7 @@
     "string": "Zeichenkette",
     "object": "Objekt",
     "placeholder": "00:00:05.500",
+    "days": "Tage",
     "hours": "Stunden",
     "minutes": "Minuten",
     "seconds": "Sekunden",
@@ -741,7 +742,7 @@
     "climate": "Klima",
     "media_player": "Mediaplayer",
     "camera": "Kamera",
-    "cover": "Rolladen",
+    "cover": "Abdeckung",
     "lock": "Schloss",
     "alarm_control_panel": "Alarm",
     "fan": "Lüfter",
@@ -758,7 +759,7 @@
     "number": "Zahl",
     "select": "Auswahl",
     "text": "Text",
-    "button": "Schaltfläche",
+    "button": "Taste",
     "sensor": "Sensor",
     "binary_sensor": "Binärsensor",
     "weather": "Wetter",
@@ -877,6 +878,7 @@
     "reload_config_entry": "Konfiguration neu laden"
   },
   "fieldDescriptions": {
+    "match": "Ob jede gewählte Entität passen muss oder nur eine",
     "entity_id": "Die zu überwachende Entität",
     "to": "Zustand, auf den ausgelöst werden soll",
     "from": "Nur auslösen beim Übergang aus diesem Zustand",
@@ -1008,6 +1010,7 @@
     "addTrigger": "Auslöser hinzufügen",
     "addAction": "Aktion hinzufügen",
     "addCondition": "Bedingung hinzufügen",
+    "continueWithoutTarget": "Ohne Ziel fortfahren",
     "stillNeeded": "Noch erforderlich",
     "gaps": {
       "target": "Wählen Sie aus, worauf es wirkt",
@@ -1042,7 +1045,9 @@
       "showMore_one": "{{count}} weiteren anzeigen",
       "showMore_other": "{{count}} weitere anzeigen",
       "performAction": "Aktion ausführen",
-      "anythingIn": "Irgendetwas in {{name}}"
+      "anythingIn": "Irgendetwas in {{name}}",
+      "anythingOn": "Irgendetwas auf {{name}}",
+      "anythingLabelled": "Irgendetwas mit dem Label {{name}}"
     },
     "groups": {
       "labels": "Labels",
@@ -1062,7 +1067,8 @@
       "types": "Typen",
       "areas": "Bereiche",
       "devices": "Geräte",
-      "entities": "Entitäten"
+      "entities": "Entitäten",
+      "labels": "Labels"
     },
     "kinds": {
       "when": "Wenn",
@@ -1081,7 +1087,17 @@
       "services": "Dienste"
     },
     "current": "Aktuell",
-    "loadingDevices": "Geräte werden gesucht…"
+    "loadingDevices": "Geräte werden gesucht…",
+    "registriesFailedTitle": "Räume und Geräte wurden nicht geladen",
+    "registriesFailedText": "Home Assistant hat nicht geantwortet. Typen funktionieren weiterhin.",
+    "searchEmpty": "Nichts passt zu Ihrer Suche.",
+    "devicesFailedTitle": "Geräte wurden nicht geladen",
+    "devicesFailedText": "Home Assistant hat nicht geantwortet, daher fehlen hier vielleicht Geräte.",
+    "noRoomDevices": "Noch kein Gerät ist einem Raum zugeordnet.",
+    "noRoomDevicesWhere": "Geräte ohne Raum stehen unter {{place}}.",
+    "devicesUnanswered_one": "{{count}} Gerät hat nicht geantwortet und fehlt hier vielleicht.",
+    "devicesUnanswered_other": "{{count}} Geräte haben nicht geantwortet und fehlen hier vielleicht.",
+    "tryAgain": "Erneut versuchen"
   },
   "pill": {
     "upTo": "höchstens",

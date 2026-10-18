@@ -1,5 +1,7 @@
+import type { HassServices } from 'home-assistant-js-websocket';
 import type { DeviceAction } from '@/hooks/useDeviceAutomation';
 import type { ActionRecipe } from '@/lib/actionRecipes';
+import { type PlaceTarget, placeTarget } from '@/lib/stepTargets';
 
 /**
  * The outcomes ThenActionDialog.tsx's "By type"/"By target" flows can
@@ -27,10 +29,10 @@ export type ActionSelection =
       kind: 'recipe';
       entityIds: string[];
       recipe: ActionRecipe;
-      /** A whole area as its target ("Anything in <room>"), instead of
-       * entities: only for a service HA describes a target for (the picker
-       * checks; see serviceHasTarget). */
-      areaId?: string;
+      /** A whole place as its target ("Anything in <room>", on a floor,
+       * labelled), instead of entities: only for a service HA describes a
+       * target for (the picker checks; see serviceHasTarget). */
+      place?: PlaceTarget;
     }
   | { kind: 'deviceAction'; action: DeviceAction };
 
@@ -40,7 +42,8 @@ export type ActionSelection =
  * lib/triggerNodeData.ts/lib/conditionNodeData.ts.
  */
 // Services HA describes with no target and no entity_id field (HA
-// 2026.9.3's services.yaml): they act on no entity (#123).
+// 2026.9.3's services.yaml): they act on no entity (#123). Only for when
+// HA's own descriptions aren't loaded; they decide otherwise.
 const NO_ENTITY_SERVICES = new Set<string>([
   'conversation.process',
   'conversation.reload',
@@ -49,22 +52,37 @@ const NO_ENTITY_SERVICES = new Set<string>([
   'group.set',
 ]);
 
+/** Whether a service acts on entities: HA describes a target or an
+ * `entity_id` field for it. A service that takes neither is refused by HA
+ * when the step runs if it's given entities (bug #236: HA's own services
+ * added to the catalog, `input_boolean.reload`, `scene.create`,
+ * `notify.notify`, ..., were given the picked entities). */
+export function serviceTakesEntities(service: string, services?: HassServices): boolean {
+  const [domain, name] = service.split('.');
+  const described = services?.[domain ?? '']?.[name ?? ''];
+  if (described) return described.target !== undefined || 'entity_id' in (described.fields ?? {});
+  return !NO_ENTITY_SERVICES.has(service);
+}
+
 /** Whether picking this recipe asks for entities first: not for a service
  * that acts on no entity (#123 -- there are no conversation.* entities, so
  * those actions couldn't be added at all). */
-export function actionRecipeTakesEntities(recipe: ActionRecipe): boolean {
-  return !NO_ENTITY_SERVICES.has(recipe.service);
+export function actionRecipeTakesEntities(recipe: ActionRecipe, services?: HassServices): boolean {
+  return serviceTakesEntities(recipe.service, services);
 }
 
-export function buildActionNodeData(selection: ActionSelection): Record<string, unknown> {
+export function buildActionNodeData(
+  selection: ActionSelection,
+  services?: HassServices
+): Record<string, unknown> {
   switch (selection.kind) {
     case 'recipe': {
       const { entityIds, recipe } = selection;
       return {
         service: recipe.service,
-        ...(actionRecipeTakesEntities(recipe)
+        ...(actionRecipeTakesEntities(recipe, services)
           ? {
-              target: selection.areaId ? { area_id: selection.areaId } : { entity_id: entityIds },
+              target: selection.place ? placeTarget(selection.place) : { entity_id: entityIds },
             }
           : {}),
       };

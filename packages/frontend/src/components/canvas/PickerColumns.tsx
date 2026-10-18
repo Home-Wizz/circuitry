@@ -9,13 +9,13 @@ import {
   useState,
 } from 'react';
 import { useTranslation } from 'react-i18next';
+import { getPickerIcon, type PickerIcon, PickerIconBadge } from '@/components/nodes/StepIcon';
 import { DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Segmented } from '@/components/ui/segmented';
 import { TruncatedTooltip } from '@/components/ui/truncated-tooltip';
 import { DEFAULT_DOMAIN_COLOR, type DomainColor } from '@/lib/domain-colors';
 import { readStored, writeStored } from '@/lib/storage';
 import { cn } from '@/lib/utils';
-import { getPickerIcon, type PickerIcon, PickerIconBadge } from '@/components/nodes/StepIcon';
 import { CurrentChip, PickerChosenProvider, useIsCurrent } from './pickerCurrent';
 
 /**
@@ -496,20 +496,29 @@ export function NavColumnList({
   rows,
   selectedKey,
   emptyLabel,
+  top,
+  empty,
 }: {
   title?: string;
   rows: NavRow[];
   selectedKey?: string | null;
   emptyLabel?: string;
+  /** Above the rows: a note about the list (PickerLoadNotes). */
+  top?: ReactNode;
+  /** In place of emptyLabel, when there's more to say. */
+  empty?: ReactNode;
 }) {
   return (
     <ResizableColumn defaultWidth={240} minWidth={180} maxWidth={420}>
       <div className="flex h-full flex-col">
         {title && <ColumnHead>{title}</ColumnHead>}
         <div className="flex-1 overflow-y-auto p-1.5">
-          {rows.length === 0 && emptyLabel && (
-            <p className="p-2 text-center text-muted-foreground text-sm">{emptyLabel}</p>
-          )}
+          {top}
+          {rows.length === 0 &&
+            (empty ??
+              (emptyLabel && (
+                <p className="p-2 text-center text-muted-foreground text-sm">{emptyLabel}</p>
+              )))}
           {rows.map((row) => (
             <NavRowView key={row.key} row={row} active={selectedKey === row.key} />
           ))}
@@ -523,11 +532,18 @@ export function NavColumnSections({
   sections,
   selectedKey,
   title,
+  top,
+  empty,
 }: {
   sections: NavSection[];
   selectedKey?: string | null;
   /** A heading over the column, as NavColumnList has. */
   title?: string;
+  /** Above the sections: a note about the list (PickerLoadNotes). */
+  top?: ReactNode;
+  /** Shown when no section has a row: what that means (bug #228: an empty
+   * column said nothing). */
+  empty?: ReactNode;
 }) {
   const [folded, setFolded] = useState<Set<string>>(readFolded);
   const toggle = (title: string) =>
@@ -544,6 +560,8 @@ export function NavColumnSections({
       <div className="flex h-full flex-col">
         {title && <ColumnHead>{title}</ColumnHead>}
         <div className="flex-1 overflow-y-auto p-1.5">
+          {top}
+          {sections.every((section) => section.rows.length === 0) && empty}
           {sections.map((section, i) => {
             if (section.title) foldedTitle = folded.has(section.title) ? section.title : null;
             else if (section.separate) foldedTitle = null;
@@ -648,6 +666,10 @@ export interface MultiTargetPanelLabels {
   selectPromptLabel: string;
   /** Shown on the bottom commit button once ≥1 row is selected — receives the selected count. */
   commitLabel: (count: number) => string;
+  /** A type picked from a list, with no entity to tick: the button goes on
+   * without a target under this label, as HA's own dialog adds a type with
+   * none, to be filled in later. Left out, the button waits for a tick. */
+  addWithoutTargetLabel?: string;
 }
 
 /**
@@ -694,6 +716,7 @@ export function MultiTargetPanel({
   };
 
   const allSelected = rows.length > 0 && selected.size === rows.length;
+  const withoutTarget = rows.length === 0 && !wholeArea ? labels.addWithoutTargetLabel : undefined;
 
   return (
     <ResizableColumn defaultWidth={320} minWidth={280} maxWidth={640} fillRemaining>
@@ -786,11 +809,13 @@ export function MultiTargetPanel({
         <div className={cn('border-t p-2', PICKER_LINE)}>
           <button
             type="button"
-            disabled={selected.size === 0}
+            disabled={selected.size === 0 && withoutTarget === undefined}
             onClick={() => onCommit(Array.from(selected))}
             className="w-full rounded-md bg-primary px-3 py-2 text-center font-medium text-primary-foreground text-sm hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            {selected.size === 0 ? labels.selectPromptLabel : labels.commitLabel(selected.size)}
+            {selected.size > 0
+              ? labels.commitLabel(selected.size)
+              : (withoutTarget ?? labels.selectPromptLabel)}
           </button>
         </div>
       </div>
@@ -826,6 +851,10 @@ export function PickerColumnRow({
   );
 }
 
+/** The heading of the results column a row is in: a row's tag that only
+ * repeats it is left out (TriggerResultRow; bug #229). */
+export const ColumnTitleContext = createContext<string | undefined>(undefined);
+
 export function ResultsColumn({
   title,
   children,
@@ -850,7 +879,9 @@ export function ResultsColumn({
       <div className="flex h-full flex-col">
         <ColumnHead>{title}</ColumnHead>
         <PickerChosenProvider value={chosenKey}>
-          <div className="flex-1 overflow-y-auto p-1.5">{children}</div>
+          <ColumnTitleContext.Provider value={title}>
+            <div className="flex-1 overflow-y-auto p-1.5">{children}</div>
+          </ColumnTitleContext.Provider>
         </PickerChosenProvider>
       </div>
     </ResizableColumn>

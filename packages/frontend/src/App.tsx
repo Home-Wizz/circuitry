@@ -1,7 +1,6 @@
 import { ReactFlowProvider } from '@xyflow/react';
 import {
   AlertCircle,
-  BrushCleaning,
   FileDown,
   FileUp,
   Loader2,
@@ -24,6 +23,7 @@ import { NodePalette, paletteAsideClass } from '@/components/panels/NodePalette'
 import { PropertyPanel } from '@/components/panels/PropertyPanel';
 import { SpeedControl } from '@/components/simulator/SpeedControl';
 import { AutomationToolsMenu } from '@/components/toolbar/AutomationToolsMenu';
+import { ClearAutomationButton } from '@/components/toolbar/ClearAutomationButton';
 import { TabBar } from '@/components/toolbar/TabBar';
 import { Badge } from '@/components/ui/badge';
 
@@ -81,8 +81,8 @@ import { useDarkMode } from './hooks/useDarkMode';
 import { useStableValue } from './hooks/useStableEntityList';
 import { useHaThemeSync } from './hooks/useHaThemeSync';
 import { useLanguage } from './hooks/useLanguage';
-import { useLoadAutomation } from './hooks/useLoadAutomation';
-import { useFlowStore } from './store/flow-store';
+import { DeepLinkHandler } from './components/DeepLinkHandler';
+import { selectIsSaving, useFlowStore } from './store/flow-store';
 import logoBadgeDark from './assets/circuitry-round-dark.svg';
 import logoBadgeLight from './assets/circuitry-round-light.svg';
 
@@ -125,60 +125,6 @@ function ServiceChecksSync() {
   return null;
 }
 
-/**
- * Deep-link entry points — `/circuitry?automation=automation.xyz` opens that
- * automation, `/circuitry?new=1` starts blank. Query params only (not HA's
- * `route` property, which carries just prefix/path, no search string).
- * Rendered inside `<ReactFlowProvider>` (see `App`'s return) because loading
- * an automation needs `useReactFlow`'s `fitView` — this hook can't be called
- * from `App` itself, since `App` is the one *creating* that provider, not a
- * descendant of it. Waits for a real `hass` (needed to resolve
- * entity_id -> automation_id) and only ever runs once per mount.
- */
-function DeepLinkHandler() {
-  const { hass } = useHass();
-  const { reset } = useFlowStore();
-  const loadAutomation = useLoadAutomation();
-  const handled = useRef(false);
-
-  useEffect(() => {
-    if (handled.current || !hass) return;
-
-    const params = new URLSearchParams(window.location.search);
-    const automationEntityId = params.get('automation');
-    const isNew = params.get('new') === '1';
-    if (!automationEntityId && !isNew) return;
-
-    handled.current = true;
-
-    if (automationEntityId) {
-      const stateObj = hass.states[automationEntityId];
-      const rawId = stateObj?.attributes?.id;
-      const automationConfigId =
-        typeof rawId === 'string' || typeof rawId === 'number'
-          ? String(rawId)
-          : automationEntityId.replace('automation.', '');
-      loadAutomation({
-        automation_id: automationConfigId,
-        entity_id: automationEntityId,
-        friendly_name:
-          typeof stateObj?.attributes?.friendly_name === 'string'
-            ? stateObj.attributes.friendly_name
-            : undefined,
-      });
-    } else {
-      reset();
-    }
-
-    const url = new URL(window.location.href);
-    url.searchParams.delete('automation');
-    url.searchParams.delete('new');
-    window.history.replaceState(null, '', `${url.pathname}${url.search}`);
-  }, [hass, loadAutomation, reset]);
-
-  return null;
-}
-
 type RightPanelTab = 'properties' | 'yaml' | 'simulator';
 /**
  * Three states, not two — 'collapsed' is the existing thin strip (just an
@@ -218,14 +164,14 @@ function App() {
   const {
     flowName,
     fromFlowGraph,
-    reset,
     automationId,
     hasUnsavedChanges,
-    isSaving,
     simulationSpeed,
     setSimulationSpeed,
     hasRealChanges,
   } = useFlowStore();
+  // The active tab's own save (bug #239).
+  const isSaving = useFlowStore(selectIsSaving);
   const [rightTab, setRightTab] = useState<RightPanelTab>('properties');
   // Fully closed (no strip at all) by default per explicit user instruction
   // ("the right panel should be closed by default"). Earlier this defaulted
@@ -261,7 +207,6 @@ function App() {
   const [importYamlOpen, setImportYamlOpen] = useState(false);
   const [automationImportOpen, setAutomationImportOpen] = useState(false);
   const [saveDialogOpen, setSaveDialogOpen] = useState(false);
-  const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
   const [exitConfirmOpen, setExitConfirmOpen] = useState(false);
   // The left panel folded to its dock, remembered across visits: docked
   // until someone opens it out.
@@ -471,14 +416,7 @@ function App() {
                 </Tooltip>
               )}
 
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button onClick={() => setClearConfirmOpen(true)} variant="ghost" size="icon">
-                    <BrushCleaning className="h-5 w-5" />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>{t('titles.clearAutomation')}</TooltipContent>
-              </Tooltip>
+              <ClearAutomationButton />
 
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -745,30 +683,6 @@ function App() {
             />
           </Suspense>
         )}
-
-        {/* Clear confirm dialog */}
-        <Dialog open={clearConfirmOpen} onOpenChange={setClearConfirmOpen}>
-          <DialogContent className="max-w-md">
-            <DialogHeader>
-              <DialogTitle>{t('dialogs:import.discardTitle')}</DialogTitle>
-              <DialogDescription>{t('dialogs:import.discardDescription')}</DialogDescription>
-            </DialogHeader>
-            <div className="flex justify-end gap-2 pt-4">
-              <Button variant="outline" onClick={() => setClearConfirmOpen(false)}>
-                {t('buttons.cancel')}
-              </Button>
-              <Button
-                variant="destructive"
-                onClick={() => {
-                  reset();
-                  setClearConfirmOpen(false);
-                }}
-              >
-                {t('dialogs:import.confirmDiscard')}
-              </Button>
-            </div>
-          </DialogContent>
-        </Dialog>
 
         {/* Exit confirm dialog */}
         <Dialog open={exitConfirmOpen} onOpenChange={setExitConfirmOpen}>

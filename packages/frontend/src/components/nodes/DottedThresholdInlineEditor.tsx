@@ -146,7 +146,11 @@ export function DottedThresholdInlineEditor({
     const level = (
       <LevelInput
         value={value}
-        onChange={(raw) => onChange(raw === '' ? 0 : Number(raw))}
+        // A cleared box saves nothing until a number is typed (it saved 0, a
+        // real threshold; bug #211).
+        onChange={(raw) => {
+          if (raw !== '' && Number.isFinite(Number(raw))) onChange(Number(raw));
+        }}
         unit={unit}
         min={min}
         max={max}

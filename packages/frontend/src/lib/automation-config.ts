@@ -4,6 +4,25 @@ import { t as i18t } from 'i18next';
 import type { AutomationConfig } from '@/types/hass';
 
 /**
+ * What a refused save says. The cards that are not joined to a trigger are
+ * counted, not named: the validator knows them by internal id (bug #190), and
+ * no card or picker shows one. An action name HA wouldn't take is named by
+ * the name (bug #234).
+ */
+function validationReasons(errors: { code: string; message: string; value?: string }[]): string {
+  const loose = errors.filter((e) => e.code === 'ORPHANED_NODE').length;
+  const reasons = errors
+    .filter((e) => e.code !== 'ORPHANED_NODE')
+    .map((e) =>
+      e.code === 'INVALID_SERVICE' && e.value !== undefined
+        ? i18t('errors:validation.invalidAction', { service: e.value })
+        : e.message
+    );
+  if (loose > 0) reasons.unshift(i18t('errors:validation.orphanedCards', { count: loose }));
+  return reasons.join(', ');
+}
+
+/**
  * Validates and transpiles a flow for saving, both save paths' way. When
  * the transpiler can't write it, the error carries its reasons: a save that
  * fails says why (a flow Home Assistant can't express, a loop that can't be
@@ -14,9 +33,7 @@ export function transpileForSave(transpiler: FlowTranspiler, graph: FlowGraph): 
   const validation = transpiler.validate(graph);
   if (validation.errors.length > 0) {
     throw new Error(
-      i18t('errors:validation.validationFailed', {
-        errors: validation.errors.map((e) => e.message).join(', '),
-      })
+      i18t('errors:validation.validationFailed', { errors: validationReasons(validation.errors) })
     );
   }
   const result = transpiler.transpile(graph);

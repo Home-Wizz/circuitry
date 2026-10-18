@@ -35,6 +35,7 @@ import {
   ResultsColumn,
   renderStackedColumns,
 } from '@/components/canvas/PickerColumns';
+import { DevicesEmpty, RegistryLoadNote, SearchEmpty } from '@/components/canvas/PickerLoadNotes';
 import { groupSections, headed } from '@/components/canvas/pickerRoot';
 import {
   deviceEntityRows,
@@ -63,6 +64,7 @@ import { Input } from '@/components/ui/input';
 import { useHass } from '@/contexts/HassContext';
 import { HaSelector } from '@/ha';
 import { type DeviceCondition, useDeviceAutomation } from '@/hooks/useDeviceAutomation';
+import { useIntegrationManifests } from '@/hooks/useIntegrationManifests';
 import { useConditionCatalog, useHaOffers } from '@/hooks/useHaCatalog';
 import { usePickNeedsSettings } from '@/hooks/usePickGaps';
 import { useTranslations } from '@/hooks/useTranslations';
@@ -71,6 +73,7 @@ import {
   conditionRecipeTakesArea,
   conditionRecipeTakesEntities,
 } from '@/lib/conditionNodeData';
+import { ANYTHING_IN, type PlaceTarget } from '@/lib/stepTargets';
 import { groupRecipesByHeading } from '@/lib/recipeRows';
 import {
   CONDITION_BLOCKS,
@@ -100,6 +103,7 @@ import {
 } from '@/lib/pickerLayout';
 import { prettify } from '@/lib/utils';
 import { entityName } from '@/lib/entityNames';
+import { offersNumericState } from '@/lib/entityNumeric';
 import type { HassEntity } from '@/types/hass';
 import { toneStyle } from '@/lib/node-colors';
 
@@ -143,8 +147,8 @@ type NavColumn =
       label: string;
       recipe: ConditionRecipe;
       entityIds: string[];
-      /** "Anything in <room>" as the list's first line. */
-      area?: { areaId: string; label: string };
+      /** "Anything in <room>" (or labelled <label>, on <floor>) as the list's first line. */
+      place?: { target: PlaceTarget; label: string };
     }
   /** A room's State row: its entities, to tick. */
   | { kind: 'stateTargets'; label: string; entityIds: string[] }
@@ -193,6 +197,7 @@ export function AndConditionDialog({
   initialQuery,
 }: AndConditionDialogProps) {
   const { t } = useTranslation(['nodes']);
+  const { manifests, fetchManifests } = useIntegrationManifests();
   const { getDeviceNameById } = useHass();
   const places = usePickerPlaces(allEntities);
   const { entities } = places;
@@ -219,6 +224,9 @@ export function AndConditionDialog({
         setColumns([{ kind: 'search', query }]);
         setSelectedKeys([]);
       }
+      // Which group a new integration's conditions go in depends on its
+      // manifest, fetched as HA's own dialog does (a no-op once loaded).
+      fetchManifests();
     }
   }, [open]);
 
@@ -259,19 +267,24 @@ export function AndConditionDialog({
     block.key === 'time'
       ? pushColumn(atIndex, { kind: 'timeOptions' }, 'block:time')
       : configure(atIndex, blockDraft(block));
-  const entityTargetDraft = (entityIds: string[]): ConditionDraft => ({
-    pickKey: `entity:${entityIds.join(',')}`,
-    title: t('nodes:conditions.types.state'),
-    data: buildConditionNodeData({ kind: 'entityTarget', entityIds }),
+  const entityTargetDraft = (
+    entityIds: string[],
+    condition: 'state' | 'numeric_state' = 'state'
+  ): ConditionDraft => ({
+    pickKey: `entity:${condition}:${entityIds.join(',')}`,
+    title: t(`nodes:conditions.types.${condition}`),
+    data: buildConditionNodeData({ kind: 'entityTarget', entityIds, condition }),
   });
   const recipeDraft = (
     entityIds: string[],
     recipe: ConditionRecipe,
-    areaId?: string
+    place?: PlaceTarget
   ): ConditionDraft => ({
-    pickKey: areaId ? `recipe:${recipe.id}:area:${areaId}` : recipeChoiceKey(recipe.id, entityIds),
+    pickKey: place
+      ? `recipe:${recipe.id}:${place.key}:${place.id}`
+      : recipeChoiceKey(recipe.id, entityIds),
     title: recipe.label,
-    data: buildConditionNodeData({ kind: 'recipe', entityIds, recipe, areaId }),
+    data: buildConditionNodeData({ kind: 'recipe', entityIds, recipe, place }),
   });
   // A tick list's button says what comes next: "Next: settings" when the
   // pick still needs its Fill in column (pickNeedsSettings), else Add.
@@ -283,8 +296,8 @@ export function AndConditionDialog({
     atIndex: number,
     entityIds: string[],
     recipe: ConditionRecipe,
-    areaId?: string
-  ) => configure(atIndex, recipeDraft(entityIds, recipe, areaId));
+    place?: PlaceTarget
+  ) => configure(atIndex, recipeDraft(entityIds, recipe, place));
   /** A condition picked from a list of types: its entities first, when it tests some. */
   const selectTypeRecipe = (
     atIndex: number,
@@ -337,10 +350,12 @@ export function AndConditionDialog({
   const timeCategories = catalog.categories.filter((c) =>
     TIME_CATEGORY_DOMAINS.has(c.conditionPrefix)
   );
-  const integrationCategories = catalog.categories.filter((c) => isIntegrationCategory(c.groupKey));
+  const isIntegration = (c: { groupKey: string; conditionPrefix: string }) =>
+    isIntegrationCategory(c.groupKey, manifests?.[c.conditionPrefix]?.integration_type);
+  const integrationCategories = catalog.categories.filter(isIntegration);
   // Every category HA describes, as HA lists them (the calendar's and the
   // schedule's under Time too).
-  const deviceCategories = catalog.categories.filter((c) => !isIntegrationCategory(c.groupKey));
+  const deviceCategories = catalog.categories.filter((c) => !isIntegration(c));
   // ---- Rows -----------------------------------------------------------
 
   const blockRow = (block: ConditionBlock, atIndex: number, icon?: LucideIcon): NavRow => ({
@@ -392,10 +407,7 @@ export function AndConditionDialog({
         selected: ['nonDevice', 'sun'],
       };
     if (prefix === 'moon')
-      return {
-        columns: [root, { kind: 'deviceTypes' }, { kind: 'singletonOptions', key: 'moon' }],
-        selected: ['deviceTypes', 'moon'],
-      };
+      return { columns: [root, { kind: 'singletonOptions', key: 'moon' }], selected: ['moon'] };
     if ((CONDITION_NON_DEVICE_BLOCKS as readonly string[]).includes(type))
       return { columns: [root, nonDevice], selected: ['nonDevice'] };
     const integration = integrationCategories.find((c) =>
@@ -411,21 +423,31 @@ export function AndConditionDialog({
     };
   }
 
-  /** Device types: every category HA describes (and the moon's), A to Z,
-   * as HA lists them. */
-  const deviceTypeRows = (atIndex: number): NavRow[] => {
-    const rows = deviceCategories.map((category) => categoryRow(category, atIndex));
-    if (catalog.moon.length > 0) {
-      rows.push({
-        key: 'moon',
-        label: t('nodes:picker.groups.moon'),
-        icon: getPickerIcon('moon', Moon),
-        color: getDomainColor('moon'),
-        onSelect: () => pushColumn(atIndex, { kind: 'singletonOptions', key: 'moon' }, 'moon'),
-      });
-    }
-    return rows.sort((x, y) => x.label.localeCompare(y.label));
-  };
+  /** Device types: every category HA describes, A to Z, as HA lists them. */
+  const deviceTypeRows = (atIndex: number): NavRow[] =>
+    deviceCategories
+      .map((category) => categoryRow(category, atIndex))
+      .sort((x, y) => x.label.localeCompare(y.label));
+
+  /** Integrations: a new integration's conditions and the moon's (HA lists
+   * the moon there: its integration is a service; INTEGRATION_GROUP_KEYS),
+   * A to Z. */
+  const integrationRows = (atIndex: number): NavRow[] =>
+    [
+      ...integrationCategories.map((c) => categoryRow(c, atIndex)),
+      ...(catalog.moon.length > 0
+        ? [
+            {
+              key: 'moon',
+              label: t('nodes:picker.groups.moon'),
+              icon: getPickerIcon('moon', Moon),
+              color: getDomainColor('moon'),
+              onSelect: () =>
+                pushColumn(atIndex, { kind: 'singletonOptions', key: 'moon' }, 'moon'),
+            },
+          ]
+        : []),
+    ].sort((x, y) => x.label.localeCompare(y.label));
 
   const nonDeviceSections = (atIndex: number): NavSection[] => [
     {
@@ -492,7 +514,7 @@ export function AndConditionDialog({
           ...blockRows(CONDITION_GENERIC_BLOCKS, atIndex),
         ];
       case 'integrations':
-        return integrationCategories.map((c) => categoryRow(c, atIndex));
+        return integrationRows(atIndex);
     }
   };
   const groupSectionsAt = (key: GroupKey) =>
@@ -572,6 +594,7 @@ export function AndConditionDialog({
         areas: t('nodes:picker.search.areas'),
         devices: t('nodes:picker.search.devices'),
         entities: t('nodes:picker.search.entities'),
+        labels: t('nodes:picker.search.labels'),
       }),
     ];
   };
@@ -586,6 +609,7 @@ export function AndConditionDialog({
             key={index}
             sections={rootSections()}
             selectedKey={selectedKeys[index]}
+            top={<RegistryLoadNote />}
           />
         );
 
@@ -595,6 +619,7 @@ export function AndConditionDialog({
             key={index}
             sections={searchSections(column.query)}
             selectedKey={selectedKeys[index]}
+            empty={<SearchEmpty />}
           />
         );
 
@@ -605,6 +630,7 @@ export function AndConditionDialog({
             title={t('nodes:picker.rows.devices')}
             sections={devicesSections(places, index, pushColumn)}
             selectedKey={selectedKeys[index]}
+            empty={<DevicesEmpty />}
           />
         );
 
@@ -722,7 +748,9 @@ export function AndConditionDialog({
               // Every entity, config and diagnostic ones too: a room's battery
               // level is looked up here (#177).
               entities={allEntities}
-              onSelectEntityTarget={(entityId) => configure(index, entityTargetDraft([entityId]))}
+              onSelectEntityTarget={(entityId, condition) =>
+                configure(index, entityTargetDraft([entityId], condition))
+              }
               onSelectStateTargets={(entityIds) =>
                 pushColumn(
                   index,
@@ -733,7 +761,7 @@ export function AndConditionDialog({
               onSelectRecipe={(entityIds, recipe) =>
                 routeScopePick(column.scope, entityIds, conditionRecipeTakesArea(recipe), {
                   pick: (ids) => selectRecipe(index, ids, recipe),
-                  tick: (ids, areaId) =>
+                  tick: (ids, place) =>
                     pushColumn(
                       index,
                       {
@@ -741,7 +769,7 @@ export function AndConditionDialog({
                         label: recipe.label,
                         recipe,
                         entityIds: ids,
-                        area: areaId ? { areaId, label: column.scope.label } : undefined,
+                        place: place ? { target: place, label: column.scope.label } : undefined,
                       },
                       recipeChoiceKey(recipe.id, ids)
                     ),
@@ -801,10 +829,14 @@ export function AndConditionDialog({
             key={index}
             title={column.recipe.label}
             rows={rows}
-            labels={recipeTargetLabels(
-              column.recipe,
-              rows.map((r) => r.entityId)
-            )}
+            labels={{
+              ...recipeTargetLabels(
+                column.recipe,
+                rows.map((r) => r.entityId)
+              ),
+              // No entity to tick: on without a target, as in HA.
+              addWithoutTargetLabel: t('nodes:pickerConfig.continueWithoutTarget'),
+            }}
             onCommit={(entityIds) => selectRecipe(index, entityIds, column.recipe)}
           />
         );
@@ -824,10 +856,10 @@ export function AndConditionDialog({
             labels={recipeTargetLabels(column.recipe, column.entityIds)}
             onCommit={(entityIds) => selectRecipe(index, entityIds, column.recipe)}
             wholeArea={
-              column.area && {
-                label: t('nodes:picker.rows.anythingIn', { name: column.area.label }),
+              column.place && {
+                label: t(ANYTHING_IN[column.place.target.key], { name: column.place.label }),
                 onSelect: () =>
-                  selectRecipe(index, column.entityIds, column.recipe, column.area?.areaId),
+                  selectRecipe(index, column.entityIds, column.recipe, column.place?.target),
               }
             }
           />
@@ -988,7 +1020,7 @@ function ConditionTargetResultsPanel({
 }: {
   selected: SelectedScope | null;
   entities: HassEntity[];
-  onSelectEntityTarget: (entityId: string) => void;
+  onSelectEntityTarget: (entityId: string, condition?: 'state' | 'numeric_state') => void;
   /** A room's State row: its entities, to tick. */
   onSelectStateTargets?: (entityIds: string[]) => void;
   onSelectRecipe: (entityIds: string[], recipe: ConditionRecipe) => void;
@@ -1166,6 +1198,17 @@ function ConditionTargetResultsPanel({
             chip={singleEntityLabel ?? null}
             onSelect={() => onSelectEntityTarget(selected.singleEntityId as string)}
           />
+          {offersNumericState(selected.singleEntityId, singleEntity) && (
+            <TriggerResultRow
+              icon={singleEntityIcon}
+              color={singleEntityColor}
+              label={t('nodes:conditions.types.numeric_state')}
+              chip={singleEntityLabel ?? null}
+              onSelect={() =>
+                onSelectEntityTarget(selected.singleEntityId as string, 'numeric_state')
+              }
+            />
+          )}
         </div>
       )}
       {selected.room && onSelectStateTargets && selected.entityIds.length > 0 && (

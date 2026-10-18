@@ -1,11 +1,13 @@
 import { useTranslation } from 'react-i18next';
 import { NavColumnList } from '@/components/canvas/PickerColumns';
+import { DevicesEmpty, UnansweredNote } from '@/components/canvas/PickerLoadNotes';
 import {
   deviceGroupColor,
   deviceGroupIcon,
   type PickerPlaces,
   type PushPlaceColumn,
 } from '@/components/canvas/pickerPlaces';
+import { useOptionalHass } from '@/contexts/HassContext';
 import { type DeviceAutomationKind, useDevicesWithAutomations } from '@/hooks/useDeviceAutomation';
 
 /**
@@ -31,10 +33,11 @@ export function DeviceAutomationColumn({
 }) {
   const { t } = useTranslation(['nodes']);
   const groups = places.allDeviceGroups;
-  const withAny = useDevicesWithAutomations(
+  const { withAny, unanswered, retry } = useDevicesWithAutomations(
     kind,
     groups.map((g) => g.deviceId)
   );
+  const hassContext = useOptionalHass();
   const rows = (withAny ? groups.filter((g) => withAny.has(g.deviceId)) : []).map((group) => ({
     key: group.deviceId,
     label: group.name,
@@ -62,6 +65,8 @@ export function DeviceAutomationColumn({
       rows={rows}
       selectedKey={selectedKey}
       emptyLabel={withAny ? emptyLabel : t('nodes:picker.loadingDevices')}
+      top={<UnansweredNote count={unanswered} onRetry={retry} />}
+      empty={hassContext?.registriesFailed ? <DevicesEmpty /> : undefined}
     />
   );
 }

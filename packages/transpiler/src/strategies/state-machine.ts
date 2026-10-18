@@ -1,14 +1,18 @@
-import type {
-  ConditionNode,
-  FlowEdge,
-  FlowGraph,
-  FlowNode,
-  TriggerNode,
-} from '@circuitry/shared';
+import type { ConditionNode, FlowEdge, FlowGraph, FlowNode, TriggerNode } from '@circuitry/shared';
 import { isStartNode } from '@circuitry/shared';
+import { counterVariableOf } from '../analyzer/count-loop';
+import { branchMachineRegion, untilExit } from '../analyzer/loops';
 import { findBackEdges, type TopologyAnalysis } from '../analyzer/topology';
+import {
+  branchMachineName,
+  branchMachineSteps,
+  branchNames,
+  endOutside,
+  MAIN_NAMES,
+  renameMachineVariables,
+} from '../utils/branchMachine';
 import { fanOutHash } from '../utils/fanOutHash';
-import { GraphClaimError } from '../utils/theOnly';
+import { noStepsStop } from '../utils/stateMachineEntry';
 import {
   loopLimitStep,
   loopRoundsStep,
@@ -16,6 +20,7 @@ import {
   RUN_ALIAS,
   RUN_CHUNK,
 } from '../utils/stateMachineLoops';
+import { GraphClaimError } from '../utils/theOnly';
 import { BaseStrategy, bareParallelBranch, type HAYamlOutput } from './base';
 import { classifyLoopBackEdge, NativeStrategy } from './native';
 
@@ -33,6 +38,24 @@ import { classifyLoopBackEdge, NativeStrategy } from './native';
  * - Converging paths (multiple paths merging)
  * - Complex state machines
  */
+/** The dispatcher's fixed `default:` (an unknown state logs and ends),
+ * for the machine whose state is in `node` (#284: a branch machine's own). */
+function dispatchDefault(node: string = MAIN_NAMES.node): unknown[] {
+  return [
+    {
+      // `action`, not the old `service`: HA renames `service` to `action`
+      // in the config it is sent while checking it, and stores that, so
+      // the save never read back as sent (bug #280).
+      action: 'system_log.write',
+      data: {
+        message: `Circuitry: Unknown state "{{ ${node} }}", ending flow`,
+        level: 'warning',
+      },
+    },
+    { variables: { [node]: 'END' } },
+  ];
+}
+
 /** A drawn loop's round count (#157): see StateMachineStrategy.loopBudgets. */
 interface LoopBudget {
   index: number;
@@ -78,6 +101,9 @@ export class StateMachineStrategy extends BaseStrategy {
    * inline copy of the branches into new nodes.
    */
   private recordFanOut(key: string, targets: string[], extraSteps: unknown[]): void {
+    // A branch machine's own copy of a state (#284) isn't the state's: the
+    // dispatcher's state is the one a reopen reads.
+    if (this.machineRegions.length > 0) return;
     if (extraSteps.length > 0) this.fanOutRecords[key] = { targets, hash: fanOutHash(extraSteps) };
   }
 
@@ -175,7 +201,11 @@ export class StateMachineStrategy extends BaseStrategy {
     // Generate the initial node expression
     // If all triggers lead to the same node, use that directly
     // Otherwise, use a Jinja2 template to route based on trigger.idx
-    const entryNodeExpr = this.generateEntryNodeExpression(triggerRouting);
+    const triggerCount = flow.nodes.filter((n) => n.type === 'trigger').length;
+    const entryNodeExpr = this.generateEntryNodeExpression(triggerRouting, triggerCount);
+    // A trigger with nothing joined starts at END: stop before the loop
+    // (bug #195; see stateMachineEntry.ts).
+    const someTriggerHasNoSteps = triggerRouting.size < triggerCount;
 
     // Build the action sequence for the state machine
     // In HA automations, actions are a flat list - we use:
@@ -183,20 +213,7 @@ export class StateMachineStrategy extends BaseStrategy {
     // 2. A repeat action with choose dispatcher
     const dispatch = {
       choose: chooseBlocks,
-      default: [
-        {
-          service: 'system_log.write',
-          data: {
-            message: 'Circuitry: Unknown state "{{ current_node }}", ending flow',
-            level: 'warning',
-          },
-        },
-        {
-          variables: {
-            current_node: 'END',
-          },
-        },
-      ],
+      default: dispatchDefault(),
     };
     // HA stops a `repeat: while/until` after 10,000 rounds and never stops
     // a `repeat: count`. With a loop in the graph, each drawn loop keeps its
@@ -222,6 +239,7 @@ export class StateMachineStrategy extends BaseStrategy {
             : {}),
         },
       },
+      ...(someTriggerHasNoSteps ? [noStepsStop()] : []),
       // The main execution loop
       {
         alias: 'State Machine Loop',
@@ -288,41 +306,19 @@ export class StateMachineStrategy extends BaseStrategy {
   }
 
   /**
-   * Adds the automation-level settings NativeStrategy.generate() carries
-   * through (same keys, same conditions, same order). Bug #20, 2026-09-26:
-   * this strategy used to emit only `mode`, so `max`, `max_exceeded`,
-   * `initial_state: false`, `trace` and `trigger_variables` were silently
-   * lost whenever an automation needed the state machine. Top-level
-   * `variables` is not added here: FlowTranspiler.generateAndSerialize
-   * merges flow.userVariables into every strategy's output.
-   */
-  private withAutomationSettings(
-    flow: FlowGraph,
-    automation: Record<string, unknown>
-  ): Record<string, unknown> {
-    if (flow.metadata?.max) {
-      automation.max = flow.metadata.max;
-    }
-    if (flow.metadata?.max_exceeded) {
-      automation.max_exceeded = flow.metadata.max_exceeded;
-    }
-    if (flow.metadata?.initial_state === false) {
-      automation.initial_state = false;
-    }
-    if (flow.metadata?.trace) {
-      automation.trace = flow.metadata.trace;
-    }
-    if (flow.userTriggerVariables && Object.keys(flow.userTriggerVariables).length > 0) {
-      automation.trigger_variables = flow.userTriggerVariables;
-    }
-    return automation;
-  }
-
-  /**
    * Build a mapping from trigger index to target action node(s)
    * Returns a Map where key = trigger index, value = array of target node IDs
    * When a trigger has multiple targets, they should execute in parallel
    */
+  /** The node trigger `idx`'s run starts at (buildTriggerRouting's
+   * numbering: the trigger nodes in order, or the start node when there
+   * are none), as the entry to read loops from (#282). */
+  private triggerEntry(flow: FlowGraph, idx: number): string[] {
+    const triggers = flow.nodes.filter((n) => n.type === 'trigger');
+    const node = triggers.length > 0 ? triggers[idx] : flow.nodes.find(isStartNode);
+    return node ? [node.id] : [];
+  }
+
   private buildTriggerRouting(flow: FlowGraph): Map<number, string[]> {
     const routing = new Map<number, string[]>();
 
@@ -403,12 +399,22 @@ export class StateMachineStrategy extends BaseStrategy {
    * Generate the entry node expression for initialization
    * If all triggers lead to the same node, return that node ID
    * Otherwise, return a Jinja2 template that routes based on trigger.idx
+   *
+   * A trigger with nothing joined to it does nothing, as on the canvas: it
+   * routes to END. Left out, it started wherever the other triggers did, or
+   * fell into the template's `{% else %}` (bug #195).
    */
-  private generateEntryNodeExpression(triggerRouting: Map<number, string[]>): string {
+  private generateEntryNodeExpression(
+    triggerRouting: Map<number, string[]>,
+    triggerCount: number
+  ): string {
     // Convert to effective entry points (handling parallel branches)
     const effectiveEntries = new Map<number, string>();
     for (const [idx, targets] of triggerRouting) {
       effectiveEntries.set(idx, this.getEffectiveEntryPoint(idx, targets));
+    }
+    for (let idx = 0; idx < triggerCount; idx++) {
+      if (!effectiveEntries.has(idx)) effectiveEntries.set(idx, 'END');
     }
 
     const uniqueTargets = new Set(effectiveEntries.values());
@@ -480,8 +486,11 @@ export class StateMachineStrategy extends BaseStrategy {
       // comment for the full explanation. This site is architecturally the
       // same class of bug, just scoped to a trigger's own direct fan-out
       // targets instead of a mid-flow one.
-      const convergenceSet = nativeSubBuilder.findConvergenceSetForBranches(flow, targets);
-      const convergenceBoundSet = this.fanOutBound(flow, targets, convergenceSet);
+      // Read from this trigger (#282): a loop another trigger joins
+      // elsewhere is read from where this trigger's run joins it.
+      const entries = this.triggerEntry(flow, idx);
+      const convergenceSet = nativeSubBuilder.findConvergenceSetForBranches(flow, targets, entries);
+      const convergenceBoundSet = this.fanOutBound(flow, targets, convergenceSet, entries);
 
       // Build parallel action calls for all target nodes.
       //
@@ -505,11 +514,15 @@ export class StateMachineStrategy extends BaseStrategy {
       // Branches that meet again before the boundary when not all of them
       // do are one branch, a parallel of their own followed by where they
       // meet (#99, NativeStrategy.buildParallelBranches).
-      const parallelActions = nativeSubBuilder
-        .buildParallelBranchesForTargets(flow, targets, convergenceBoundSet)
-        .map(({ targets: branchTargets, steps }) =>
-          this.parallelBranchStep(flow, branchTargets, steps)
-        );
+      const parallelActions = this.branchGroups(
+        flow,
+        targets,
+        convergenceBoundSet,
+        entries[0],
+        entries
+      ).map(({ targets: branchTargets, steps }) =>
+        this.parallelBranchStep(flow, branchTargets, steps)
+      );
 
       // 2+ sibling convergence nodes (bug #12): current_node must stay a
       // single scalar dispatch value, so the second-level fan-out among
@@ -520,7 +533,7 @@ export class StateMachineStrategy extends BaseStrategy {
       const extraSequenceSteps: unknown[] = [];
       let resolvedNextNode: string = convergenceSet[0] ?? 'END';
       if (convergenceSet.length > 1) {
-        const inner = this.buildFanOutFromTargets(flow, convergenceSet);
+        const inner = this.buildFanOutFromTargets(flow, convergenceSet, [], entries[0]);
         extraSequenceSteps.push(...inner.extraSteps);
         resolvedNextNode = inner.nextNode;
       }
@@ -629,7 +642,13 @@ export class StateMachineStrategy extends BaseStrategy {
     }
 
     const targets = edges.map((e) => e.target);
-    const result = this.buildFanOutFromTargets(flow, targets);
+    const backEdgeIds = findBackEdges(flow);
+    const result = this.buildFanOutFromTargets(
+      flow,
+      targets,
+      edges.filter((e) => backEdgeIds.has(e.id)).map((e) => e.target),
+      node.id
+    );
     this.recordFanOut(node.id, targets, result.extraSteps);
     return result;
   }
@@ -658,10 +677,14 @@ export class StateMachineStrategy extends BaseStrategy {
    * forward convergence point, but ARE the tail end of a loop body -- so
    * their real shared continuation is looping back to the loop's own
    * condition node, not ending the flow. Only fires when every branch's
-   * ways out are dead ends or back-edges to one and the same node; anything
-   * else returns null rather than guess.
+   * ways out are dead ends or back-edges to one and the same node; with
+   * back-edges to two, the graph is refused (#285).
    */
-  private findLoopBackConvergence(flow: FlowGraph, targetIds: string[]): string | null {
+  private findLoopBackConvergence(
+    flow: FlowGraph,
+    targetIds: string[],
+    source?: string
+  ): string | null {
     // Bug #25 (2026-09-26, found by running compiled YAML with
     // sm-interpreter.ts): this used to look only at each target's OWN
     // outgoing edges, so a branch with more than one step (`parallel: [A,
@@ -675,6 +698,8 @@ export class StateMachineStrategy extends BaseStrategy {
     // extractStateMachineFromGraph.ts applies the same rule independently.
     const backEdgeIds = findBackEdges(flow);
     let loopTarget: string | null = null;
+    let roundsAlways = false;
+    let roundsSometimes: string | undefined;
 
     for (const id of targetIds) {
       const reachable = new Set<string>();
@@ -687,16 +712,66 @@ export class StateMachineStrategy extends BaseStrategy {
           if (!backEdgeIds.has(e.id)) queue.push(e.target);
         }
       }
+      // Whether the branch goes back round, and on every path or only some.
+      const goesRoundFrom = [...reachable].find((nodeId) =>
+        this.getOutgoingEdges(flow, nodeId).some(
+          (e) => backEdgeIds.has(e.id) && !reachable.has(e.target)
+        )
+      );
+      const ends = [...reachable].some((nodeId) => {
+        const out = this.getOutgoingEdges(flow, nodeId);
+        if (out.length === 0) return true;
+        const node = flow.nodes.find((n) => n.id === nodeId);
+        return (
+          node?.type === 'condition' &&
+          !(
+            out.some((e) => e.sourceHandle === 'true') &&
+            out.some((e) => e.sourceHandle === 'false')
+          )
+        );
+      });
+      if (goesRoundFrom !== undefined) {
+        if (ends) roundsSometimes ??= goesRoundFrom;
+        else roundsAlways = true;
+      }
       for (const nodeId of reachable) {
         for (const e of this.getOutgoingEdges(flow, nodeId)) {
           if (!backEdgeIds.has(e.id) || reachable.has(e.target)) continue;
-          if (loopTarget !== null && loopTarget !== e.target) return null;
+          if (loopTarget !== null && loopTarget !== e.target) {
+            // #285: two branches each going round a loop of their own go on
+            // separately, each round of one starting the other again (the
+            // canvas's graph walk): no automation runs that. Written as a
+            // parallel ending the run, it stopped where the canvas goes round.
+            throw new GraphClaimError(
+              `the branches of a parallel${source ? ` after "${this.stepName(flow, source)}"` : ''} ` +
+                'go back round two different loops, so each would go round on its own, which ' +
+                "Home Assistant can't run. Lead the branches back to one step, or move one of " +
+                'them out of the loop'
+            );
+          }
           loopTarget = e.target;
         }
       }
     }
 
+    // Branches that go back round only on some paths, none on every path:
+    // the round waits for them, but whether it comes depends on those
+    // branches -- written as every round going on, the loop never ended
+    // where the canvas's does (#134's loops, saved since #284 until the run
+    // check compared runs the YAML never finishes, #285).
+    if (loopTarget !== null && !roundsAlways && roundsSometimes !== undefined) {
+      throw new GraphClaimError(
+        `a branch of a parallel${source ? ` after "${this.stepName(flow, source)}"` : ''} goes ` +
+          `back round its loop only on some paths (from "${this.stepName(flow, roundsSometimes)}"), ` +
+          "and no branch always does: Home Assistant can't let the branches decide that together"
+      );
+    }
     return loopTarget;
+  }
+
+  /** A step as the person sees it: its name, or its id. */
+  private stepName(flow: FlowGraph, id: string): string {
+    return String(flow.nodes.find((n) => n.id === id)?.data.alias ?? id);
   }
 
   /**
@@ -706,7 +781,13 @@ export class StateMachineStrategy extends BaseStrategy {
    * reachable targets (a shared loop) are left alone, since neither
    * one-way-dominates the other there.
    */
-  private filterIndependentFanOutTargets(flow: FlowGraph, targetIds: string[]): string[] {
+  private filterIndependentFanOutTargets(
+    flow: FlowGraph,
+    targetIds: string[],
+    /** The step that fans out: reaching a target through it is its next
+     * pass, not a shortcut (#285). */
+    source?: string
+  ): string[] {
     if (targetIds.length <= 1) return targetIds;
 
     // Exclude back edges from the reachability walk, same convention used
@@ -730,7 +811,7 @@ export class StateMachineStrategy extends BaseStrategy {
       while (queue.length > 0) {
         const id = queue.shift()!;
         if (id === toId) return true;
-        if (visited.has(id)) continue;
+        if (visited.has(id) || id === source) continue;
         visited.add(id);
         for (const edge of this.getOutgoingEdges(flow, id)) {
           if (backEdgeIds.has(edge.id)) continue;
@@ -748,10 +829,194 @@ export class StateMachineStrategy extends BaseStrategy {
     );
   }
 
+  /**
+   * Bug #267: among a fan-out's targets, the one where the flow carries on
+   * -- a step other paths also lead to (a meeting point), or a loop's test
+   * at its end -- when no other target gets there; null when there isn't
+   * exactly one. extractStateMachineFromGraph.ts reads it the same way.
+   */
+  private carryOnTarget(flow: FlowGraph, targetIds: string[]): string | null {
+    const backEdgeIds = findBackEdges(flow);
+    const lines = flow.edges.filter((e) => e.type !== 'hint' && e.type !== 'choose-hint');
+    const reaches = (fromId: string, toId: string): boolean => {
+      const seen = new Set<string>();
+      const queue = [fromId];
+      while (queue.length > 0) {
+        const id = queue.shift()!;
+        if (id === toId) return true;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        for (const e of lines) if (e.source === id && !backEdgeIds.has(e.id)) queue.push(e.target);
+      }
+      return false;
+    };
+    const nodeOf = (id: string) => flow.nodes.find((n) => n.id === id);
+    // A loop's own test at its end (a do-while, an until, a count loop):
+    // not a choose case or an if going back to an enclosing while's head.
+    const testAtEnd = (id: string) => {
+      const node = nodeOf(id);
+      return lines.some((e) => {
+        const head = nodeOf(e.target);
+        if (e.source !== id || !backEdgeIds.has(e.id) || !node || !head) return false;
+        const kind = classifyLoopBackEdge(node, head, e.sourceHandle);
+        return kind === 'do-while' || kind === 'until' || kind === 'count';
+      });
+    };
+    const carries = (id: string) =>
+      lines.filter((e) => e.target === id && !backEdgeIds.has(e.id)).length > 1 || testAtEnd(id);
+    const found = targetIds.filter(
+      (id) => carries(id) && !targetIds.some((other) => other !== id && reaches(other, id))
+    );
+    if (found.length !== 1) return null;
+    // A target that goes back round a loop from outside its own steps is
+    // the way the flow carries on itself (a while's body beside a meeting
+    // point): not a branch beside.
+    const region = (start: string) => {
+      const seen = new Set<string>();
+      const queue = [start];
+      while (queue.length > 0) {
+        const id = queue.pop()!;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        for (const e of lines) if (e.source === id && !backEdgeIds.has(e.id)) queue.push(e.target);
+      }
+      return seen;
+    };
+    const goesRound = (id: string) => {
+      const own = region(id);
+      return lines.some((e) => backEdgeIds.has(e.id) && own.has(e.source) && !own.has(e.target));
+    };
+    return targetIds.some((id) => id !== found[0] && goesRound(id)) ? null : found[0];
+  }
+
+  /**
+   * #267: the targets whose every way on ends without getting anywhere
+   * else goes -- no step other lines also lead to, no loop's test, no line
+   * back round a loop. extractStateMachineFromGraph.ts reads it the same
+   * way.
+   */
+  private endingAlone(flow: FlowGraph, targetIds: string[]): string[] {
+    const backEdgeIds = findBackEdges(flow);
+    const lines = flow.edges.filter((e) => e.type !== 'hint' && e.type !== 'choose-hint');
+    const forwardIn = (id: string) =>
+      lines.filter((e) => e.target === id && !backEdgeIds.has(e.id)).length;
+    const endsAlone = (start: string): boolean => {
+      const seen = new Set<string>();
+      const queue = [start];
+      while (queue.length > 0) {
+        const id = queue.pop()!;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        if (forwardIn(id) > 1) return false;
+        for (const e of lines) {
+          if (e.source !== id) continue;
+          if (backEdgeIds.has(e.id)) return false;
+          queue.push(e.target);
+        }
+      }
+      return true;
+    };
+    return targetIds.filter(endsAlone);
+  }
+
+  /**
+   * #99: whether `meeting` is where these branches meet on their own --
+   * nothing else leads into them or into it -- so it runs once after them,
+   * inside the parallel beside the others (not waiting for those). When
+   * something else also leads there (an enclosing if's paths meeting) the
+   * branches beside are waited for (#267).
+   * extractStateMachineFromGraph.ts reads it the same way.
+   */
+  private theirOwnMeeting(flow: FlowGraph, branches: string[], meeting: string): boolean {
+    const backEdgeIds = findBackEdges(flow);
+    const lines = flow.edges.filter(
+      (e) => e.type !== 'hint' && e.type !== 'choose-hint' && !backEdgeIds.has(e.id)
+    );
+    const region = new Set<string>();
+    const queue = [...branches];
+    while (queue.length > 0) {
+      const id = queue.pop()!;
+      if (region.has(id) || id === meeting) continue;
+      region.add(id);
+      for (const e of lines) if (e.source === id) queue.push(e.target);
+    }
+    const sources = new Set(
+      lines.filter((e) => branches.includes(e.target) && !region.has(e.source)).map((e) => e.source)
+    );
+    if (sources.size !== 1) return false;
+    return [...region, meeting].every((id) =>
+      lines.every((e) => e.target !== id || region.has(e.source) || sources.has(e.source))
+    );
+  }
+
+  /**
+   * #265: one target gone back to round a loop, the others steps beside it
+   * that lead nowhere the loop does (their own region); null otherwise.
+   * extractStateMachineFromGraph.ts reads it the same way.
+   */
+  private stepsBesideGoingRound(
+    flow: FlowGraph,
+    targetIds: string[],
+    goesRound: string[]
+  ): { round: string; sides: string[] } | null {
+    const round = [...new Set(goesRound.filter((t) => targetIds.includes(t)))];
+    if (round.length !== 1) return null;
+    const sides = [...new Set(targetIds.filter((t) => t !== round[0]))];
+    if (sides.length === 0) return null;
+    const backEdgeIds = findBackEdges(flow);
+    const lines = flow.edges.filter((e) => e.type !== 'hint' && e.type !== 'choose-hint');
+    const reach = (starts: string[]) => {
+      const seen = new Set<string>();
+      const queue = [...starts];
+      while (queue.length > 0) {
+        const id = queue.pop()!;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        for (const e of lines) if (e.source === id && !backEdgeIds.has(e.id)) queue.push(e.target);
+      }
+      return seen;
+    };
+    const beside = reach(sides);
+    const loop = reach([round[0]]);
+    // The steps beside don't lead back into the loop.
+    for (const e of lines) {
+      if (beside.has(e.source) && loop.has(e.target) && !beside.has(e.target)) return null;
+    }
+    return { round: round[0], sides };
+  }
+
   private buildFanOutFromTargets(
     flow: FlowGraph,
-    rawTargetIds: string[]
+    rawTargetIds: string[],
+    /** Targets the node goes back to round a loop (#265). */
+    goesRound: string[] = [],
+    /** The step that fans out (#284: a branch that goes round back to it
+     * isn't a branch machine). */
+    source?: string
   ): { extraSteps: unknown[]; nextNode: string } {
+    // #284: inside a branch machine, a line out of the branch is where it
+    // ends, not a branch of this fan-out.
+    rawTargetIds = this.inMachine(rawTargetIds);
+    goesRound = this.inMachine(goesRound);
+    // #265: a line back round a loop beside steps of their own: they run
+    // first, as steps of this state, then the loop goes round (the next
+    // round waits for them). The shortcut filter below took them for steps
+    // the loop reaches, and dropped them.
+    const besideRound = this.stepsBesideGoingRound(flow, rawTargetIds, goesRound);
+    if (besideRound !== null) {
+      const groups = this.branchGroups(flow, besideRound.sides, null, source);
+      const extraSteps =
+        groups.length === 1
+          ? groups[0].steps
+          : [
+              {
+                parallel: groups.map(({ targets: branchTargets, steps }) =>
+                  this.parallelBranchStep(flow, branchTargets, steps)
+                ),
+              },
+            ];
+      return { extraSteps, nextNode: besideRound.round };
+    }
     // A same-handle edge list can legitimately contain more than genuine
     // sibling branches: the parser also emits "shortcut" edges (e.g. a
     // condition whose own true-path terminal also gets wired directly to
@@ -766,13 +1031,66 @@ export class StateMachineStrategy extends BaseStrategy {
     // target can reach but that can't reach back (one-way dominance, not a
     // shared loop) isn't an independent branch -- it's already covered by
     // that other branch's own continuation.
-    const targetIds = this.filterIndependentFanOutTargets(flow, rawTargetIds);
+    const targetIds = this.filterIndependentFanOutTargets(flow, rawTargetIds, source);
 
     if (targetIds.length === 0) {
       return { extraSteps: [], nextNode: 'END' };
     }
     if (targetIds.length === 1) {
       return { extraSteps: [], nextNode: targetIds[0] };
+    }
+
+    // Bug #267: a line to where the flow carries on -- a meeting point, a
+    // loop's test at its end -- beside branches that don't get there: the
+    // branches run first, as steps of this state, then the flow carries on
+    // there (what follows waits for them). They used to run in a parallel
+    // with the meeting point's steps inlined, so a Stop in one came after.
+    const carry = this.carryOnTarget(flow, targetIds);
+    if (carry !== null) {
+      const sides = targetIds.filter((id) => id !== carry);
+      const groups = this.branchGroups(flow, sides, this.fanOutBound(flow, sides, [carry]), source);
+      const extraSteps =
+        groups.length === 1
+          ? groups[0].steps
+          : [
+              {
+                parallel: groups.map(({ targets: branchTargets, steps }) =>
+                  this.parallelBranchStep(flow, branchTargets, steps)
+                ),
+              },
+            ];
+      return { extraSteps, nextNode: carry };
+    }
+
+    // #267, the same with several branches going on together: branches
+    // that end on their own beside branches that meet somewhere. They run
+    // alongside those, and where those meet waits for them (written as one
+    // parallel, then the meeting point). They used to share no meeting point
+    // with the rest, so everything was inlined, a loop's test with it.
+    const alone = this.endingAlone(flow, targetIds);
+    const together = targetIds.filter((id) => !alone.includes(id));
+    if (alone.length > 0 && together.length >= 2) {
+      const rest = this.buildFanOutFromTargets(flow, together, [], source);
+      if (
+        rest.nextNode !== 'END' &&
+        flow.nodes.some((n) => n.id === rest.nextNode) &&
+        !this.theirOwnMeeting(flow, together, rest.nextNode)
+      ) {
+        const groups = this.branchGroups(flow, alone, null, source);
+        // The branches in the order they were drawn.
+        const at = (ids: string[]) => Math.min(...ids.map((id) => targetIds.indexOf(id)));
+        const branches = [
+          ...groups.map(({ targets: branchTargets, steps }) => ({
+            at: at(branchTargets),
+            step: this.parallelBranchStep(flow, branchTargets, steps),
+          })),
+          { at: at(together), step: this.parallelBranchStep(flow, together, rest.extraSteps) },
+        ].sort((a, b) => a.at - b.at);
+        return {
+          extraSteps: [{ parallel: branches.map((b) => b.step) }],
+          nextNode: rest.nextNode,
+        };
+      }
     }
 
     // Ordinary forward convergence first (excludes ALL back edges, per
@@ -801,7 +1119,7 @@ export class StateMachineStrategy extends BaseStrategy {
     let convergenceSet = this.nativeSubBuilder.findConvergenceSetForBranches(flow, targetIds);
     let boundSet = this.fanOutBound(flow, targetIds, convergenceSet);
     if (convergenceSet.length === 0) {
-      const loopBack = this.findLoopBackConvergence(flow, targetIds);
+      const loopBack = this.findLoopBackConvergence(flow, targetIds, source);
       if (loopBack) {
         convergenceSet = [loopBack];
         boundSet = new Set(convergenceSet);
@@ -810,11 +1128,9 @@ export class StateMachineStrategy extends BaseStrategy {
 
     // Branches that meet again before the boundary when not all of them do
     // are one branch (#99, NativeStrategy.buildParallelBranches).
-    const parallelActions = this.nativeSubBuilder
-      .buildParallelBranchesForTargets(flow, targetIds, boundSet)
-      .map(({ targets: branchTargets, steps }) =>
-        this.parallelBranchStep(flow, branchTargets, steps)
-      );
+    const parallelActions = this.branchGroups(flow, targetIds, boundSet, source).map(
+      ({ targets: branchTargets, steps }) => this.parallelBranchStep(flow, branchTargets, steps)
+    );
 
     const extraSteps: unknown[] = [{ parallel: parallelActions }];
 
@@ -822,7 +1138,7 @@ export class StateMachineStrategy extends BaseStrategy {
       return { extraSteps, nextNode: convergenceSet[0] ?? 'END' };
     }
 
-    const inner = this.buildFanOutFromTargets(flow, convergenceSet);
+    const inner = this.buildFanOutFromTargets(flow, convergenceSet, [], source);
     extraSteps.push(...inner.extraSteps);
     return { extraSteps, nextNode: inner.nextNode };
   }
@@ -841,10 +1157,11 @@ export class StateMachineStrategy extends BaseStrategy {
   private fanOutBound(
     flow: FlowGraph,
     targetIds: string[],
-    convergenceSet: string[]
+    convergenceSet: string[],
+    entries: string[] = []
   ): Set<string> | null {
     if (convergenceSet.length === 0) return null;
-    const backEdgeIds = findBackEdges(flow);
+    const backEdgeIds = findBackEdges(flow, entries);
     const edgesOut = (id: string) =>
       this.getOutgoingEdges(flow, id).filter((e) => e.type !== 'hint' && e.type !== 'choose-hint');
     const forward = (id: string) =>
@@ -875,11 +1192,11 @@ export class StateMachineStrategy extends BaseStrategy {
     }
     for (const cut of cuts) {
       if (!convergenceSet.some((id) => this.alwaysReaches(flow, id, cut, edgesOut, backEdgeIds))) {
-        const name = flow.nodes.find((n) => n.id === cut)?.data.alias ?? cut;
+        const name = this.stepName(flow, cut);
         throw new GraphClaimError(
-          `a branch of a parallel leads to "${String(name)}", which also comes after where the ` +
+          `a branch of a parallel leads to "${name}", which also comes after where the ` +
             `branches meet, but only on some paths from there. Connect the branch to where the ` +
-            `branches meet, or make "${String(name)}" run on every path after that point`
+            `branches meet, or make "${name}" run on every path after that point`
         );
       }
     }
@@ -939,7 +1256,9 @@ export class StateMachineStrategy extends BaseStrategy {
     const byId = new Map(flow.nodes.map((n) => [n.id, n]));
     const forwardOut = (id: string) =>
       edges.filter((e) => e.source === id && !backEdgeIds.has(e.id));
-    const heads = [...new Set(edges.filter((e) => backEdgeIds.has(e.id)).map((e) => e.target))].sort();
+    const heads = [
+      ...new Set(edges.filter((e) => backEdgeIds.has(e.id)).map((e) => e.target)),
+    ].sort();
     const budgets: LoopBudget[] = [];
     for (const head of heads) {
       const headNode = byId.get(head);
@@ -1006,12 +1325,18 @@ export class StateMachineStrategy extends BaseStrategy {
       if (typeof (next.data as Record<string, unknown>)._blockKey === 'string') break;
       const waysIn = flow.edges.filter(
         (e) =>
-          e.target === next.id && !backEdgeIds.has(e.id) && e.type !== 'hint' && e.type !== 'choose-hint'
+          e.target === next.id &&
+          !backEdgeIds.has(e.id) &&
+          e.type !== 'hint' &&
+          e.type !== 'choose-hint'
       );
       if (waysIn.length !== 1) break;
       const no = flow.edges.filter(
         (e) =>
-          e.source === next.id && e.sourceHandle === 'false' && e.type !== 'hint' && e.type !== 'choose-hint'
+          e.source === next.id &&
+          e.sourceHandle === 'false' &&
+          e.type !== 'hint' &&
+          e.type !== 'choose-hint'
       );
       const noForward = no.filter((e) => !backEdgeIds.has(e.id));
       const foldable =
@@ -1053,6 +1378,98 @@ export class StateMachineStrategy extends BaseStrategy {
     return { ...block, sequence: [...first, ...sequence] };
   }
 
+  /**
+   * #284: a fan-out's branches (grouped where they meet, #99), each as
+   * native steps or, when the branch goes round a loop of its own, as a
+   * small state machine of its own (utils/branchMachine.ts): no loop needs
+   * recognizing there, so none can be misread (the class behind
+   * #259-#282).
+   */
+  private branchGroups(
+    flow: FlowGraph,
+    targetIds: string[],
+    givenBound: Set<string> | null,
+    source: string | undefined,
+    entries: string[] = []
+  ): { targets: string[]; steps: unknown[] }[] {
+    // Inside a branch machine, the steps outside its branch are where the
+    // branch ends: a fan-out in it never runs them.
+    const bound = this.withinMachine(flow, givenBound);
+    // A branch written as a machine isn't walked as native steps: a loop
+    // there is what the walk can misread.
+    const regions = new Map<string, Set<string> | null>();
+    const regionOf = (group: string[]) => {
+      const key = group.join('\u0000');
+      if (!regions.has(key)) {
+        regions.set(
+          key,
+          source === undefined ? null : branchMachineRegion(flow, group, bound, source)
+        );
+      }
+      return regions.get(key) ?? null;
+    };
+    const groups = this.nativeSubBuilder.buildParallelBranchesForTargets(
+      flow,
+      targetIds,
+      bound,
+      entries,
+      regionOf
+    );
+    return groups.map((group) => {
+      const region = regionOf(group.targets);
+      return region
+        ? { targets: group.targets, steps: this.branchMachine(flow, region, group.targets[0]) }
+        : group;
+    });
+  }
+
+  /** The steps of the branch machine for `region`, starting at `entry`:
+   * one state per step, generated as the main machine's are, a move out
+   * of the branch made a move to END, then renamed onto its own
+   * variables. */
+  private branchMachine(flow: FlowGraph, region: Set<string>, entry: string): unknown[] {
+    const budgets = this.loopBudgets(flow);
+    this.machineRegions.push(region);
+    let cases: unknown[];
+    try {
+      cases = flow.nodes
+        .filter((n) => region.has(n.id) && n.type !== 'trigger' && n.type !== 'start')
+        .map((n) => this.withLoopBookkeeping(this.generateNodeBlock(flow, n), n, budgets));
+    } finally {
+      this.machineRegions.pop();
+    }
+    const name = branchMachineName(region, entry);
+    const names = branchNames(name);
+    return branchMachineSteps(name, entry, {
+      choose: renameMachineVariables(endOutside(cases, region), MAIN_NAMES, names),
+      default: dispatchDefault(names.node),
+    });
+  }
+
+  /**
+   * #284: the branch machines whose states are being written, innermost
+   * last. A state's lines out of its branch are where the branch ends (the
+   * enclosing run goes on where the branches meet): they are no target of
+   * the state's fan-out, and the steps there are a fan-out's bound.
+   */
+  private machineRegions: Set<string>[] = [];
+
+  /** `targets` without those outside the innermost branch machine, if any. */
+  private inMachine(targets: string[]): string[] {
+    const region = this.machineRegions.at(-1);
+    return region ? targets.filter((id) => region.has(id)) : targets;
+  }
+
+  /** `bound` with every step outside the innermost branch machine, if any. */
+  private withinMachine(flow: FlowGraph, bound: Set<string> | null): Set<string> | null {
+    const region = this.machineRegions.at(-1);
+    if (!region) return bound;
+    return new Set([
+      ...(bound ?? []),
+      ...flow.nodes.map((n) => n.id).filter((id) => !region.has(id)),
+    ]);
+  }
+
   /** One branch of a fan-out's `parallel:` as a step: a single step as
    * itself (matching NativeStrategy's flattening), several as a
    * `sequence:`, and a logged placeholder when the branch built nothing,
@@ -1061,7 +1478,7 @@ export class StateMachineStrategy extends BaseStrategy {
     if (steps.length === 0) {
       const known = targets.every((id) => flow.nodes.some((n) => n.id === id));
       const message = `${known ? 'Node' : 'Unknown node'}: ${targets.join(', ')}`;
-      return { service: 'system_log.write', data: { message } };
+      return { action: 'system_log.write', data: { message } };
     }
     return bareParallelBranch(steps) ?? { sequence: steps };
   }
@@ -1076,57 +1493,15 @@ export class StateMachineStrategy extends BaseStrategy {
    * own false edge loops back, or a later member of its condition list
    * (`until: [A, B]`, bug #27's list convention) -- returns the loop's exit
    * (the last member's true targets); null for any other condition.
-   * The head is classified the way NativeStrategy.classifyRepeatBackEdge
-   * does: a `repeat_until` head, or a plain condition (no `_blockKey`)
-   * whose false back-edge doesn't go to a `repeat_while` head.
-   * extractStateMachineFromGraph.ts applies the same rule independently.
+   * Which conditions guard a loop is read from the loop structure
+   * (analyzer/loops.ts, #283): a plain condition whose "no" side stays in
+   * its loop and whose "yes" side leaves it, or an Until card's test.
    */
   private untilErrorExitTargets(flow: FlowGraph, node: ConditionNode): string[] | null {
-    // A disabled condition is never evaluated, so it can't fail.
-    if (node.data.enabled === false) return null;
-    const backEdgeIds = findBackEdges(flow);
-    const blockKey = (n: FlowNode | undefined) =>
-      (n?.data as Record<string, unknown> | undefined)?._blockKey;
-    const edgesOf = (id: string, handle: 'true' | 'false') =>
-      flow.edges.filter((e) => e.source === id && e.sourceHandle === handle);
-    // A list member: no false edge of its own, sharing its parent's.
-    const listParent = (id: string): FlowNode | null => {
-      if (edgesOf(id, 'false').length > 0) return null;
-      if (this.andMemberFalseTargets(flow, id).length === 0) return null;
-      const incoming = flow.edges.filter((e) => e.target === id && !backEdgeIds.has(e.id));
-      return incoming.length === 1 ? (this.getNode(flow, incoming[0].source) ?? null) : null;
-    };
-
-    let head: FlowNode = node;
-    const seen = new Set<string>();
-    for (;;) {
-      if (seen.has(head.id)) return null;
-      seen.add(head.id);
-      const ownFalse = edgesOf(head.id, 'false');
-      if (ownFalse.length > 0) {
-        const isUntil = ownFalse.some((e) => {
-          if (!backEdgeIds.has(e.id)) return false;
-          const key = blockKey(head);
-          if (key === 'repeat_until') return true;
-          return key === undefined && blockKey(this.getNode(flow, e.target)) !== 'repeat_while';
-        });
-        if (!isUntil) return null;
-        break;
-      }
-      const parent = listParent(head.id);
-      if (parent?.type !== 'condition') return null;
-      head = parent;
-    }
-
-    let last: FlowNode = head;
-    for (;;) {
-      const trueEdges = edgesOf(last.id, 'true').filter((e) => !backEdgeIds.has(e.id));
-      if (trueEdges.length !== 1) break;
-      const next = this.getNode(flow, trueEdges[0].target);
-      if (next?.type !== 'condition' || listParent(next.id)?.id !== last.id) break;
-      last = next;
-    }
-    return edgesOf(last.id, 'true').map((e) => e.target);
+    // #283: read from the loops themselves (analyzer/loops.ts), the same
+    // rule as the graph walk's, so the answer never depends on which line
+    // a search met first (#277).
+    return untilExit(flow, node.id)?.map((e) => e.target) ?? null;
   }
 
   /**
@@ -1212,9 +1587,7 @@ export class StateMachineStrategy extends BaseStrategy {
     node: ConditionNode,
     targetId: string
   ): string[] | null {
-    const data = node.data as Record<string, unknown>;
-    if (data.condition !== 'template' || typeof data.value_template !== 'string') return null;
-    const counter = data.value_template.match(/(_repeat_counter_[A-Za-z0-9_]+)\s*<\s*\d+/)?.[1];
+    const counter = counterVariableOf(node);
     if (!counter) return null;
     const target = this.getNode(flow, targetId);
     if (target?.type !== 'set_variables') return null;
@@ -1241,12 +1614,25 @@ export class StateMachineStrategy extends BaseStrategy {
     const trueTargets = trueEdges.flatMap(
       (e) => this.countLoopRepeatTargets(flow, node, e.target) ?? [e.target]
     );
-    const trueFanOut = this.buildFanOutFromTargets(flow, trueTargets);
+    const backEdgeIds = findBackEdges(flow);
+    const goesRound = (side: FlowEdge[]) =>
+      side.filter((e) => backEdgeIds.has(e.id)).map((e) => e.target);
+    const trueFanOut = this.buildFanOutFromTargets(
+      flow,
+      trueTargets,
+      goesRound(trueEdges),
+      node.id
+    );
     const falseTargets =
       falseEdges.length > 0
         ? falseEdges.map((e) => e.target)
         : this.andMemberFalseTargets(flow, node.id);
-    const falseFanOut = this.buildFanOutFromTargets(flow, falseTargets);
+    const falseFanOut = this.buildFanOutFromTargets(
+      flow,
+      falseTargets,
+      goesRound(falseEdges),
+      node.id
+    );
     // Recorded as the node's own edges: for a count loop's test that's the
     // edge back to the loop's init node (the graph convention), not the
     // init node's successors it's rendered as. An AND-list member's
@@ -1263,7 +1649,9 @@ export class StateMachineStrategy extends BaseStrategy {
     const currentNodeId = node.id;
     // Bug #63: an until test that can't be evaluated ends the loop in HA.
     const errorExit = this.untilErrorExitTargets(flow, node);
-    const errorFanOut = errorExit ? this.buildFanOutFromTargets(flow, errorExit) : null;
+    const errorFanOut = errorExit
+      ? this.buildFanOutFromTargets(flow, errorExit, [], node.id)
+      : null;
 
     // Always use a native HA condition inside a real if/then/else — each
     // branch assigns current_node a plain string. This used to be

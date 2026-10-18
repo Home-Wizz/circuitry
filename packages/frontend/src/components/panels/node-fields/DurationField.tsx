@@ -5,6 +5,7 @@ import { Label } from '@/components/ui/label';
 import { HaSelector } from '@/ha';
 
 export type DurationObject = {
+  days?: number | string;
   hours?: number | string;
   minutes?: number | string;
   seconds?: number | string;
@@ -68,11 +69,23 @@ export interface DurationInputProps {
   milliseconds?: boolean;
 }
 
+/** Whether `field` of a duration is set to something other than 0. */
+function hasField(value: DurationValue | undefined, field: keyof DurationObject): boolean {
+  const v = durationToObject(value)?.[field];
+  return v !== undefined && v !== '' && Number(v) !== 0;
+}
+
 /** Whether a duration has milliseconds (`{milliseconds: 500}`, "0:00:01.5", 1.5). */
 export function hasMilliseconds(value: DurationValue | undefined): boolean {
-  const ms = durationToObject(value)?.milliseconds;
-  return ms !== undefined && Number(ms) !== 0;
+  return hasField(value, 'milliseconds');
 }
+
+/** Whether a duration has days (`{days: 1}`; a string or number never does). */
+export function hasDays(value: DurationValue | undefined): boolean {
+  return hasField(value, 'days');
+}
+
+type DurationBoxField = keyof DurationObject;
 
 /**
  * Reusable duration input component without label/description wrapper.
@@ -90,8 +103,18 @@ export function DurationInput({
 }: DurationInputProps) {
   const { t } = useTranslation(['common', 'nodes']);
   const obj: DurationObject = durationToObject(value) ?? {};
+  // HA's picker sends back days only when asked for them, so a duration
+  // that has some must ask, or any edit drops them (bug #194).
+  const days = hasDays(value);
+  const fields: DurationBoxField[] = [
+    ...(days ? (['days'] as const) : []),
+    'hours',
+    'minutes',
+    'seconds',
+    ...(milliseconds ? (['milliseconds'] as const) : []),
+  ];
 
-  const handleObjChange = (field: 'hours' | 'minutes' | 'seconds' | 'milliseconds', v: string) => {
+  const handleObjChange = (field: DurationBoxField, v: string) => {
     const num = v === '' ? undefined : Number(v);
     const updated = {
       ...obj,
@@ -108,7 +131,12 @@ export function DurationInput({
 
   return (
     <HaSelector
-      selector={{ duration: milliseconds ? { enable_millisecond: true } : {} }}
+      selector={{
+        duration: {
+          ...(milliseconds ? { enable_millisecond: true } : {}),
+          ...(days ? { enable_day: true } : {}),
+        },
+      }}
       value={obj}
       disabled={disabled}
       onChange={(v) => {
@@ -122,64 +150,22 @@ export function DurationInput({
       }}
       fallback={
         <div className="flex gap-2">
-          <div className="flex-1">
-            <Label className="text-muted-foreground text-xs">
-              {t('nodes:durationField.hours')}
-            </Label>
-            <Input
-              type="number"
-              min={0}
-              value={obj.hours ?? ''}
-              onChange={(e) => handleObjChange('hours', e.target.value)}
-              placeholder="0"
-              className="mt-1"
-              disabled={disabled}
-            />
-          </div>
-          <div className="flex-1">
-            <Label className="text-muted-foreground text-xs">
-              {t('nodes:durationField.minutes')}
-            </Label>
-            <Input
-              type="number"
-              min={0}
-              value={obj.minutes ?? ''}
-              onChange={(e) => handleObjChange('minutes', e.target.value)}
-              placeholder="0"
-              className="mt-1"
-              disabled={disabled}
-            />
-          </div>
-          <div className="flex-1">
-            <Label className="text-muted-foreground text-xs">
-              {t('nodes:durationField.seconds')}
-            </Label>
-            <Input
-              type="number"
-              min={0}
-              value={obj.seconds ?? ''}
-              onChange={(e) => handleObjChange('seconds', e.target.value)}
-              placeholder="0"
-              className="mt-1"
-              disabled={disabled}
-            />
-          </div>
-          {milliseconds && (
-            <div className="flex-1">
+          {fields.map((field) => (
+            <div key={field} className="flex-1">
               <Label className="text-muted-foreground text-xs">
-                {t('nodes:durationField.milliseconds')}
+                {t(`nodes:durationField.${field}`)}
               </Label>
               <Input
                 type="number"
                 min={0}
-                value={obj.milliseconds ?? ''}
-                onChange={(e) => handleObjChange('milliseconds', e.target.value)}
+                value={obj[field] ?? ''}
+                onChange={(e) => handleObjChange(field, e.target.value)}
                 placeholder="0"
                 className="mt-1"
                 disabled={disabled}
               />
             </div>
-          )}
+          ))}
         </div>
       }
     />

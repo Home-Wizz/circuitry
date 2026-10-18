@@ -87,6 +87,14 @@ export function ThresholdValueField(props: ThresholdValueFieldProps) {
   // The unit the number is in: its own, or the default a new one gets.
   const shownUnit =
     (!bare && thresholdNumber(numberValue, props.value, unit, units).unit_of_measurement) || unit;
+  /** A number typed into the box; a cleared box saves nothing (it saved 0,
+   * a real threshold; bug #211) until a number is typed. */
+  const emitTyped = (v: unknown) => {
+    if (v === undefined || v === null || v === '') return;
+    const n = typeof v === 'number' ? v : Number(v);
+    if (Number.isFinite(n)) emitNumber(n);
+  };
+
   const emitUnit = (u: string) => {
     if (!bare) {
       (onChange as WrappedThresholdValueFieldProps['onChange'])({ number: numberValue, unit_of_measurement: u });
@@ -109,7 +117,11 @@ export function ThresholdValueField(props: ThresholdValueFieldProps) {
           variant={isEntity ? 'outline' : 'secondary'}
           size="sm"
           className="h-7 flex-1 text-xs"
-          onClick={() => emitNumber(0)}
+          // The chosen mode's button changes nothing (it set the value to 0,
+          // bug #211); the other one switches.
+          onClick={() => {
+            if (isEntity) emitNumber(0);
+          }}
         >
           {t('nodes:triggers.native.thresholdModeNumber')}
         </Button>
@@ -118,7 +130,9 @@ export function ThresholdValueField(props: ThresholdValueFieldProps) {
           variant={isEntity ? 'secondary' : 'outline'}
           size="sm"
           className="h-7 flex-1 text-xs"
-          onClick={() => emitEntity('')}
+          onClick={() => {
+            if (!isEntity) emitEntity('');
+          }}
         >
           {t('nodes:triggers.native.thresholdModeEntity')}
         </Button>
@@ -145,7 +159,7 @@ export function ThresholdValueField(props: ThresholdValueFieldProps) {
                 number: { min, max, step, mode: 'box', unit_of_measurement: units ? undefined : shownUnit },
               }}
               value={numberValue}
-              onChange={(v) => emitNumber(typeof v === 'number' ? v : Number(v) || 0)}
+              onChange={(v) => emitTyped(v)}
               fallback={
                 <Input
                   type="number"
@@ -153,7 +167,7 @@ export function ThresholdValueField(props: ThresholdValueFieldProps) {
                   max={max}
                   step={step}
                   value={numberValue}
-                  onChange={(e) => emitNumber(Number(e.target.value))}
+                  onChange={(e) => emitTyped(e.target.value)}
                 />
               }
             />

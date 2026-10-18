@@ -182,8 +182,17 @@
       "debug": "Debug",
       "notset": "Lowest level (NOTSET)"
     },
-    "initialState": "Initial state",
-    "initialStateDescription": "Whether the automation starts enabled or disabled when Home Assistant starts.",
+    "initialState": "When Home Assistant starts",
+    "initialStates": {
+      "keep": "Keep last state",
+      "on": "Turn on",
+      "off": "Turn off"
+    },
+    "initialStateDescriptions": {
+      "keep": "Comes back on or off as it was before the restart. Home Assistant's own default.",
+      "on": "Always on after a restart, even if it was turned off before.",
+      "off": "Always off after a restart, until it is turned on."
+    },
     "storedTraces": "Stored traces",
     "storedTracesDescription": "Number of debug traces to keep for this automation (default: 5).",
     "variables": "Automation variables",
@@ -255,6 +264,7 @@
     "useValue": "Use value"
   },
   "toolsMenu": {
+    "selfCheck": "Check my setup…",
     "settings": "Settings…",
     "settingsDescription": "How it runs, its traces and variables. Saved with the automation.",
     "rename": "Rename",
@@ -276,6 +286,29 @@
     "renamedToast": "Renamed to \"{{name}}\"",
     "categoryAssignedToast": "Category updated",
     "deletedToast": "Deleted \"{{name}}\""
+  },
+  "selfCheck": {
+    "title": "Check my setup",
+    "description": "Opens each of your automations the way the editor does and checks that its canvas runs as it does. Nothing is changed in Home Assistant, and nothing leaves it.",
+    "progress": "Checking {{done}} of {{total}}…",
+    "stop": "Stop",
+    "copy": "Copy report",
+    "copied": "Report copied",
+    "versionTested": "Home Assistant {{version}} is a release Circuitry is checked against",
+    "versionNewer": "Home Assistant {{version}} is newer than the releases Circuitry is checked against ({{tested}}); if something looks wrong, report it with this check's report",
+    "versionOlder": "Home Assistant {{version}} is older than the releases Circuitry is checked against ({{tested}}), but supported",
+    "versionUnsupported": "Home Assistant {{version}} is older than Circuitry supports ({{oldest}} or newer)",
+    "versionUnknown": "Home Assistant's version couldn't be read",
+    "integrationOk": "Circuitry's integration answers (it keeps each automation's canvas)",
+    "integrationMissing": "Circuitry's integration doesn't answer, so canvases aren't kept with automations: restart Home Assistant, or reinstall Circuitry",
+    "none": "No automations to check",
+    "exact": "{{count}} of {{total}} automations open exactly as they run",
+    "readOnly": "{{count}} would open read-only (the canvas would run them differently, so only a copy can be saved): {{names}}",
+    "keptElsewhere": "{{count}} are kept outside automations.yaml (a package or another file): they open, but can't be saved over: {{names}}",
+    "unreadable": "{{count}} couldn't be read: {{names}}",
+    "unchecked": "{{count}} open, but couldn't be run on test values, so weren't checked: {{names}}",
+    "leftOver": "{{count}} automation entities are left over from automations that no longer exist (remove them in Settings > Devices & services > Entities): {{names}}",
+    "stopped": "Stopped after {{done}} automations"
   },
   "sidebar": {
     "backToHa": "Back to Home Assistant",

@@ -11,7 +11,12 @@
     "categoryLabel": "Category (Optional)",
     "categoryPlaceholder": "Type an existing or new category name...",
     "labelsLabel": "Labels (Optional)",
-    "areaLabel": "Area (Optional)"
+    "areaLabel": "Area (Optional)",
+    "changedElsewhere": "This automation was changed in Home Assistant after you opened it. Press Update again to replace those changes with this version, or cancel and reopen it to see them first.",
+    "inProgress": "This automation is already being saved; wait for that save to finish.",
+    "keptElsewhere": "Kept in a YAML file; edit it there",
+    "registryNotSet": "Saved, but its icon, area, labels or category couldn't be set. Set them in Home Assistant's automation settings.",
+    "readingDiffers": "Opened read-only: the canvas doesn't run the way this automation does; save it as a copy and compare"
   },
   "import": {
     "title": "Open Automation",
@@ -58,8 +63,9 @@
     "discardDescription": "Your current automation has unsaved changes. Creating or opening a new automation will discard these changes.",
     "confirmDiscard": "Discard & Continue",
     "importSuccess": "Automation \"{{name}}\" imported successfully!",
-    "openedWarning": "Automation \"{{name}}\" opened!",
-    "openedWarningDescription": "Could not fetch configuration automatically. You can now create a new flow with the same name.",
+    "configUnavailable": "Home Assistant couldn't give this automation's settings, so it wasn't opened. Nothing was changed.",
+    "notEditable": "\"{{name}}\" opened read-only",
+    "notEditableDescription": "It's kept in a YAML file outside automations.yaml, so it can't be saved over (Home Assistant's own editor can't either). Edit it in that file, or use Save as Copy to make a new automation; turn off the original if you keep the copy.",
     "lossyImportWarning": "\"{{name}}\" imported, but not perfectly",
     "lossyImportWarningDescription": "{{count}} part(s) weren't recognized — see Settings > Repairs for details.",
     "importFailed": "Failed to import automation: {{message}}",
@@ -71,7 +77,9 @@
     "deleteDescription": "\"{{name}}\" will be permanently deleted from Home Assistant. This cannot be undone.",
     "confirmDelete": "Delete",
     "automationDeleted": "Automation \"{{name}}\" deleted.",
-    "deleteFailed": "Failed to delete automation: {{message}}"
+    "deleteFailed": "Failed to delete automation: {{message}}",
+    "readingDiffers": "\"{{name}}\" opened read-only: it may not read as it runs",
+    "readingDiffersDescription": "Run on test values, the canvas did something other than the automation it was read from ({{detail}}). Saving over it could change what it does, so only Save as Copy is offered. Edit it in Home Assistant, or compare the copy with the original."
   },
   "importYaml": {
     "title": "Import YAML Automation",

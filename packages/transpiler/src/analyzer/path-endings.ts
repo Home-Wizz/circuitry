@@ -39,10 +39,14 @@ import { findBackEdges } from './topology';
 export function normalizePathEndings(
   flow: FlowGraph,
   /** False for the graph walk: copying a tail (D5) only rewrites the graph
-   * into one a tree writes, and the walk is what checks it means the same. */
-  { copies = true }: { copies?: boolean } = {}
+   * into one a tree writes, and the walk is what checks it means the same.
+   * `stops` false for it too: a path that ends just ends there, and the walk
+   * reads what that means itself (the run ends when nothing else is still
+   * running), so a mistake in reading where a `stop` goes is one it can see. */
+  { copies = true, stops = true }: { copies?: boolean; stops?: boolean } = {}
 ): FlowGraph {
   const withChoose = copies ? copyTails(addChooseFallThrough(flow)) : addChooseFallThrough(flow);
+  if (!stops) return withChoose;
   const ends = findTreeContinuedPathEnds(withChoose);
   if (ends.length === 0) return withChoose;
   const byId = new Map(withChoose.nodes.map((n) => [n.id, n]));
@@ -163,7 +167,7 @@ function addChooseFallThrough(flow: FlowGraph): FlowGraph {
 }
 
 /** Decision D5: the most steps copied into one graph; past it, it's refused. */
-const MAX_COPIED_STEPS = 40;
+export const MAX_COPIED_STEPS = 40;
 
 /**
  * Decision D5 (2026-10-06): a path that ends inside a parallel branch,

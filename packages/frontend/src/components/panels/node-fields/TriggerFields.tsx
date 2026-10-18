@@ -116,8 +116,8 @@ export function TriggerFields({ node, onChange: onChangeRaw, entities }: Trigger
   // "By target" picker shortcut: jump straight to a `state` trigger pre-filled
   // with the chosen entity, rather than making the user pick "State Change"
   // afterward on the "By type" tab.
-  const handleSelectEntityTarget = (entityId: string) => {
-    applyTriggerSelection({ kind: 'entityTarget', entityIds: [entityId] });
+  const handleSelectEntityTarget = (entityId: string, platform?: 'state' | 'numeric_state') => {
+    applyTriggerSelection({ kind: 'entityTarget', entityIds: [entityId], platform });
   };
 
   // "By target" picker's results panel: committing one of the real

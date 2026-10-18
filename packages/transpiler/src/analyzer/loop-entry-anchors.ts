@@ -1,4 +1,5 @@
 import type { FlowEdge, FlowGraph, FlowNode } from '@circuitry/shared';
+import { counterVariableOf } from './count-loop';
 import { findBackEdges } from './topology';
 
 /**
@@ -54,10 +55,15 @@ function blockKey(node: FlowNode | undefined): unknown {
 
 function isUntilBackEdge(edge: FlowEdge, nodesById: Map<string, FlowNode>): boolean {
   const source = nodesById.get(edge.source);
+  if (source?.type !== 'condition') return false;
+  if (edge.sourceHandle === 'false') return blockKey(source) === 'repeat_until';
+  // A do-while's test (bug #259): a plain condition whose yes side goes
+  // back to the body's start -- the body comes first, as an until's does.
   return (
-    source?.type === 'condition' &&
-    edge.sourceHandle === 'false' &&
-    blockKey(source) === 'repeat_until'
+    edge.sourceHandle === 'true' &&
+    blockKey(source) === undefined &&
+    counterVariableOf(source) === undefined &&
+    blockKey(nodesById.get(edge.target)) !== 'repeat_while'
   );
 }
 
@@ -71,7 +77,7 @@ function isOtherLoopBackEdge(edge: FlowEdge, nodesById: Map<string, FlowNode>): 
   if (target.type === 'condition' && blockKey(target) === 'repeat_while') return true;
   if (source.type !== 'condition') return target.type === 'condition'; // while body end
   if (typeof blockKey(source) === 'string') return target.type === 'condition'; // body exit into a while head
-  return edge.sourceHandle === 'true'; // count test
+  return edge.sourceHandle === 'true'; // a count test, or a do-while's (bug #259)
 }
 
 function anchorOne(flow: FlowGraph): FlowGraph | null {
@@ -101,7 +107,30 @@ function anchorOne(flow: FlowGraph): FlowGraph | null {
   };
 
   for (const [targetId, backEdges] of backEdgesByTarget) {
-    const untilEdges = backEdges.filter((e) => isUntilBackEdge(e, nodesById));
+    // A do-while whose body opens with a Repeat While block: its test's yes
+    // edge goes back to that while's head from AFTER the while (reached
+    // through the head's no side, not its body) -- an outer loop, not the
+    // while body's last step exiting (bug #261: read as the latter, the
+    // do-while was lost).
+    const isDoWhileAroundWhile = (e: FlowEdge): boolean => {
+      const source = nodesById.get(e.source);
+      if (
+        source?.type !== 'condition' ||
+        e.sourceHandle !== 'true' ||
+        blockKey(source) !== undefined ||
+        counterVariableOf(source) !== undefined ||
+        blockKey(nodesById.get(e.target)) !== 'repeat_while'
+      ) {
+        return false;
+      }
+      const bodyStarts = edges
+        .filter((o) => o.source === e.target && o.sourceHandle === 'true' && !backEdgeIds.has(o.id))
+        .map((o) => o.target);
+      return !bodyStarts.some((b) => forwardReach(b, e.source));
+    };
+    const untilEdges = backEdges.filter(
+      (e) => isUntilBackEdge(e, nodesById) || isDoWhileAroundWhile(e)
+    );
     if (untilEdges.length === 0) continue;
     const loopEdges = backEdges.filter((e) => isOtherLoopBackEdge(e, nodesById));
     const sources = new Set(loopEdges.map((e) => e.source));
@@ -141,7 +170,9 @@ function anchorOne(flow: FlowGraph): FlowGraph | null {
       id: anchorId,
       type: 'join',
       position: { x: target.position.x, y: target.position.y - 80 },
-      data: { mode: 'all' },
+      // A pass-through, not a Join the user drew (the graph walk reads
+      // it as the plain meeting the lines into the head were, #272).
+      data: { mode: 'all', _anchor: true },
     } as FlowNode;
 
     const outerEdgeId = outer[0].id;
@@ -191,8 +222,23 @@ function anchorOneParallelUntilBody(flow: FlowGraph): FlowGraph | null {
   const edges = flow.edges.filter((e) => e.type !== 'hint' && e.type !== 'choose-hint');
   const nodesById = new Map(flow.nodes.map((n) => [n.id, n]));
   for (const test of flow.nodes) {
-    if (test.type !== 'condition' || blockKey(test) !== 'repeat_until') continue;
-    const falseEdges = edges.filter((e) => e.source === test.id && e.sourceHandle === 'false');
+    if (test.type !== 'condition') continue;
+    // An until test loops back on its no side; a do-while's on its yes
+    // side (bug #259).
+    const loopHandle =
+      blockKey(test) === 'repeat_until'
+        ? 'false'
+        : blockKey(test) === undefined && counterVariableOf(test) === undefined
+          ? 'true'
+          : null;
+    if (loopHandle === null) continue;
+    const falseEdges = edges.filter((e) => e.source === test.id && e.sourceHandle === loopHandle);
+    // A do-while's yes edges loop back (one of them, at least, is found to
+    // be the loop's back edge); an if's yes branches don't.
+    if (loopHandle === 'true') {
+      const backEdgeIds = findBackEdges(flow);
+      if (!falseEdges.some((e) => backEdgeIds.has(e.id))) continue;
+    }
     const starts = [...new Set(falseEdges.map((e) => e.target))];
     if (starts.length < 2) continue;
     // Every branch start leads back to the test (not counting the test's
@@ -242,25 +288,38 @@ function anchorOneParallelUntilBody(flow: FlowGraph): FlowGraph | null {
       id: anchorId,
       type: 'join',
       position: { x: first.position.x, y: first.position.y - 80 },
-      data: { mode: 'all' },
+      // A pass-through, not a Join the user drew (the graph walk reads
+      // it as the plain meeting the lines into the head were, #272).
+      data: { mode: 'all', _anchor: true },
     } as FlowNode;
-    const replaced = new Set([...falseEdges, ...entries].map((e) => e.id));
-    const kept = flow.edges.filter((e) => !replaced.has(e.id));
-    const added: FlowEdge[] = [
-      ...[...waysIn.values()].map((group) => ({
+    // Each way in (and the test's line back) becomes one line to the Join,
+    // where the first line it replaces was: a parallel's branches keep the
+    // order they were drawn in (the order a YAML parallel lists them, and
+    // the walk runs them, in).
+    const replacement = new Map<string, FlowEdge>();
+    for (const group of waysIn.values()) {
+      replacement.set(group[0].id, {
         ...group[0],
         id: `${group[0].id}__to__${anchorId}`,
         target: anchorId,
-      })),
-      {
-        ...falseEdges[0],
-        id: `${falseEdges[0].id}__to__${anchorId}`,
-        target: anchorId,
-        type: 'loop-back',
-      },
-      ...starts.map((s) => ({ id: `${anchorId}__to__${s}`, source: anchorId, target: s })),
-    ];
-    return { ...flow, nodes: [...flow.nodes, anchor], edges: [...kept, ...added] };
+      });
+    }
+    replacement.set(falseEdges[0].id, {
+      ...falseEdges[0],
+      id: `${falseEdges[0].id}__to__${anchorId}`,
+      target: anchorId,
+      type: 'loop-back',
+    });
+    const replaced = new Set([...falseEdges, ...entries].map((e) => e.id));
+    const kept = flow.edges.flatMap((e) =>
+      replaced.has(e.id) ? (replacement.has(e.id) ? [replacement.get(e.id)!] : []) : [e]
+    );
+    const fromAnchor: FlowEdge[] = starts.map((s) => ({
+      id: `${anchorId}__to__${s}`,
+      source: anchorId,
+      target: s,
+    }));
+    return { ...flow, nodes: [...flow.nodes, anchor], edges: [...kept, ...fromAnchor] };
   }
   return null;
 }
@@ -272,21 +331,6 @@ function anchorOneParallelUntilBody(flow: FlowGraph): FlowGraph | null {
  * so FlowTranspiler refuses the graph. Null when there's none.
  */
 export function untilLoopingBackToSeveral(flow: FlowGraph): string | null {
-  return untilFalseSideProblem(flow, 'several');
-}
-
-/**
- * #135: an until test whose false edges go back into the loop and also on
- * to a step that doesn't lead back (the loop's own test failing both
- * repeats the body and runs that step). HA's until loop only goes round
- * again, so the other step was dropped by both strategies and both gates.
- * FlowTranspiler refuses it. Null when there's none.
- */
-export function untilFalseSideLeavingTheLoop(flow: FlowGraph): string | null {
-  return untilFalseSideProblem(flow, 'leaves');
-}
-
-function untilFalseSideProblem(flow: FlowGraph, kind: 'several' | 'leaves'): string | null {
   for (const test of flow.nodes) {
     if (test.type !== 'condition' || blockKey(test) !== 'repeat_until') continue;
     const targets = new Set(
@@ -302,8 +346,7 @@ function untilFalseSideProblem(flow: FlowGraph, kind: 'several' | 'leaves'): str
     );
     if (targets.size < 2) continue;
     const back = [...targets].filter((t) => leadsTo(flow, t, test.id));
-    if (kind === 'several' && back.length === targets.size) return test.id;
-    if (kind === 'leaves' && back.length > 0 && back.length < targets.size) return test.id;
+    if (back.length === targets.size) return test.id;
   }
   return null;
 }

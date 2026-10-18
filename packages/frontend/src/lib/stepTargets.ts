@@ -112,22 +112,54 @@ export function withTargets(
   return { target: { ...target, entity_id: [...entityIds] } };
 }
 
-/** The areas a target names when it names nothing else ("Anything in
- * <room>"): null for any other target. */
-export function wholeAreaIds(target: unknown): string[] | null {
-  if (!isRecord(target)) return null;
-  const areas = plainAreaIds(target.area_id);
-  if (areas.length === 0) return null;
-  for (const key of TARGET_KEYS) {
-    if (key === 'area_id') continue;
-    const value = target[key];
-    if (value !== undefined && value !== null && !(Array.isArray(value) && value.length === 0))
-      return null;
-  }
-  return areas;
+/** The places a target can name as a whole: an area, a floor or a label. */
+export type PlaceKey = 'area_id' | 'floor_id' | 'label_id';
+
+/** One place a step can target as a whole ("Anything in <room>", "Anything
+ * on <floor>", "Anything labelled <label>"). */
+export interface PlaceTarget {
+  key: PlaceKey;
+  id: string;
 }
 
-function plainAreaIds(value: unknown): string[] {
+/** The picker's and card's words for a whole place, by its kind. */
+export const ANYTHING_IN = {
+  area_id: 'nodes:picker.rows.anythingIn',
+  floor_id: 'nodes:picker.rows.anythingOn',
+  label_id: 'nodes:picker.rows.anythingLabelled',
+} as const satisfies Readonly<Record<PlaceKey, string>>;
+
+/** The target a whole place is written as. */
+export function placeTarget(place: PlaceTarget): Record<string, string> {
+  return { [place.key]: place.id };
+}
+
+/** The places a target names when it names one kind of place and nothing
+ * else ("Anything in <room>", on a floor, with a label): null for any other
+ * target. */
+export function wholePlace(target: unknown): { key: PlaceKey; ids: string[] } | null {
+  if (!isRecord(target)) return null;
+  let found: { key: PlaceKey; ids: string[] } | null = null;
+  for (const key of TARGET_KEYS) {
+    const value = target[key];
+    if (value === undefined || value === null || (Array.isArray(value) && value.length === 0))
+      continue;
+    if (key === 'entity_id' || key === 'device_id' || found) return null;
+    const ids = plainPlaceIds(value);
+    if (ids.length === 0) return null;
+    found = { key, ids };
+  }
+  return found;
+}
+
+/** The areas a target names when it names nothing else: null for any other
+ * target. */
+export function wholeAreaIds(target: unknown): string[] | null {
+  const place = wholePlace(target);
+  return place?.key === 'area_id' ? place.ids : null;
+}
+
+function plainPlaceIds(value: unknown): string[] {
   const list = typeof value === 'string' ? [value] : Array.isArray(value) ? value : [];
   return list.filter(
     (id): id is string => typeof id === 'string' && id !== '' && !id.includes('{')

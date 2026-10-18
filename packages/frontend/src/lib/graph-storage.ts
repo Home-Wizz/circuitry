@@ -1,6 +1,7 @@
 import type { FlowGraph } from '@circuitry/shared';
 import { FlowGraphSchema } from '@circuitry/shared';
 import type { HomeAssistantAPI } from './ha-api';
+import { stableStringify } from './stableJson';
 
 /**
  * Canonical graph storage (Option 1 architecture).
@@ -105,40 +106,6 @@ function normalizeForHash(config: Record<string, unknown>): Record<string, unkno
     actions: actions ?? action ?? [],
     variables: otherVariables,
   };
-}
-
-/**
- * Deterministic JSON.stringify -- sorts object keys so key order never
- * affects the hash, AND, critically, skips any key whose value is
- * `undefined` -- exactly like native `JSON.stringify` does.
- *
- * This matters because HA config steps (actions/triggers/conditions)
- * commonly carry an optional field -- `alias` chief among them -- that's
- * `undefined` rather than simply absent when unset. Native
- * `JSON.stringify` (which is what actually serializes the POST body HA
- * persists, and therefore what a later GET/websocket load returns) drops
- * such a key entirely. Without this filter, `Object.keys()` would still
- * enumerate it here, and it would end up baked into the hashed string as
- * literal `undefined` text on the save-time side -- while the load-time
- * side, built from what HA actually returned, never had that key to
- * begin with. That one-sided key permanently defeated Option 1's fast
- * path (confirmed 2026-09-06: byte-identical hashing code at both call
- * sites, but a real `"alias":undefined` on the save side and no such key
- * at all on the load side). Skipping undefined-valued keys here makes
- * this function agree with what JSON (and thus HA) actually persists.
- */
-function stableStringify(value: unknown): string {
-  if (Array.isArray(value)) {
-    return `[${value.map(stableStringify).join(',')}]`;
-  }
-  if (value && typeof value === 'object') {
-    const obj = value as Record<string, unknown>;
-    const keys = Object.keys(obj)
-      .filter((key) => obj[key] !== undefined)
-      .sort();
-    return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(obj[key])}`).join(',')}}`;
-  }
-  return JSON.stringify(value);
 }
 
 /**

@@ -314,23 +314,37 @@ export function useDeviceAutomation() {
  * actions (`device_automation/<kind>/list`). */
 export type DeviceAutomationKind = 'trigger' | 'condition' | 'action';
 
+/** What useDevicesWithAutomations found. */
+export interface DevicesWithAutomations {
+  /** The devices with any; undefined while HA is asked. */
+  withAny: ReadonlySet<string> | undefined;
+  /** How many devices HA didn't answer for: they may be missing (bug #228). */
+  unanswered: number;
+  /** Asks again. */
+  retry: () => void;
+}
+
 /**
  * Which of these devices have any device automations of a kind -- the
- * devices HA's own Device type can use. Undefined while HA is asked (one
- * list per device, as HA's editor asks when a device is picked); a device
- * whose integration has none, or refuses the list, isn't in it.
+ * devices HA's own Device type can use. One list per device, as HA's
+ * editor asks when a device is picked; a device whose integration has
+ * none isn't in it, and one HA didn't answer for is counted.
  */
 export function useDevicesWithAutomations(
   kind: DeviceAutomationKind,
   deviceIds: readonly string[]
-): ReadonlySet<string> | undefined {
+): DevicesWithAutomations {
   const { getDeviceTriggers, getDeviceConditions, getDeviceActions } = useDeviceAutomation();
   const [withAny, setWithAny] = useState<ReadonlySet<string> | undefined>(undefined);
+  const [unanswered, setUnanswered] = useState(0);
+  const [attempt, setAttempt] = useState(0);
+  const retry = useCallback(() => setAttempt((n) => n + 1), []);
   const key = deviceIds.join(',');
-  // biome-ignore lint/correctness/useExhaustiveDependencies: `key` stands for deviceIds (a new array every render).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `key` stands for deviceIds (a new array every render); `attempt` is the Try again signal.
   useEffect(() => {
     let cancelled = false;
     setWithAny(undefined);
+    setUnanswered(0);
     const list =
       kind === 'trigger'
         ? getDeviceTriggers
@@ -339,6 +353,7 @@ export function useDevicesWithAutomations(
           : getDeviceActions;
     Promise.allSettled(deviceIds.map((id) => list(id))).then((results) => {
       if (cancelled) return;
+      setUnanswered(results.filter((r) => r.status === 'rejected').length);
       setWithAny(
         new Set(
           deviceIds.filter((_, i) => {
@@ -351,6 +366,6 @@ export function useDevicesWithAutomations(
     return () => {
       cancelled = true;
     };
-  }, [kind, key, getDeviceTriggers, getDeviceConditions, getDeviceActions]);
-  return withAny;
+  }, [kind, key, attempt, getDeviceTriggers, getDeviceConditions, getDeviceActions]);
+  return { withAny, unanswered, retry };
 }

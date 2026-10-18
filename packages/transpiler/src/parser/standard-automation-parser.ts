@@ -121,6 +121,15 @@ export function parseAutomationStructure(
     conditionNodeIds,
     triggerNodeMap,
   });
+  // A condition read from the action list is a step of the run, not one
+  // of the automation's own conditions: kept so when saved (bug #246).
+  // Moved to the top-level `conditions:`, it was checked before a run
+  // started instead of in it, which HA tells apart: with `mode: restart`
+  // a trigger whose condition fails no longer stopped the run going on,
+  // and `last_triggered`, traces and `max` counted other runs.
+  for (const node of actionResults.nodes) {
+    if (node.type === 'condition') node.data = { ...node.data, _conditionStep: true };
+  }
   nodes.push(...actionResults.nodes);
   edges.push(...actionResults.edges);
 
@@ -143,7 +152,7 @@ export function parseConditions(
       id: getNextNodeId('condition'),
       type: 'condition',
       position: { x: 0, y: 0 },
-      data: importCondition(condition, `Condition ${index}`),
+      data: importCondition(condition, `Condition ${index + 1}`),
     };
     nodes.push(node);
     outputNodeIds.push(node.id);

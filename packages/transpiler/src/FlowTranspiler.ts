@@ -1,20 +1,21 @@
 import type { FlowGraph } from '@circuitry/shared';
 import { dump as yamlDump } from 'js-yaml';
 import { unwritableMeeting } from './analyzer/condition-meetings';
-import { unwritablePathEnd } from './analyzer/path-endings';
-import {
-  untilFalseSideLeavingTheLoop,
-  untilLoopingBackToSeveral,
-} from './analyzer/loop-entry-anchors';
+import { untilLoopingBackToSeveral } from './analyzer/loop-entry-anchors';
+import { loopTestSharingItsListNo } from './analyzer/loop-reading';
+import { besideLoopJoinedElsewhere, loopOnNoSide } from './analyzer/loop-side-lines';
 import { nodesReadingLoopVariable } from './analyzer/loop-variable';
+import { unwrittenMeetings } from './analyzer/meeting-lines';
+import { anchoredGraph, normalizeGraph } from './analyzer/normalize';
+import { unwritablePathEnd } from './analyzer/path-endings';
 import { stateMachineVariablesUsed } from './analyzer/state-machine-variables';
-import { normalizeGraph } from './analyzer/normalize';
 import { analyzeTopology, type TopologyAnalysis } from './analyzer/topology';
 import { type ValidationResult, validateFlowGraph } from './analyzer/validator';
 import { type ParseResult, YamlParser } from './parser/YamlParser';
 import type { HAYamlOutput, TranspilerStrategy } from './strategies/base';
 import { NativeStrategy } from './strategies/native';
 import { StateMachineStrategy } from './strategies/state-machine';
+import { nodeKey } from './utils/nodeKey';
 import { GraphClaimError } from './utils/theOnly';
 import { verifyNativeOutput } from './verification/verifyNativeOutput';
 import { verifyStateMachineOutput } from './verification/verifyStateMachineOutput';
@@ -157,17 +158,29 @@ export class FlowTranspiler {
       };
     }
 
-    const untilLeaving = untilFalseSideLeavingTheLoop(flow);
-    if (untilLeaving !== null) {
+    // #262 (after the refusals that name a more specific shape): a line to a step another line's path also leads to, where that
+    // path doesn't always get there and couldn't be written out as the
+    // meeting it is (it's also taken from elsewhere, say): whether the
+    // step runs either way, as drawn, can't be written, so nothing is
+    // guessed. Read before path endings are made explicit.
+    const lineMeetings = unwrittenMeetings(anchoredGraph(validation.graph));
+    if (lineMeetings.length > 0) {
+      const [from, to, through] = lineMeetings[0];
       return {
         success: false,
         errors: [
-          `When the until loop tested at "${untilLeaving}" fails its test, it goes back into the ` +
-            "loop and also on to a step that doesn't lead back. Home Assistant's until loop can " +
-            'only go round again: move that step into the loop body, or after the loop.',
+          `"${from}" has a line straight to "${to}" and another through "${through}" that leads ` +
+            `there too, but not always, and that path is also used from elsewhere, so whether ` +
+            `"${to}" should run either way can't be told. Give the line through "${through}" its ` +
+            `own steps, or remove the direct line to "${to}".`,
         ],
         warnings,
       };
+    }
+    // #275: steps beside where a loop goes on that another path also joins.
+    const joined = besideLoopJoinedElsewhere(flow);
+    if (joined) {
+      return { success: false, errors: [besideJoinedMessage(joined)], warnings };
     }
     // Step 2: Analyze topology
     const analysis = this.analyzeTopology(flow);
@@ -290,7 +303,8 @@ export class FlowTranspiler {
           `Native strategy output failed behavioral verification ` +
             `(${verification.reason ?? 'unspecified mismatch'}); fell back to the state-machine strategy.`
         );
-        strategy = this.strategies.find((s) => s.name === 'state-machine') ?? new StateMachineStrategy();
+        strategy =
+          this.strategies.find((s) => s.name === 'state-machine') ?? new StateMachineStrategy();
         ({ output, yaml, config, claim } = this.generateAndSerialize(
           flow,
           strategy,
@@ -384,12 +398,60 @@ export class FlowTranspiler {
           'sharedLoopEntry' in smVerification ? smVerification.sharedLoopEntry : undefined;
         if (shared) {
           const [a, b] = shared.loops;
+          // #264: one test going back on both of its sides.
+          if (a.testNodeId === b.testNodeId) {
+            return {
+              success: false,
+              errors: [
+                `Both sides of "${a.testNodeId}" go back to "${shared.entryId}", so its test can ` +
+                  'never end the loop. Let one side leave the loop.',
+              ],
+              analysis,
+              warnings,
+            };
+          }
           return {
             success: false,
             errors: [
               `Two loops go back to "${shared.entryId}" (tested at "${a.testNodeId}" and ` +
                 `"${b.testNodeId}"), and neither is inside the other, so which one a branch belongs ` +
                 "to can't be told. Give each loop its own first step, or draw one loop inside the other.",
+            ],
+            analysis,
+            warnings,
+          };
+        }
+        // #263's loop (a step going back to a condition from its "no"
+        // side) inside a parallel branch: the state machine writes such a
+        // branch as Home Assistant YAML, which can't hold it (HA ends a
+        // while whose test can't be evaluated; the canvas takes the no
+        // side). The reason, not the gate's words for a bug.
+        const noSide = loopOnNoSide(flow);
+        if (noSide !== null) {
+          return {
+            success: false,
+            errors: [
+              `"${noSide.step}" goes back to "${noSide.test}" from its "no" side. That loop can be ` +
+                'saved on its own, but not inside a set of steps that run side by side: move it out ' +
+                'of that parallel, or loop back from the "yes" side.',
+            ],
+            analysis,
+            warnings,
+          };
+        }
+        // #278: a loop's test going back from its "yes" side with no "no"
+        // line of its own, one of the list of the condition before it,
+        // inside a parallel branch. The reason, not the gate's words.
+        const sharing = loopTestSharingItsListNo(flow);
+        if (sharing !== null) {
+          return {
+            success: false,
+            errors: [
+              `"${sharing.test}" goes back to "${sharing.head}" from its "yes" side and has no "no" ` +
+                `line of its own, so its "no" is "${sharing.head}"'s. That loop can be saved on its ` +
+                'own, but not inside a set of steps that run side by side: give ' +
+                `"${sharing.test}" its own "no" line, or put a step between "${sharing.head}" and ` +
+                `"${sharing.test}".`,
             ],
             analysis,
             warnings,
@@ -633,9 +695,18 @@ export class FlowTranspiler {
       written.add(node.id);
     }
 
+    // Each card's kind, in the same order (bug #222; see utils/nodeKey).
+    const nodeKeys = Object.fromEntries(
+      Object.keys(nodePositions).map((id) => {
+        const node = nodesById.get(id);
+        return [id, node ? nodeKey(node) : ''];
+      })
+    );
+
     return {
       version: 1,
       nodes: nodePositions,
+      node_keys: nodeKeys,
       graph_id: flow.id,
       graph_version: flow.version,
       strategy: strategy.name,
@@ -647,3 +718,13 @@ export class FlowTranspiler {
 
 // Export singleton instance
 export const transpiler = new FlowTranspiler();
+
+/** #265's refusal, in words. */
+/** #275's refusal, in the user's terms. */
+function besideJoinedMessage(found: { node: string; beside: string; from: string }): string {
+  return (
+    `"${found.beside}" runs beside where the loop goes on from "${found.node}", and "${found.from}" ` +
+    `also leads to it. A step that runs alongside a loop's rounds can't also be where another path ` +
+    `joins in: give that path its own steps, or join it after the loop.`
+  );
+}

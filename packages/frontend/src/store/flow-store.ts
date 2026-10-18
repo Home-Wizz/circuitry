@@ -23,18 +23,21 @@ import { temporal } from 'zundo';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { shallow } from 'zustand/shallow';
-import type { AutomationTrace } from '@/lib/ha-api';
-import { getHomeAssistantAPI } from '@/lib/ha-api';
 import { buildAutomationConfig, transpileForSave } from '@/lib/automation-config';
 import { replacedData, replaceFits, replacePicker } from '@/lib/canvasEdits';
-import { computeSourceHash, saveGraph } from '@/lib/graph-storage';
-import { logger } from '@/lib/logger';
+import { ChangedElsewhereError, changedElsewhere } from '@/lib/changed-elsewhere';
 import { describedExtraIssues, describedNodeIssues } from '@/lib/describedFields';
+import { computeSourceHash, saveGraph } from '@/lib/graph-storage';
+import type { AutomationTrace } from '@/lib/ha-api';
+import { getHomeAssistantAPI } from '@/lib/ha-api';
 import { KNOWN_CONDITION_TYPES, KNOWN_TRIGGER_TYPES } from '@/lib/haCatalog';
+import { logger } from '@/lib/logger';
 import type { NativeDescription } from '@/lib/nativeDescriptions';
 import { useNativeDescriptionsStore } from '@/lib/nativeDescriptionsStore';
 import { editorNodeIssues, splitIssues } from '@/lib/nativeRequired';
 import { ignoredTargetIssues } from '@/lib/nativeTargets';
+import { opaqueStepKind } from '@/lib/opaqueStep';
+import { SavedUnconfirmedError } from '@/lib/saved-unconfirmed';
 import type { ServiceRequiredFields } from '@/lib/serviceRequired';
 import type { ServiceTargetContext } from '@/lib/serviceTargets';
 import { generateUUID } from '@/lib/utils';
@@ -215,9 +218,20 @@ export interface FlowTabState {
   nodes: Node<FlowNodeData>[];
   edges: Edge[];
   automationId: string | null;
+  /** Opened read-only, so only a copy can be saved: `true`, from an
+   * automation kept outside automations.yaml (a package, another YAML
+   * file), which HA can't save over (bug #226); `'readingDiffers'`, when
+   * the import check found the canvas running differently from the
+   * automation it was read from (a save would change what it does). */
+  keptElsewhere: ReadOnlyReason;
   hasUnsavedChanges: boolean;
   lastSaved: Date | null;
   originalSnapshot: string | null;
+  /** computeSourceHash of the automation as Home Assistant held it when
+   * this tab opened or last saved it; null when not known (a new tab, one
+   * restored from before this field). An Update compares Home Assistant's
+   * copy with it, so a change made elsewhere isn't silently replaced. */
+  savedConfigHash?: string | null;
 }
 
 /**
@@ -300,10 +314,19 @@ export interface FlowState {
 
   // Save state
   automationId: string | null;
-  isSaving: boolean;
+  /** See FlowTabState.keptElsewhere. */
+  keptElsewhere: ReadOnlyReason;
+  /** The tabs with a save on its way to HA (selectIsSaving: the active
+   * one's). One flag for every tab was cleared by opening or switching to
+   * another tab mid-save, and set by any tab's save, so Save could be
+   * pressed again in the tab still saving and made a second automation
+   * (bug #239). */
+  savingTabIds: string[];
   lastSaved: Date | null;
   hasUnsavedChanges: boolean;
   originalSnapshot: string | null; // JSON snapshot of original state for comparison
+  /** See FlowTabState.savedConfigHash. */
+  savedConfigHash: string | null;
 
   // Simulation state
   isSimulating: boolean;
@@ -390,11 +413,35 @@ export interface FlowState {
 
   // Save actions
   setAutomationId: (id: string | null) => void;
+  /** See FlowTabState.savedConfigHash. */
+  setSavedConfigHash: (hash: string | null) => void;
+  setKeptElsewhere: (kept: ReadOnlyReason) => void;
+  /**
+   * Saves the open automation as a new one named `name` (Save as copy,
+   * Duplicate), the tab becoming the copy. If the save fails, the tab keeps
+   * its name and its automation (bug #202: it stayed renamed and unlinked,
+   * and the next Save made yet another automation).
+   */
+  saveAsNewAutomation: (hassApi: HomeAssistant, name: string) => Promise<string>;
+  /**
+   * Renames the saved automation in Home Assistant to `name` -- its name
+   * only, not what's on the canvas -- and the tab with it; unsaved edits stay
+   * unsaved (bug #206: Rename saved the whole canvas).
+   */
+  renameAutomation: (hassApi: HomeAssistant, name: string) => Promise<void>;
   setSaving: (saving: boolean) => void;
   setSaved: () => void;
   setUnsavedChanges: (hasChanges: boolean) => void;
   saveAutomation: (hassApi: HomeAssistant) => Promise<string>;
-  updateAutomation: (hassApi: HomeAssistant) => Promise<void>;
+  /**
+   * Saves the open automation over its Home Assistant copy. Refused with a
+   * ChangedElsewhereError when that copy was changed since this tab opened
+   * or last saved it, unless `replaceOutsideChanges` says to go ahead.
+   */
+  updateAutomation: (
+    hassApi: HomeAssistant,
+    options?: { replaceOutsideChanges?: boolean }
+  ) => Promise<void>;
   hasRealChanges: () => boolean; // Compare current state to original snapshot
 
   // Simulation
@@ -491,10 +538,12 @@ function normalizeNodeData(type: string, data: Record<string, unknown>): Record<
  * after the first save in a tab session, permanently reporting "real
  * changes" even immediately after a successful save).
  */
-function buildOriginalSnapshot(state: {
+export function buildOriginalSnapshot(state: {
   flowName: string;
   flowDescription: string;
   flowMetadata: FlowMetadata;
+  userVariables: Record<string, unknown> | undefined;
+  userTriggerVariables: Record<string, unknown> | undefined;
   nodes: Node<FlowNodeData>[];
   edges: Edge[];
 }): string {
@@ -502,6 +551,10 @@ function buildOriginalSnapshot(state: {
     flowName: state.flowName,
     flowDescription: state.flowDescription,
     flowMetadata: state.flowMetadata,
+    // The automation's own variables are part of it: an edit to them alone
+    // is an unsaved change (bug #198).
+    userVariables: state.userVariables,
+    userTriggerVariables: state.userTriggerVariables,
     nodes: state.nodes.map((n) => ({
       id: n.id,
       type: n.type,
@@ -620,9 +673,13 @@ function graphIssues(nodes: Node<FlowNodeData>[]): Map<string, NodeValidationErr
   return issues;
 }
 
+/** Why a tab is read-only (`false`: it isn't); see FlowTabState.keptElsewhere. */
+export type ReadOnlyReason = boolean | 'readingDiffers';
+
+// No initial_state: HA then brings the automation back on or off as it was
+// before a restart (bug #225: a default of true became "always on").
 const defaultFlowMetadata: FlowMetadata = {
   mode: 'single',
-  initial_state: true,
 };
 
 const initialFlowId = generateUUID();
@@ -645,10 +702,12 @@ const initialState = {
   backgroundTabs: [] as FlowTabState[],
   nodeEditRequest: null,
   automationId: null,
-  isSaving: false,
+  keptElsewhere: false,
+  savingTabIds: [] as string[],
   lastSaved: null,
   hasUnsavedChanges: false,
   originalSnapshot: null,
+  savedConfigHash: null,
   isSimulating: false,
   activeNodeId: null,
   executionPath: [],
@@ -681,13 +740,50 @@ export type PersistedFlowState = Pick<
   | 'edges'
   | 'selectedNodeId'
   | 'automationId'
+  | 'keptElsewhere'
   | 'lastSaved'
   | 'originalSnapshot'
+  | 'savedConfigHash'
   | 'tabOrder'
   | 'backgroundTabs'
+  | 'userVariables'
+  | 'userTriggerVariables'
+  | 'hasUnsavedChanges'
 >;
 
 // Partial state selector for persistence
+/** Removes `initial_state: true` from a tab kept by an older version (bug #258); see `migrate`. */
+function withoutOldStartState(persisted: unknown): PersistedFlowState {
+  const strip = <T extends { flowMetadata?: FlowMetadata; originalSnapshot?: string | null }>(
+    tab: T
+  ): T => {
+    if (tab.flowMetadata?.initial_state !== true) return tab;
+    const { initial_state: _dropped, ...flowMetadata } = tab.flowMetadata;
+    let originalSnapshot = tab.originalSnapshot;
+    if (typeof originalSnapshot === 'string') {
+      try {
+        const snapshot = JSON.parse(originalSnapshot) as { flowMetadata?: FlowMetadata };
+        if (snapshot.flowMetadata?.initial_state === true) {
+          const { initial_state: _droppedToo, ...rest } = snapshot.flowMetadata;
+          originalSnapshot = JSON.stringify({ ...snapshot, flowMetadata: rest });
+        }
+      } catch {
+        // Not JSON: left as it is.
+      }
+    }
+    return { ...tab, flowMetadata, originalSnapshot };
+  };
+  // What the storage holds is the shape persistSelector wrote (zustand's
+  // own contract for `migrate`); only the fields touched are read.
+  const state = persisted as PersistedFlowState;
+  return {
+    ...strip(state),
+    backgroundTabs: Array.isArray(state.backgroundTabs)
+      ? state.backgroundTabs.map(strip)
+      : state.backgroundTabs,
+  };
+}
+
 const persistSelector = (state: FlowState): PersistedFlowState => ({
   flowId: state.flowId,
   flowName: state.flowName,
@@ -697,8 +793,16 @@ const persistSelector = (state: FlowState): PersistedFlowState => ({
   edges: state.edges,
   selectedNodeId: state.selectedNodeId,
   automationId: state.automationId,
+  keptElsewhere: state.keptElsewhere,
   lastSaved: state.lastSaved,
   originalSnapshot: state.originalSnapshot,
+  savedConfigHash: state.savedConfigHash,
+  // The active tab's automation-level variables and its unsaved mark, as a
+  // background tab keeps them: left out, a reload saved the automation
+  // without its `variables:` (bug #197).
+  userVariables: state.userVariables,
+  userTriggerVariables: state.userTriggerVariables,
+  hasUnsavedChanges: state.hasUnsavedChanges,
   // Background tabs' own nodes/edges/etc. are already frozen snapshots (see
   // FlowTabState's doc comment) — persisting them alongside the active tab's
   // live fields above is what makes reopening the browser tab restore every
@@ -734,9 +838,40 @@ const temporalSelector = (state: FlowState): TemporalFlowState => ({
   userTriggerVariables: state.userTriggerVariables,
 });
 
+/** Whether the active tab has a save on its way (bug #239). */
+export const selectIsSaving = (state: Pick<FlowState, 'savingTabIds' | 'flowId'>): boolean =>
+  state.savingTabIds.includes(state.flowId);
+
+/** Runs `change` without an undo step for it: a change the store makes on
+ * its own, not an edit. */
+function withoutHistory(change: () => void): void {
+  flushPendingHistoryCommit();
+  const temporal = useFlowStore.temporal.getState();
+  temporal.pause();
+  try {
+    change();
+  } finally {
+    temporal.resume();
+  }
+}
+
 let pendingHistoryCommit:
-  | { timeoutId: ReturnType<typeof setTimeout>; burstStart: TemporalFlowState }
+  | { timeoutId: ReturnType<typeof setTimeout>; burstStart: TemporalFlowState; commit: () => void }
   | undefined;
+
+/**
+ * Writes a burst still waiting out its 300 ms as the undo step it will be.
+ * Undo and redo call this first: an undo inside the wait went back past
+ * the burst, and the burst's entry, written after it, wiped the redo list
+ * (bug #200).
+ */
+export function flushPendingHistoryCommit(): void {
+  const pending = pendingHistoryCommit;
+  if (!pending) return;
+  clearTimeout(pending.timeoutId);
+  pendingHistoryCommit = undefined;
+  pending.commit();
+}
 
 /**
  * Cancels an in-flight debounced history commit (see `handleSet` below)
@@ -764,8 +899,167 @@ function replaceIdInTabOrder(tabOrder: string[], oldId: string, newId: string): 
   return tabOrder.map((id) => (id === oldId ? newId : id));
 }
 
+/**
+ * Whether a tab holds changes worth keeping: touched since it was opened or
+ * saved, and different from what was loaded then. The touched flag alone is
+ * set by the canvas measuring its cards (bug #188), so opening an
+ * automation marked its tab unsaved. A tab with no loaded baseline (a new
+ * one) counts as changed once touched.
+ */
+export function tabHasUnsavedChanges(tab: FlowTabState): boolean {
+  if (!tab.hasUnsavedChanges) return false;
+  return tab.originalSnapshot === null || buildOriginalSnapshot(tab) !== tab.originalSnapshot;
+}
+
+/** What a save sends, and which tab it came from. */
+interface PreparedSave {
+  tabId: string;
+  graph: FlowGraph;
+  automationConfig: ReturnType<typeof buildAutomationConfig>;
+  /** The tab as sent: what counts as saved once Home Assistant answers. */
+  sentSnapshot: string;
+  /** computeSourceHash of the config sent: what Home Assistant holds once it takes the save. */
+  configHash: string;
+}
+
+/**
+ * Checks the open automation and builds what a save sends: the graph and
+ * its config as they are now, before the save's first wait (bug #202).
+ * Throws with the reasons when it can't be saved.
+ */
+async function prepareSave(get: () => FlowState): Promise<PreparedSave> {
+  // Validate all nodes first
+  get().validateAllNodes();
+  const state = get();
+  if (state.nodeErrors.size > 0) {
+    const errorCount = state.nodeErrors.size;
+    throw new Error(
+      `Cannot save: ${errorCount} node(s) have validation errors. Fix the highlighted nodes before saving.`
+    );
+  }
+
+  const graph = state.toFlowGraph();
+  const sentSnapshot = buildOriginalSnapshot(state);
+
+  // Check for empty automation
+  if (graph.nodes.length === 0) {
+    throw new Error(i18t('errors:validation.emptyAutomation'));
+  }
+  // Check for minimum required nodes
+  if (!graph.nodes.some((n) => n.type === 'trigger')) {
+    throw new Error(i18t('errors:validation.noTrigger'));
+  }
+  if (!graph.nodes.some((n) => n.type === 'action')) {
+    throw new Error(i18t('errors:validation.noAction'));
+  }
+
+  const { FlowTranspiler } = await import('@circuitry/transpiler');
+  // Validate and transpile: a flow that can't be saved throws with the
+  // transpiler's reasons.
+  const result = transpileForSave(new FlowTranspiler(), graph);
+  const automationConfig = buildAutomationConfig(
+    state.flowName,
+    state.flowDescription || '',
+    result
+  );
+  return {
+    tabId: state.flowId,
+    graph,
+    automationConfig,
+    sentSnapshot,
+    configHash: computeSourceHash(automationConfig),
+  };
+}
+
+/**
+ * Option 1: keeps the canonical graph alongside the automation HA just
+ * saved. Best-effort -- see saveGraph's doc comment; a failure here never
+ * blocks the save, it only means the next load decompiles the YAML.
+ */
+async function saveCanonicalGraph(
+  api: ReturnType<typeof getHomeAssistantAPI>,
+  automationId: string,
+  save: PreparedSave
+): Promise<void> {
+  try {
+    await saveGraph(api, automationId, save.graph, save.configHash);
+    // eslint-disable-next-line no-console -- deliberate diagnostic,
+    // see the matching log in useLoadAutomation.ts.
+    console.info('Circuitry: saved canonical graph for automation', automationId);
+  } catch (graphStoreError) {
+    console.warn(
+      'Circuitry: failed to persist canonical graph (will fall back to YAML decompile on next load):',
+      graphStoreError
+    );
+  }
+}
+
+/**
+ * Records a finished save in the tab it came from -- the active one, or a
+ * background tab when the user switched away meanwhile -- with what was
+ * sent as the new baseline (see buildOriginalSnapshot), so an edit made
+ * while the save was on its way stays unsaved. It used to mark whatever
+ * was on the canvas then as saved, in whichever tab was active (bug #202).
+ */
+function finishSave(
+  state: FlowState,
+  save: PreparedSave,
+  automationId: string
+): Partial<FlowState> {
+  const saved = (tab: FlowTabState): FlowTabState => ({
+    ...tab,
+    automationId,
+    keptElsewhere: false,
+    lastSaved: new Date(),
+    originalSnapshot: save.sentSnapshot,
+    savedConfigHash: save.configHash,
+    hasUnsavedChanges: buildOriginalSnapshot(tab) !== save.sentSnapshot,
+  });
+  const savingTabIds = state.savingTabIds.filter((id) => id !== save.tabId);
+  if (state.flowId === save.tabId) {
+    const tab = saved(snapshotAsTab(state));
+    return {
+      savingTabIds,
+      automationId: tab.automationId,
+      keptElsewhere: tab.keptElsewhere,
+      lastSaved: tab.lastSaved,
+      originalSnapshot: tab.originalSnapshot,
+      savedConfigHash: tab.savedConfigHash,
+      hasUnsavedChanges: tab.hasUnsavedChanges,
+    };
+  }
+  return {
+    savingTabIds,
+    backgroundTabs: state.backgroundTabs.map((tab) =>
+      tab.flowId === save.tabId ? saved(tab) : tab
+    ),
+  };
+}
+
+/**
+ * Bug #270: a save Home Assistant took but couldn't confirm (it couldn't set
+ * the automation up, or stored something else). The save failed and the tab
+ * stays unsaved, but Home Assistant holds the tab's own write: the tab is
+ * linked to it and remembers it as what HA holds, so its next save updates
+ * that automation (a new one's tab made a second) and isn't held back for
+ * an outside change that was its own. Nothing for any other error.
+ */
+function tookUnconfirmed(state: FlowState, tabId: string, error: unknown): Partial<FlowState> {
+  if (!(error instanceof SavedUnconfirmedError)) return {};
+  const linked = {
+    automationId: error.automationId,
+    savedConfigHash: computeSourceHash({ ...error.stored }),
+  };
+  if (state.flowId === tabId) return linked;
+  return {
+    backgroundTabs: state.backgroundTabs.map((tab) =>
+      tab.flowId === tabId ? { ...tab, ...linked } : tab
+    ),
+  };
+}
+
 /** Captures the fields multi-tab bookkeeping needs to restore a backgrounded tab later — see FlowTabState's doc comment. */
-function snapshotAsTab(state: FlowState): FlowTabState {
+export function snapshotAsTab(state: FlowState): FlowTabState {
   return {
     flowId: state.flowId,
     flowName: state.flowName,
@@ -776,9 +1070,11 @@ function snapshotAsTab(state: FlowState): FlowTabState {
     nodes: state.nodes,
     edges: state.edges,
     automationId: state.automationId,
+    keptElsewhere: state.keptElsewhere,
     hasUnsavedChanges: state.hasUnsavedChanges,
     lastSaved: state.lastSaved,
     originalSnapshot: state.originalSnapshot,
+    savedConfigHash: state.savedConfigHash,
   };
 }
 
@@ -937,7 +1233,9 @@ export const useFlowStore = create<FlowState>()(
               edges: addEdge(
                 {
                   ...connection,
-                  id: `e-${connection.source}-${connection.target}-${Date.now()}`,
+                  // Unique even for two edges between the same steps made in
+                  // one millisecond (a yes and a no; bug #218).
+                  id: `e-${connection.source}-${connection.target}-${generateUUID()}`,
                   animated: false,
                 },
                 state.edges
@@ -1138,7 +1436,14 @@ export const useFlowStore = create<FlowState>()(
 
         // Save actions
         setAutomationId: (id) => set({ automationId: id }),
-        setSaving: (saving) => set({ isSaving: saving }),
+        setSavedConfigHash: (hash) => set({ savedConfigHash: hash }),
+        setKeptElsewhere: (kept) => set({ keptElsewhere: kept }),
+        setSaving: (saving) =>
+          set((state) => ({
+            savingTabIds: saving
+              ? [...new Set([...state.savingTabIds, state.flowId])]
+              : state.savingTabIds.filter((id) => id !== state.flowId),
+          })),
         setSaved: () => set({ lastSaved: new Date(), hasUnsavedChanges: false }),
         setUnsavedChanges: (hasChanges) => set({ hasUnsavedChanges: hasChanges }),
         hasRealChanges: () => {
@@ -1153,180 +1458,151 @@ export const useFlowStore = create<FlowState>()(
         },
 
         saveAutomation: async (hassApi: HomeAssistant) => {
-          const state = get();
-          const api = getHomeAssistantAPI(hassApi);
-
-          set({ isSaving: true });
-
-          try {
-            // Validate all nodes first
-            get().validateAllNodes();
-
-            // Check for validation errors
-            const currentState = get();
-            if (currentState.nodeErrors.size > 0) {
-              const errorCount = currentState.nodeErrors.size;
-              throw new Error(
-                `Cannot save: ${errorCount} node(s) have validation errors. Fix the highlighted nodes before saving.`
-              );
-            }
-
-            // Convert flow to graph
-            const graph = state.toFlowGraph();
-
-            // Check for empty automation
-            if (graph.nodes.length === 0) {
-              throw new Error(i18t('errors:validation.emptyAutomation'));
-            }
-
-            // Check for minimum required nodes
-            const triggers = graph.nodes.filter((n) => n.type === 'trigger');
-            const actions = graph.nodes.filter((n) => n.type === 'action');
-
-            if (triggers.length === 0) {
-              throw new Error(i18t('errors:validation.noTrigger'));
-            }
-
-            if (actions.length === 0) {
-              throw new Error(i18t('errors:validation.noAction'));
-            }
-
-            const { FlowTranspiler } = await import('@circuitry/transpiler');
-            const transpiler = new FlowTranspiler();
-
-            // Validate and transpile: a flow that can't be saved throws
-            // with the transpiler's reasons.
-            const result = transpileForSave(transpiler, graph);
-
-            // Create automation in Home Assistant
-            const automationConfig = buildAutomationConfig(
-              state.flowName,
-              state.flowDescription || '',
-              result
+          // Kept outside automations.yaml: saving would make a second
+          // automation beside it, both running (bug #226); a copy is
+          // saved only on purpose (saveAsNewAutomation).
+          if (get().keptElsewhere) {
+            throw new Error(
+              get().keptElsewhere === 'readingDiffers'
+                ? i18t('dialogs:save.readingDiffers')
+                : i18t('dialogs:save.keptElsewhere')
             );
-
-            const automationId = await api.createAutomation(automationConfig);
-
-            // Option 1: persist the canonical graph alongside the automation
-            // HA just saved natively. Best-effort -- see saveGraph's doc
-            // comment; a failure here never blocks the save the user asked
-            // for, it just means the next load falls back to decompiling
-            // the YAML, exactly as it always has.
-            try {
-              await saveGraph(api, automationId, graph, computeSourceHash(automationConfig));
-              // eslint-disable-next-line no-console -- deliberate diagnostic,
-              // see the matching log in useLoadAutomation.ts.
-              console.info('Circuitry: saved canonical graph for automation', automationId);
-            } catch (graphStoreError) {
-              console.warn(
-                'Circuitry: failed to persist canonical graph (will fall back to YAML decompile on next load):',
-                graphStoreError
-              );
-            }
-
-            set({
-              automationId,
-              isSaving: false,
-              lastSaved: new Date(),
-              hasUnsavedChanges: false,
-              // Re-baseline hasRealChanges() against what was just saved —
-              // see buildOriginalSnapshot's doc comment. Without this, every
-              // subsequent hasRealChanges() call in this tab session keeps
-              // comparing against the *pre-edit* snapshot from load time,
-              // permanently reporting real changes even right after a
-              // successful save.
-              originalSnapshot: buildOriginalSnapshot(get()),
-            });
-
+          }
+          const api = getHomeAssistantAPI(hassApi);
+          const tabId = get().flowId;
+          // One save per tab at a time: a second while the first is on its
+          // way made a second automation (bug #239).
+          if (get().savingTabIds.includes(tabId)) throw new Error(i18t('dialogs:save.inProgress'));
+          set((state) => ({ savingTabIds: [...state.savingTabIds, tabId] }));
+          try {
+            const save = await prepareSave(get);
+            // Create automation in Home Assistant
+            const automationId = await api.createAutomation(save.automationConfig);
+            await saveCanonicalGraph(api, automationId, save);
+            set((state) => finishSave(state, save, automationId));
             return automationId;
           } catch (error) {
-            set({ isSaving: false });
+            set((state) => ({
+              savingTabIds: state.savingTabIds.filter((id) => id !== tabId),
+              ...tookUnconfirmed(state, tabId, error),
+            }));
             throw error;
           }
         },
 
-        updateAutomation: async (hassApi: HomeAssistant) => {
-          const state = get();
+        saveAsNewAutomation: async (hassApi: HomeAssistant, name: string) => {
+          const { flowId, flowName, automationId, keptElsewhere } = get();
+          // The copy's name isn't an edit to undo: undone, the copy would
+          // take the original's name at its next save (bug #239).
+          withoutHistory(() => set({ flowName: name, automationId: null, keptElsewhere: false }));
+          try {
+            return await get().saveAutomation(hassApi);
+          } catch (error) {
+            // Home Assistant took the copy but couldn't confirm it (#270):
+            // the tab is the copy now, linked to it (saveAutomation did).
+            if (error instanceof SavedUnconfirmedError) throw error;
+            // Back as it was, in the tab saved -- the active one, or a
+            // background one when the user switched away meanwhile (it was
+            // left with the copy's name, unlinked: its next Save made
+            // another automation, bug #239).
+            const back = { flowName, automationId, keptElsewhere };
+            withoutHistory(() =>
+              set((state) =>
+                state.flowId === flowId
+                  ? back
+                  : {
+                      backgroundTabs: state.backgroundTabs.map((tab) =>
+                        tab.flowId === flowId ? { ...tab, ...back } : tab
+                      ),
+                    }
+              )
+            );
+            throw error;
+          }
+        },
+
+        renameAutomation: async (hassApi: HomeAssistant, name: string) => {
+          const { automationId, flowId } = get();
+          if (!automationId) {
+            throw new Error('No automation ID set. Use saveAutomation() for new automations.');
+          }
+          const api = getHomeAssistantAPI(hassApi);
+          const read = await api.readAutomation(automationId);
+          if (!read) throw new Error(i18t('dialogs:import.configUnavailable'));
+          if (!read.editable) {
+            throw new Error(
+              "It isn't kept in automations.yaml, so it can't be renamed here (Home Assistant's own editor can't either)."
+            );
+          }
+          // Taken but not confirmed (#270): the rename is in Home Assistant
+          // all the same, so the tab takes it before saying why.
+          let unconfirmed: SavedUnconfirmedError | null = null;
+          try {
+            await api.updateAutomation(automationId, { ...read.config, alias: name });
+          } catch (error) {
+            if (!(error instanceof SavedUnconfirmedError)) throw error;
+            unconfirmed = error;
+          }
+          set((state) => {
+            if (state.flowId !== flowId) return {};
+            // The rename is Circuitry's own change to the automation: it
+            // is no outside change at the next Update -- unless something
+            // else had already changed it before.
+            const renamedHash =
+              state.savedConfigHash === computeSourceHash({ ...read.config })
+                ? computeSourceHash(
+                    unconfirmed ? { ...unconfirmed.stored } : { ...read.config, alias: name }
+                  )
+                : state.savedConfigHash;
+            // The saved baseline takes the new name too, so the rename alone
+            // is no unsaved change.
+            const baseline = state.originalSnapshot;
+            return {
+              flowName: name,
+              savedConfigHash: renamedHash,
+              originalSnapshot:
+                baseline === null
+                  ? null
+                  : JSON.stringify({ ...JSON.parse(baseline), flowName: name }),
+            };
+          });
+          if (unconfirmed) throw unconfirmed;
+        },
+
+        updateAutomation: async (hassApi: HomeAssistant, options) => {
+          const automationId = get().automationId;
           const api = getHomeAssistantAPI(hassApi);
 
-          if (!state.automationId) {
+          if (!automationId) {
             throw new Error('No automation ID set. Use saveAutomation() for new automations.');
           }
 
-          set({ isSaving: true });
-
+          const tabId = get().flowId;
+          // Read with the tab, before the first wait: another tab may be
+          // active by the time Home Assistant's copy is read (bug #202).
+          const savedHash = get().savedConfigHash;
+          if (get().savingTabIds.includes(tabId)) throw new Error(i18t('dialogs:save.inProgress'));
+          set((state) => ({ savingTabIds: [...state.savingTabIds, tabId] }));
           try {
-            // Validate all nodes first
-            get().validateAllNodes();
-
-            // Check for validation errors
-            const currentState = get();
-            if (currentState.nodeErrors.size > 0) {
-              const errorCount = currentState.nodeErrors.size;
-              throw new Error(
-                `Cannot save: ${errorCount} node(s) have validation errors. Fix the highlighted nodes before saving.`
-              );
+            const save = await prepareSave(get);
+            // Changed in Home Assistant since this tab opened or saved it:
+            // saving now would replace those changes without a word.
+            if (
+              savedHash &&
+              !options?.replaceOutsideChanges &&
+              (await changedElsewhere(api, automationId, savedHash))
+            ) {
+              throw new ChangedElsewhereError(i18t('dialogs:save.changedElsewhere'));
             }
-
-            // Convert flow to graph
-            const graph = state.toFlowGraph();
-
-            // Check for empty automation
-            if (graph.nodes.length === 0) {
-              throw new Error(i18t('errors:validation.emptyAutomation'));
-            }
-
-            // Check for minimum required nodes
-            const triggers = graph.nodes.filter((n) => n.type === 'trigger');
-            const actions = graph.nodes.filter((n) => n.type === 'action');
-
-            if (triggers.length === 0) {
-              throw new Error(i18t('errors:validation.noTrigger'));
-            }
-
-            if (actions.length === 0) {
-              throw new Error(i18t('errors:validation.noAction'));
-            }
-
-            const { FlowTranspiler } = await import('@circuitry/transpiler');
-            const transpiler = new FlowTranspiler();
-
-            // Validate and transpile: a flow that can't be saved throws
-            // with the transpiler's reasons.
-            const result = transpileForSave(transpiler, graph);
-
             // Update automation in Home Assistant
-            const automationConfig = buildAutomationConfig(
-              state.flowName,
-              state.flowDescription || '',
-              result
-            );
-
-            await api.updateAutomation(state.automationId, automationConfig);
-
-            // Option 1: keep the canonical graph in sync with every save.
-            // Best-effort, same rationale as saveAutomation above.
-            try {
-              await saveGraph(api, state.automationId, graph, computeSourceHash(automationConfig));
-              // eslint-disable-next-line no-console -- deliberate diagnostic,
-              // see the matching log in useLoadAutomation.ts.
-              console.info('Circuitry: saved canonical graph for automation', state.automationId);
-            } catch (graphStoreError) {
-              console.warn(
-                'Circuitry: failed to persist canonical graph (will fall back to YAML decompile on next load):',
-                graphStoreError
-              );
-            }
-
-            set({
-              isSaving: false,
-              lastSaved: new Date(),
-              hasUnsavedChanges: false,
-              // See saveAutomation's identical set() above for why this is here.
-              originalSnapshot: buildOriginalSnapshot(get()),
-            });
+            await api.updateAutomation(automationId, save.automationConfig);
+            await saveCanonicalGraph(api, automationId, save);
+            set((state) => finishSave(state, save, automationId));
           } catch (error) {
-            set({ isSaving: false });
+            set((state) => ({
+              savingTabIds: state.savingTabIds.filter((id) => id !== tabId),
+              ...tookUnconfirmed(state, tabId, error),
+            }));
             throw error;
           }
         },
@@ -1515,13 +1791,11 @@ export const useFlowStore = create<FlowState>()(
                 nodeData.trigger = 'state';
               }
 
-              if (
-                n.type === 'action' &&
-                !nodeData.service &&
-                !nodeData.repeat &&
-                !nodeData.event &&
-                !('stop' in nodeData)
-              ) {
+              // Only a node with no step in it at all gets a service. A step
+              // Circuitry keeps as written (`scene:`, `service_template:`, a
+              // newer HA step type) or one with a blank name (`event: ""`)
+              // must be saved as it is: HA refuses the extra service (bug #186).
+              if (n.type === 'action' && opaqueStepKind(nodeData) === undefined) {
                 console.warn(
                   `Circuitry: Action node ${n.id} missing service, adding default 'light.turn_on'`
                 );
@@ -1580,31 +1854,45 @@ export const useFlowStore = create<FlowState>()(
             flowName: graph.name,
             flowDescription: graph.description || '',
             flowMetadata: importedMetadata,
-            nodes,
-            edges,
-          });
-          set((state) => ({
-            flowId: graph.id,
-            flowName: graph.name,
-            flowDescription: graph.description || '',
-            flowMetadata: importedMetadata,
             userVariables: graph.userVariables,
             userTriggerVariables: graph.userTriggerVariables,
             nodes,
             edges,
-            selectedNodeId: null,
-            // Reset save state when importing
-            automationId: null,
-            hasUnsavedChanges: false,
-            lastSaved: null,
-            originalSnapshot,
-            nodeErrors: new Map(),
-            nodeWarnings: new Map(),
-            // Loading a different automation into the *active* tab changes
-            // its flowId — keep the tab strip's ordering pointed at the new
-            // id in the same slot (see replaceIdInTabOrder's doc comment).
-            tabOrder: replaceIdInTabOrder(state.tabOrder, state.flowId, graph.id),
-          }));
+          });
+          set((state) => {
+            // Another open tab already known by this id (the same
+            // automation opened twice, or a copy that kept the graph id):
+            // this one gets its own, or switching and closing took both
+            // (bug #199).
+            const takenByAnotherTab = state.tabOrder.some(
+              (id) => id === graph.id && id !== state.flowId
+            );
+            const tabId = takenByAnotherTab ? generateUUID() : graph.id;
+            return {
+              flowId: tabId,
+              flowName: graph.name,
+              flowDescription: graph.description || '',
+              flowMetadata: importedMetadata,
+              userVariables: graph.userVariables,
+              userTriggerVariables: graph.userTriggerVariables,
+              nodes,
+              edges,
+              selectedNodeId: null,
+              // Reset save state when importing
+              automationId: null,
+              keptElsewhere: false,
+              hasUnsavedChanges: false,
+              lastSaved: null,
+              originalSnapshot,
+              savedConfigHash: null,
+              nodeErrors: new Map(),
+              nodeWarnings: new Map(),
+              // Loading a different automation into the *active* tab changes
+              // its flowId — keep the tab strip's ordering pointed at the new
+              // id in the same slot (see replaceIdInTabOrder's doc comment).
+              tabOrder: replaceIdInTabOrder(state.tabOrder, state.flowId, tabId),
+            };
+          });
           // Validate all nodes after loading
           get().validateAllNodes();
           // A freshly loaded automation shouldn't offer undo back into
@@ -1630,6 +1918,7 @@ export const useFlowStore = create<FlowState>()(
             // (module-load-time, a single stale id) would.
             tabOrder: replaceIdInTabOrder(state.tabOrder, oldFlowId, newFlowId),
             backgroundTabs: state.backgroundTabs,
+            savingTabIds: state.savingTabIds,
           }));
           cancelPendingHistoryCommit();
           useFlowStore.temporal.getState().clear();
@@ -1648,6 +1937,7 @@ export const useFlowStore = create<FlowState>()(
             nodeWarnings: new Map(),
             backgroundTabs: [...state.backgroundTabs, backgrounded],
             tabOrder: [...state.tabOrder, newFlowId],
+            savingTabIds: state.savingTabIds,
           });
           cancelPendingHistoryCommit();
           useFlowStore.temporal.getState().clear();
@@ -1669,9 +1959,13 @@ export const useFlowStore = create<FlowState>()(
             nodes: target.nodes,
             edges: target.edges,
             automationId: target.automationId,
+            // A draft saved before this field has none.
+            keptElsewhere: target.keptElsewhere ?? false,
             hasUnsavedChanges: target.hasUnsavedChanges,
             lastSaved: target.lastSaved,
             originalSnapshot: target.originalSnapshot,
+            // A tab saved before this field has none.
+            savedConfigHash: target.savedConfigHash ?? null,
             selectedNodeId: null,
             nodeErrors: new Map(),
             nodeWarnings: new Map(),
@@ -1719,6 +2013,7 @@ export const useFlowStore = create<FlowState>()(
               nodeWarnings: new Map(),
               backgroundTabs: [],
               tabOrder: [newFlowId],
+              savingTabIds: get().savingTabIds,
             });
             cancelPendingHistoryCommit();
             useFlowStore.temporal.getState().clear();
@@ -1742,9 +2037,13 @@ export const useFlowStore = create<FlowState>()(
             nodes: target.nodes,
             edges: target.edges,
             automationId: target.automationId,
+            // A draft saved before this field has none.
+            keptElsewhere: target.keptElsewhere ?? false,
             hasUnsavedChanges: target.hasUnsavedChanges,
             lastSaved: target.lastSaved,
             originalSnapshot: target.originalSnapshot,
+            // A tab saved before this field has none.
+            savedConfigHash: target.savedConfigHash ?? null,
             selectedNodeId: null,
             nodeErrors: new Map(),
             nodeWarnings: new Map(),
@@ -1868,11 +2167,12 @@ export const useFlowStore = create<FlowState>()(
           const pastState = pastStateArg as unknown as TemporalFlowState;
           const burstStart = pendingHistoryCommit?.burstStart ?? pastState;
           cancelPendingHistoryCommit();
+          const commit = () => handleSet(burstStart);
           const timeoutId = setTimeout(() => {
             pendingHistoryCommit = undefined;
-            handleSet(burstStart);
+            commit();
           }, 300);
-          pendingHistoryCommit = { timeoutId, burstStart };
+          pendingHistoryCommit = { timeoutId, burstStart, commit };
         },
       }
     ),
@@ -1885,7 +2185,14 @@ export const useFlowStore = create<FlowState>()(
       // simply won't have it, so the fallback below fills in a single-tab
       // tabOrder (this browser's one previously-open automation) rather
       // than crashing on an undefined array.
-      version: 2,
+      // v2 -> v3: a draft kept by v2.3.1 or older carries that version's
+      // hidden default `initial_state: true` (bug #225), which it never
+      // wrote to HA (bug #196); written now, it made HA turn the
+      // automation on at every restart (bug #258). Dropped from such a
+      // draft; an explicit false stays.
+      version: 3,
+      migrate: (persisted, version) =>
+        version < 3 ? withoutOldStartState(persisted) : (persisted as PersistedFlowState),
       onRehydrateStorage: () => (state) => {
         if (state) {
           // Normalize node data after rehydration (e.g., convert platform to trigger)

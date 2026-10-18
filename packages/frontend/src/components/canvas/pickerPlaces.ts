@@ -24,6 +24,7 @@ import { useStableEntityList } from '@/hooks/useStableEntityList';
 import { getDomainColor } from '@/lib/domain-colors';
 import { entityPickerIcon, getPickerIcon, type PickerIcon } from '@/components/nodes/StepIcon';
 import type { HassEntity } from '@/types/hass';
+import type { PlaceTarget } from '@/lib/stepTargets';
 
 /**
  * The places the When, And and Then pickers browse by -- areas (under their
@@ -259,12 +260,13 @@ function withSecondary(
   };
 }
 
-/** A room's (or label's) types, every entity in it at once. */
+/** A room's (or label's) types, every entity in it at once, and the place
+ * itself as a target. */
 function roomScope(
   key: string,
   label: string,
   scope: EntityScope & { secondaryEntityIds: string[] },
-  areaId?: string
+  place?: PlaceTarget
 ): SelectedScope {
   return {
     key,
@@ -274,7 +276,7 @@ function roomScope(
     ...(scope.secondaryEntityIds.length > 0
       ? { secondaryEntityIds: scope.secondaryEntityIds }
       : {}),
-    room: { label, areaId },
+    room: { label, place },
   };
 }
 
@@ -286,7 +288,10 @@ export function areaRow(group: AreaGroup, atIndex: number, push: PushPlaceColumn
       atIndex,
       {
         kind: 'targetResults',
-        scope: roomScope(`area::${area.area_id}`, area.name, group, area.area_id),
+        scope: roomScope(`area::${area.area_id}`, area.name, group, {
+          key: 'area_id',
+          id: area.area_id,
+        }),
       },
       area.area_id
     );
@@ -300,17 +305,83 @@ export function areaRow(group: AreaGroup, atIndex: number, push: PushPlaceColumn
   };
 }
 
+/** Device groups with one per device: a device with entities in two of a
+ * floor's areas was listed twice, with its device actions and triggers
+ * twice too (bug #253). */
+function mergedDeviceGroups(groups: readonly DeviceGroup[]): DeviceGroup[] {
+  const byDevice = new Map<string, DeviceGroup>();
+  for (const group of groups) {
+    const seen = byDevice.get(group.deviceId);
+    if (!seen) {
+      byDevice.set(group.deviceId, group);
+      continue;
+    }
+    const ids = new Set(seen.entities.map((e) => e.entity_id));
+    const secondary = [...(seen.secondaryEntityIds ?? []), ...(group.secondaryEntityIds ?? [])];
+    byDevice.set(group.deviceId, {
+      ...seen,
+      entities: [...seen.entities, ...group.entities.filter((e) => !ids.has(e.entity_id))],
+      ...(secondary.length > 0 ? { secondaryEntityIds: [...new Set(secondary)] } : {}),
+    });
+  }
+  return [...byDevice.values()];
+}
+
+/** A floor's row (search; HA's own search lists floors with the areas):
+ * opens the types of everything on its areas, and offers the floor itself
+ * as the target ("Anything on <floor>"). */
+export function floorRow(group: FloorGroup, atIndex: number, push: PushPlaceColumn): NavRow | null {
+  const { floor } = group;
+  if (!floor) return null;
+  const scope = {
+    deviceGroups: mergedDeviceGroups(group.areas.flatMap((a) => a.deviceGroups)),
+    standaloneEntities: group.areas.flatMap((a) => a.standaloneEntities),
+    secondaryEntityIds: group.areas.flatMap((a) => a.secondaryEntityIds),
+  };
+  const open = () =>
+    push(
+      atIndex,
+      {
+        kind: 'targetResults',
+        scope: roomScope(`floor::${floor.floor_id}`, floor.name, scope, {
+          key: 'floor_id',
+          id: floor.floor_id,
+        }),
+      },
+      // The row's own key (bug #254: the bare id was an area's key too, so
+      // picking a floor marked an area of the same id as picked, not the
+      // floor; HA slugs both from the name).
+      `floor::${floor.floor_id}`
+    );
+  return {
+    key: `floor::${floor.floor_id}`,
+    label: floor.name,
+    icon: getPickerIcon('homeassistant', Layers),
+    color: getDomainColor('zones'),
+    onSelect: open,
+    onDrill: open,
+  };
+}
+
 /** A label's row, like an area's. */
 export function labelRow(group: LabelGroup, atIndex: number, push: PushPlaceColumn): NavRow {
   const { label } = group;
   const open = () =>
     push(
       atIndex,
-      { kind: 'targetResults', scope: roomScope(`label::${label.label_id}`, label.name, group) },
-      label.label_id
+      {
+        kind: 'targetResults',
+        scope: roomScope(`label::${label.label_id}`, label.name, group, {
+          key: 'label_id',
+          id: label.label_id,
+        }),
+      },
+      `label::${label.label_id}`
     );
   return {
-    key: label.label_id,
+    // Not the bare id: an area of the same id was marked picked with it
+    // (bug #254).
+    key: `label::${label.label_id}`,
     label: label.name,
     icon: getPickerIcon('tag', Tag),
     color: getDomainColor('labels'),
@@ -411,7 +482,8 @@ export function placeRows(
 /**
  * A type picked from a room's or a device's types: its entities ticked in a
  * list when there are several, or when the room itself can be the target
- * (the list's first line, "Anything in <room>"); one entity is picked at once.
+ * (the list's first line, "Anything in <room>", or labelled <label>); one
+ * entity is picked at once.
  */
 export function routeScopePick(
   scope: SelectedScope,
@@ -419,11 +491,13 @@ export function routeScopePick(
   takesArea: boolean,
   handlers: {
     pick: (entityIds: string[]) => void;
-    tick: (entityIds: string[], areaId?: string) => void;
+    tick: (entityIds: string[], place?: PlaceTarget) => void;
   }
 ): void {
-  const areaId = takesArea ? scope.room?.areaId : undefined;
-  if (entityIds.length > 1 || areaId) handlers.tick(entityIds, areaId);
+  // A type that takes an area takes a floor or a label too: HA's target
+  // selector reads them all alike (cv.TARGET_FIELDS).
+  const place = takesArea ? scope.room?.place : undefined;
+  if (entityIds.length > 1 || place) handlers.tick(entityIds, place);
   else handlers.pick(entityIds);
 }
 
@@ -467,17 +541,25 @@ export function searchPlaceSections(
   query: string,
   atIndex: number,
   push: PushPlaceColumn,
-  titles: { areas: string; devices: string; entities: string }
+  titles: { areas: string; devices: string; entities: string; labels: string }
 ): NavSection[] {
   const q = query.toLowerCase();
   const matches = (text: string) => text.toLowerCase().includes(q);
-  // Subtitles, not titles: search's sections don't fold.
+  // Subtitles, not titles: search's sections don't fold. Floors are listed
+  // with the areas and labels after the entities, as HA's own search does
+  // ("night" missed Night mode, a floor wasn't found at all).
   return [
     {
       subtitle: titles.areas,
-      rows: places.areaGroups
-        .filter((g) => matches(g.area.name))
-        .map((g) => areaRow(g, atIndex, push)),
+      rows: [
+        ...places.floorGroups
+          .filter((g) => g.floor && matches(g.floor.name))
+          .map((g) => floorRow(g, atIndex, push))
+          .filter((row): row is NavRow => row !== null),
+        ...places.areaGroups
+          .filter((g) => matches(g.area.name))
+          .map((g) => areaRow(g, atIndex, push)),
+      ],
     },
     {
       subtitle: titles.devices,
@@ -493,6 +575,12 @@ export function searchPlaceSections(
         .sort((a, b) => getEntityName(a).localeCompare(getEntityName(b)))
         .slice(0, 100)
         .map((e) => entityRow(e, null, atIndex, push)),
+    },
+    {
+      subtitle: titles.labels,
+      rows: places.labelGroups
+        .filter((g) => matches(g.label.name))
+        .map((g) => labelRow(g, atIndex, push)),
     },
   ];
 }

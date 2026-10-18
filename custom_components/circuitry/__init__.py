@@ -8,6 +8,7 @@ import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.helpers import config_validation as cv, issue_registry as ir
+from homeassistant.helpers.service import async_register_admin_service
 from homeassistant.helpers.typing import ConfigType
 
 from .const import DOMAIN
@@ -21,7 +22,8 @@ SERVICE_REPORT_IMPORT_ISSUE = "report_import_issue"
 
 REPORT_IMPORT_ISSUE_SCHEMA = vol.Schema(
     {
-        vol.Required("entity_id"): str,
+        # An automation's entity: the issue's id and text are built from it.
+        vol.Required("entity_id"): vol.All(cv.entity_id, cv.entity_domain("automation")),
         vol.Required("warnings"): [str],
     }
 )
@@ -54,13 +56,19 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Circuitry from a config entry."""
-    await async_register_panel(hass, entry)
+    if not await async_register_panel(hass, entry):
+        return False
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
 
     async def _handle_report_import_issue(call: ServiceCall) -> None:
-        """Create a Repair issue for an automation Circuitry couldn't round-trip losslessly."""
+        """Create a Repair issue for an automation Circuitry couldn't round-trip
+        losslessly, or remove it when it now reads in full (no warnings): it
+        used to stay until HA restarted."""
         entity_id = call.data["entity_id"]
         warnings = call.data["warnings"]
+        if not warnings:
+            ir.async_delete_issue(hass, DOMAIN, f"lossy_import_{entity_id}")
+            return
         ir.async_create_issue(
             hass,
             DOMAIN,
@@ -74,7 +82,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             },
         )
 
-    hass.services.async_register(
+    # Admin only, as Circuitry's websocket commands are: any user could
+    # create or clear Repair issues with it (bug #248).
+    async_register_admin_service(
+        hass,
         DOMAIN,
         SERVICE_REPORT_IMPORT_ISSUE,
         _handle_report_import_issue,

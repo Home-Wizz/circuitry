@@ -95,7 +95,7 @@ export async function applyHeuristicLayout(
     // is a condition node. For trigger-entry automations (no choose-hint), fixChooseChainLayout
     // aligns cases vertically as a fallback.
     const afterChain = fixChooseChainLayout(positionedNodes, edges);
-    return fixChooseDefaultLayout(afterChain, edges);
+    return separateOverlaps(fixChooseDefaultLayout(afterChain, edges));
   } catch (_error) {
     // Fallback to simple grid layout if ELK fails
     return applyFallbackLayout(nodes);
@@ -182,10 +182,18 @@ export function fixChooseDefaultLayout(nodes: FlowNode[], edges: FlowEdge[]): Fl
     const sourcePos = posMap.get(edge.source);
     if (!sourcePos) continue;
 
-    // Compute the bottom of the source case's subtree
-    const subtreeIds = getSubtreeIds(edge.source, edges);
+    // What the last case and the default both lead on to is the rest of the
+    // automation after the choose: ELK has placed it, and it stays. Only the
+    // case's own steps set where the default goes, and only the default's
+    // own steps move with it (bug #187).
+    const caseSubtreeIds = getSubtreeIds(
+      edge.source,
+      edges.filter((e) => e !== edge)
+    );
+    const defaultSubtreeIds = getSubtreeIds(edge.target, edges);
     let bottomY = sourcePos.y + getNodeHeight(nodeTypeMap.get(edge.source) ?? 'action');
-    for (const id of subtreeIds) {
+    for (const id of caseSubtreeIds) {
+      if (defaultSubtreeIds.has(id)) continue;
       const pos = posMap.get(id);
       if (pos) {
         bottomY = Math.max(bottomY, pos.y + getNodeHeight(nodeTypeMap.get(id) ?? 'action'));
@@ -193,14 +201,14 @@ export function fixChooseDefaultLayout(nodes: FlowNode[], edges: FlowEdge[]): Fl
     }
 
     // Place the default subtree below the source case, aligned on X
-    const defaultSubtreeIds = getSubtreeIds(edge.target, edges);
     const defaultTargetPos = posMap.get(edge.target);
     if (!defaultTargetPos) continue;
 
     const dx = sourcePos.x - defaultTargetPos.x;
     const dy = bottomY + 60 - defaultTargetPos.y;
 
-    for (const id of [edge.target, ...defaultSubtreeIds]) {
+    for (const id of defaultSubtreeIds) {
+      if (caseSubtreeIds.has(id)) continue;
       const pos = posMap.get(id);
       if (pos) posMap.set(id, { x: pos.x + dx, y: pos.y + dy });
     }
@@ -305,4 +313,64 @@ function getNodeHeight(type: string): number {
     default:
       return 80;
   }
+}
+
+/** The layout's own box for a card: its guessed size at its position. */
+function boxOf(node: FlowNode): { x: number; y: number; w: number; h: number } {
+  const type = node.type ?? 'action';
+  return { x: node.position.x, y: node.position.y, w: getNodeWidth(type), h: getNodeHeight(type) };
+}
+
+/** Pairs of cards whose boxes overlap (by the layout's card sizes). */
+export function layoutOverlaps(nodes: FlowNode[]): [string, string][] {
+  const out: [string, string][] = [];
+  const boxes = nodes.map((n) => [n.id, boxOf(n)] as const);
+  for (let i = 0; i < boxes.length; i++) {
+    for (let j = i + 1; j < boxes.length; j++) {
+      const [ia, a] = boxes[i];
+      const [ib, b] = boxes[j];
+      if (overlaps(a, b)) out.push([ia, ib]);
+    }
+  }
+  return out;
+}
+
+/** Space left between a card and the one moved below it. */
+const SEPARATION_GAP = 40;
+
+/**
+ * The layout's last pass: no two cards overlap. Cards are placed top to
+ * bottom (then left to right); one that would cover a card already placed
+ * moves down below it, as far as needed. A card that covers none stays
+ * exactly where it was, so a layout without overlaps is unchanged. The
+ * choose passes above move cases ELK doesn't place, and nothing checked
+ * what they moved them onto (bug #221).
+ */
+export function separateOverlaps(nodes: FlowNode[]): FlowNode[] {
+  const order = [...nodes].sort(
+    (a, b) => a.position.y - b.position.y || a.position.x - b.position.x
+  );
+  const placed: { x: number; y: number; w: number; h: number }[] = [];
+  const moved = new Map<string, number>();
+  for (const node of order) {
+    const box = boxOf(node);
+    let blocker = placed.find((p) => overlaps(box, p));
+    while (blocker) {
+      box.y = blocker.y + blocker.h + SEPARATION_GAP;
+      blocker = placed.find((p) => overlaps(box, p));
+    }
+    if (box.y !== node.position.y) moved.set(node.id, box.y);
+    placed.push(box);
+  }
+  if (moved.size === 0) return nodes;
+  return nodes.map((n) =>
+    moved.has(n.id) ? { ...n, position: { x: n.position.x, y: moved.get(n.id)! } } : n
+  );
+}
+
+function overlaps(
+  a: { x: number; y: number; w: number; h: number },
+  b: { x: number; y: number; w: number; h: number }
+): boolean {
+  return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
 }

@@ -2,6 +2,7 @@ import { FlowTranspiler } from '@circuitry/transpiler';
 import { Check, Copy } from 'lucide-react';
 import { useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useShallow } from 'zustand/react/shallow';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -12,10 +13,14 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { HaSelect } from '@/ha';
+import { useDebouncedValue } from '@/hooks/useDebouncedValue';
 import { cn } from '@/lib/utils';
 import { useFlowStore } from '@/store/flow-store';
 import { copyToClipboard } from '@/utils/copy-to-clipboard';
 import { YamlEditor } from './YamlEditor';
+
+/** How long the automation must stay unchanged before the YAML follows it. */
+const YAML_PREVIEW_DELAY_MS = 250;
 
 interface CachedYaml {
   yaml: string;
@@ -24,7 +29,21 @@ interface CachedYaml {
 
 export function YamlPreview() {
   const { t } = useTranslation(['common', 'errors']);
-  const nodes = useFlowStore((s) => s.nodes);
+  // Everything the automation is made of: the YAML follows any of them
+  // (it followed the cards only, so a connection or setting change left it
+  // stale), once they've paused -- not on every frame of a drag (bug #207).
+  const automation = useFlowStore(
+    useShallow((s) => ({
+      nodes: s.nodes,
+      edges: s.edges,
+      flowName: s.flowName,
+      flowDescription: s.flowDescription,
+      flowMetadata: s.flowMetadata,
+      userVariables: s.userVariables,
+      userTriggerVariables: s.userTriggerVariables,
+    }))
+  );
+  const settled = useDebouncedValue(automation, YAML_PREVIEW_DELAY_MS);
   const toFlowGraph = useFlowStore((s) => s.toFlowGraph);
   const [copied, setCopied] = useState(false);
   const [forceStrategy, setForceStrategy] = useState<'auto' | 'native' | 'state-machine'>('auto');
@@ -34,7 +53,8 @@ export function YamlPreview() {
 
   // Compute YAML from nodes (canvas → YAML)
   const { yaml, errors, warnings, strategy, isStale } = useMemo(() => {
-    if (nodes.length === 0) {
+    // toFlowGraph reads the store as it is when `settled` changes.
+    if (settled.nodes.length === 0) {
       lastValidYamlRef.current = null;
       return {
         yaml: t('placeholders.addNodesForYaml'),
@@ -83,7 +103,7 @@ export function YamlPreview() {
         isStale: !!cached,
       };
     }
-  }, [nodes, toFlowGraph, forceStrategy, t]);
+  }, [settled, toFlowGraph, forceStrategy, t]);
 
   const handleCopy = async () => {
     try {

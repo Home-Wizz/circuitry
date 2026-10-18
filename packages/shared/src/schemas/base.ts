@@ -17,6 +17,26 @@ export const EntityIdSchema = z
   );
 export type EntityId = z.infer<typeof EntityIdSchema>;
 
+/** HA's `cv.service` (config_validation.py): the name lowercased, then
+ * `<domain>.<name>` as core.py's VALID_ENTITY_ID has it (slugs, no leading
+ * or trailing `_`, no `__`). */
+const HA_SERVICE_NAME = /^(?!.+__)(?!_)[\p{Nd}a-z_]+(?<!_)\.(?!_)[\p{Nd}a-z_]+(?<!_)$/u;
+
+/** Whether `value` is a service name as HA's `cv.service` takes one. */
+export const isHaServiceName = (value: string): boolean =>
+  HA_SERVICE_NAME.test(value.toLowerCase());
+
+/** HA's `is_template_string` (helpers/template): a `{` with `{{`, `{%` or `{#`. */
+export const isHaTemplate = (value: string): boolean =>
+  value.includes('{') && (value.includes('{{') || value.includes('{%') || value.includes('{#'));
+
+/** Whether HA takes `value` as a step's `action:` (`service:`): a service
+ * name, or a template HA renders when the step runs (SERVICE_SCHEMA:
+ * `Any(service, dynamic_template)`). The template's Jinja syntax is left
+ * to HA. */
+export const isHaActionName = (value: string): boolean =>
+  isHaServiceName(value) || isHaTemplate(value);
+
 /**
  * Position in the React Flow canvas
  */

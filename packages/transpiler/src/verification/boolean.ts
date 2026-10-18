@@ -303,13 +303,103 @@ export function decidedValue(expr: BoolExpr): boolean | undefined {
   return collectLeafKeys(expr).size === 0 ? evalExpr(expr, new Map()) : undefined;
 }
 
-/** Above this many distinct leaves, brute-force truth-table enumeration
- * (2^N rows) stops being "cheap" -- no real automation has come close to
- * this in the fixture suite, so hitting it is itself a signal something
- * unexpected is going on, and the caller treats it as inconclusive
- * (verification fails closed -- see verifyNativeOutput's "biased toward
- * false positives over false negatives" rule). */
+/** Above this many distinct leaves a truth table (2^N rows) is too big, and
+ * the comparison uses decision diagrams instead (bddEquivalent). An
+ * automation with "any of 21 windows open" couldn't be saved when this was
+ * a hard limit (bug #217). */
 export const MAX_TRUTH_TABLE_LEAVES = 20;
+
+/** Decision-diagram nodes a comparison may build before it gives up (and
+ * verification fails closed -- see verifyNativeOutput's "biased toward
+ * false positives over false negatives" rule). And/or lists of conditions,
+ * however long, take a few nodes per leaf. */
+export const MAX_BDD_NODES = 200_000;
+
+/**
+ * Exact equivalence by reduced ordered binary decision diagrams over
+ * `leaves` (in that order): such a diagram is canonical, so two expressions
+ * are equivalent exactly when they build to the same node. Used past
+ * MAX_TRUTH_TABLE_LEAVES; fails closed past MAX_BDD_NODES.
+ */
+export function bddEquivalent(a: BoolExpr, b: BoolExpr, leaves: string[]): BoolCompareResult {
+  const index = new Map(leaves.map((leaf, i) => [leaf, i]));
+  // Node 0 is false and 1 is true; others are [variable, low, high].
+  const nodes: [number, number, number][] = [
+    [leaves.length, 0, 0],
+    [leaves.length, 1, 1],
+  ];
+  const unique = new Map<string, number>();
+  const memo = new Map<string, number>();
+  const mk = (v: number, lo: number, hi: number): number => {
+    if (lo === hi) return lo;
+    const key = `${v},${lo},${hi}`;
+    const found = unique.get(key);
+    if (found !== undefined) return found;
+    if (nodes.length >= MAX_BDD_NODES) throw new Error('budget');
+    nodes.push([v, lo, hi]);
+    unique.set(key, nodes.length - 1);
+    return nodes.length - 1;
+  };
+  const apply = (op: 'and' | 'or' | 'xor', x: number, y: number): number => {
+    if (x <= 1 && y <= 1) {
+      const bx = x === 1;
+      const by = y === 1;
+      return (op === 'and' ? bx && by : op === 'or' ? bx || by : bx !== by) ? 1 : 0;
+    }
+    if (op === 'and' && (x === 0 || y === 0)) return 0;
+    if (op === 'or' && (x === 1 || y === 1)) return 1;
+    const key = `${op},${x},${y}`;
+    const found = memo.get(key);
+    if (found !== undefined) return found;
+    const [vx, lx, hx] = nodes[x];
+    const [vy, ly, hy] = nodes[y];
+    const v = Math.min(vx, vy);
+    const result = mk(
+      v,
+      apply(op, vx === v ? lx : x, vy === v ? ly : y),
+      apply(op, vx === v ? hx : x, vy === v ? hy : y)
+    );
+    memo.set(key, result);
+    return result;
+  };
+  const build = (expr: BoolExpr): number => {
+    switch (expr.op) {
+      case 'const':
+        return expr.value ? 1 : 0;
+      case 'leaf':
+        return mk(index.get(expr.key) ?? 0, 0, 1);
+      case 'not':
+        return apply('xor', build(expr.arg), 1);
+      case 'and':
+        return expr.args.reduce((acc, arg) => apply('and', acc, build(arg)), 1);
+      case 'or':
+        return expr.args.reduce((acc, arg) => apply('or', acc, build(arg)), 0);
+    }
+  };
+  try {
+    const ra = build(a);
+    const rb = build(b);
+    if (ra === rb) return { equivalent: true };
+    // A world where they differ: a path to true in a XOR b.
+    let node = apply('xor', ra, rb);
+    const world: string[] = [];
+    while (node > 1) {
+      const [v, lo, hi] = nodes[node];
+      const takeHigh = lo === 0;
+      world.push(`${leaves[v]}=${takeHigh}`);
+      node = takeHigh ? hi : lo;
+    }
+    return {
+      equivalent: false,
+      reason: `condition expressions diverge when {${world.join(', ')}} (other conditions either way)`,
+    };
+  } catch {
+    return {
+      equivalent: false,
+      reason: `too many distinct conditions (${leaves.length}) to verify -- failing closed`,
+    };
+  }
+}
 
 export interface BoolCompareResult {
   equivalent: boolean;
@@ -330,12 +420,7 @@ export interface BoolCompareResult {
 export function boolExprEquivalent(a: BoolExpr, b: BoolExpr): BoolCompareResult {
   const leaves = [...new Set([...collectLeafKeys(a), ...collectLeafKeys(b)])];
 
-  if (leaves.length > MAX_TRUTH_TABLE_LEAVES) {
-    return {
-      equivalent: false,
-      reason: `too many distinct conditions (${leaves.length}) to verify exhaustively -- failing closed`,
-    };
-  }
+  if (leaves.length > MAX_TRUTH_TABLE_LEAVES) return bddEquivalent(a, b, leaves.sort());
 
   const rows = 1 << leaves.length;
   for (let row = 0; row < rows; row++) {

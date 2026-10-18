@@ -32,6 +32,8 @@ const SHORT_FORM_TRIGGERS: ReadonlySet<string> = new Set([
 
 const PATTERN_UNITS = ['hours', 'minutes', 'seconds'] as const;
 type PatternUnit = (typeof PATTERN_UNITS)[number];
+/** The most "every N" HA takes per unit (its TimePattern maximum). */
+const PATTERN_MOST: Record<PatternUnit, number> = { hours: 23, minutes: 59, seconds: 59 };
 
 /** A time pattern that's one "every N" ("/15" minutes), or none yet; null
  * for anything richer (it's edited as the panel edits it). */
@@ -278,7 +280,11 @@ function OffsetField({ value, onChange }: { value: unknown; onChange: (v: unknow
             aria-label={t('nodes:fillIn.sun.minutes')}
             value={offset.minutes || ''}
             placeholder="0"
-            onChange={(e) => onChange(sunOffsetValue(Number(e.target.value), offset.before))}
+            onChange={(e) => {
+              // Whole minutes only: HA refuses "00:1.5:00" (bug #212).
+              const minutes = Number(e.target.value);
+              if (Number.isInteger(minutes)) onChange(sunOffsetValue(minutes, offset.before));
+            }}
           />
           <span className="text-muted-foreground text-sm">{t('nodes:fillIn.sun.min')}</span>
           <Segmented
@@ -391,7 +397,14 @@ function TimePatternForm({ data, onPatch }: { data: Data; onPatch: Patch }) {
           className="h-8 w-20"
           aria-label={t('nodes:fillIn.pattern.every')}
           value={pattern.every || ''}
-          onChange={(e) => write(pattern.unit, Number(e.target.value))}
+          onChange={(e) => {
+            // A whole number HA takes for the unit (bug #212); 0 (cleared)
+            // clears the pattern.
+            const every = Number(e.target.value);
+            if (Number.isInteger(every) && every >= 0 && every <= PATTERN_MOST[pattern.unit]) {
+              write(pattern.unit, every);
+            }
+          }}
         />
         <Segmented
           tone="primary"

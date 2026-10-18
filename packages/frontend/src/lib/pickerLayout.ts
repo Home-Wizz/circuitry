@@ -64,11 +64,27 @@ export const CONDITION_GROUPED_BLOCKS: Readonly<Record<string, string>> = {
  * Non-device types. */
 export const ACTION_NON_DEVICE_BLOCKS: ReadonlySet<string> = new Set(['fire_event']);
 
-/** A category HA's descriptions brought that belongs to no entity domain
- * the catalog has (a new integration's): under Home Assistant ›
- * Integrations, as HA lists it. */
-export const isIntegrationCategory = (groupKey: string): boolean =>
-  groupKey.startsWith('discovered:');
+/** Catalog groups HA lists under Integrations although the catalog knows
+ * them: their integration is a service, not an entity domain, a helper or
+ * a system one (the moon's; HA 2026.10's add dialog, `_classifyDomain`,
+ * read in home-assistant/frontend 20260930.2). */
+export const INTEGRATION_GROUP_KEYS: ReadonlySet<string> = new Set(['moon']);
+
+/**
+ * Whether a category is under Home Assistant › Integrations, as HA's own
+ * dialog classifies it: a group HA lists there (the moon's), or one HA's
+ * descriptions brought that the catalog doesn't have -- unless its
+ * integration (`manifest/list`'s integration_type, when loaded) is an
+ * entity domain, a helper or a system one, which HA lists with the device
+ * types.
+ */
+export function isIntegrationCategory(groupKey: string, integrationType?: string): boolean {
+  if (INTEGRATION_GROUP_KEYS.has(groupKey)) return true;
+  if (!groupKey.startsWith('discovered:')) return false;
+  return (
+    integrationType !== 'entity' && integrationType !== 'helper' && integrationType !== 'system'
+  );
+}
 
 /** The 1-3 rule: a group of three or fewer is listed inline under its name;
  * a bigger one is one row that opens it. */

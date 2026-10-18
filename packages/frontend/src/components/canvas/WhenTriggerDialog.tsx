@@ -19,6 +19,7 @@ import {
   renderStackedColumns,
   ResultsColumn,
 } from '@/components/canvas/PickerColumns';
+import { DevicesEmpty, RegistryLoadNote, SearchEmpty } from '@/components/canvas/PickerLoadNotes';
 import { groupSections, headed } from '@/components/canvas/pickerRoot';
 import {
   deviceEntityRows,
@@ -50,9 +51,11 @@ import {
 } from '@/components/canvas/pickerCurrent';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
 import type { DeviceTrigger } from '@/hooks/useDeviceAutomation';
+import { useIntegrationManifests } from '@/hooks/useIntegrationManifests';
 import { useTriggerCatalog } from '@/hooks/useHaCatalog';
 import { usePickNeedsSettings } from '@/hooks/usePickGaps';
 import { buildCompositeValue } from '@/lib/deviceTriggerLabels';
+import { ANYTHING_IN, type PlaceTarget } from '@/lib/stepTargets';
 import { getDomainColor } from '@/lib/domain-colors';
 import { getPickerIcon, StepIcon } from '@/components/nodes/StepIcon';
 import { useNativeDescriptions } from '@/hooks/useNativeDescriptions';
@@ -122,8 +125,8 @@ type NavColumn =
       label: string;
       recipe: TriggerRecipe;
       entityIds: string[];
-      /** "Anything in <room>" as the list's first line. */
-      area?: { areaId: string; label: string };
+      /** "Anything in <room>" (or labelled <label>, on <floor>) as the list's first line. */
+      place?: { target: PlaceTarget; label: string };
     }
   /** A room's State row: its entities, to tick. */
   | { kind: 'stateTargets'; label: string; entityIds: string[] }
@@ -168,6 +171,7 @@ export function WhenTriggerDialog({
   initialQuery,
 }: WhenTriggerDialogProps) {
   const { t } = useTranslation(['nodes']);
+  const { manifests, fetchManifests } = useIntegrationManifests();
   const places = usePickerPlaces(allEntities);
   const { entities } = places;
 
@@ -196,6 +200,9 @@ export function WhenTriggerDialog({
         setColumns([{ kind: 'search', query }]);
         setSelectedKeys([]);
       }
+      // Which group a new integration's types go in depends on its
+      // manifest, fetched as HA's own dialog does (a no-op once loaded).
+      fetchManifests();
     }
   }, [open]);
 
@@ -241,10 +248,13 @@ export function WhenTriggerDialog({
       pushColumn(atIndex, { kind: 'platformEntities', platform }, platform);
     else configure(atIndex, platformDraft(platform));
   };
-  const entityTargetDraft = (entityIds: string[]): TriggerDraft => ({
-    pickKey: `entity:${entityIds.join(',')}`,
-    title: platformLabel('state'),
-    data: buildTriggerNodeData({ kind: 'entityTarget', entityIds }),
+  const entityTargetDraft = (
+    entityIds: string[],
+    platform: 'state' | 'numeric_state' = 'state'
+  ): TriggerDraft => ({
+    pickKey: `entity:${platform}:${entityIds.join(',')}`,
+    title: platformLabel(platform),
+    data: buildTriggerNodeData({ kind: 'entityTarget', entityIds, platform }),
   });
   const deviceTriggerDraft = (trigger: DeviceTrigger): TriggerDraft => ({
     pickKey: `device:${trigger.device_id}:${buildCompositeValue(trigger)}`,
@@ -254,11 +264,13 @@ export function WhenTriggerDialog({
   const recipeDraft = (
     entityIds: string[],
     recipe: TriggerRecipe,
-    areaId?: string
+    place?: PlaceTarget
   ): TriggerDraft => ({
-    pickKey: areaId ? `recipe:${recipe.id}:area:${areaId}` : recipeChoiceKey(recipe.id, entityIds),
+    pickKey: place
+      ? `recipe:${recipe.id}:${place.key}:${place.id}`
+      : recipeChoiceKey(recipe.id, entityIds),
     title: recipe.label,
-    data: buildTriggerNodeData({ kind: 'recipe', entityIds, recipe, areaId }),
+    data: buildTriggerNodeData({ kind: 'recipe', entityIds, recipe, place }),
   });
   // A tick list's button says what comes next: "Next: settings" when the
   // pick still needs its Fill in column (pickNeedsSettings), else Add.
@@ -270,8 +282,8 @@ export function WhenTriggerDialog({
     atIndex: number,
     entityIds: string[],
     recipe: TriggerRecipe,
-    areaId?: string
-  ) => configure(atIndex, recipeDraft(entityIds, recipe, areaId));
+    place?: PlaceTarget
+  ) => configure(atIndex, recipeDraft(entityIds, recipe, place));
   /** A type picked from a list of types: its entities first, when it acts on some. */
   const selectTypeRecipe = (
     atIndex: number,
@@ -292,6 +304,8 @@ export function WhenTriggerDialog({
     unassignedOption: (key) => t(`nodes:picker.unassignedOptions.${key}`),
   };
 
+  // A type with no entity to tick goes on without a target, as in HA.
+  const withoutTargetLabel = t('nodes:pickerConfig.continueWithoutTarget');
   const multiTargetLabels = {
     addAllLabel: t('nodes:triggers.picker.when.addAllTargets'),
     clearAllLabel: t('nodes:triggers.picker.when.clearAllTargets'),
@@ -307,17 +321,20 @@ export function WhenTriggerDialog({
   const triggerDescriptions = useNativeDescriptions('trigger');
   const timeCategories = catalog.filter((c) => TIME_CATEGORY_DOMAINS.has(c.domain));
   const sunCategories = catalog.filter((c) => SUN_CATEGORY_DOMAINS.has(c.domain));
-  const integrationCategories = catalog.filter((c) => isIntegrationCategory(c.groupKey));
+  const isIntegration = (c: { groupKey: string; domain: string }) =>
+    isIntegrationCategory(c.groupKey, manifests?.[c.domain]?.integration_type);
+  const integrationCategories = catalog.filter(isIntegration);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: isIntegration reads only catalog's categories and manifests
   const categoriesByDomain = useMemo(
     () =>
       groupCategoriesByType(
         catalog.filter(
           // Every type HA describes (the calendar's and the schedule's under
           // Time too); the sun's are under Sun.
-          (c) => !SUN_CATEGORY_DOMAINS.has(c.domain) && !isIntegrationCategory(c.groupKey)
+          (c) => !SUN_CATEGORY_DOMAINS.has(c.domain) && !isIntegration(c)
         )
       ),
-    [catalog]
+    [catalog, manifests]
   );
 
   // ---- Rows -----------------------------------------------------------
@@ -502,6 +519,7 @@ export function WhenTriggerDialog({
           ...TRIGGER_GENERIC_PLATFORMS.map((p) => platformRow(p, atIndex)),
         ];
       case 'integrations':
+        // A to Z, as HA lists its integration groups.
         return [
           ...TRIGGER_INTEGRATION_PLATFORMS.map((p) => platformRow(p, atIndex)),
           ...integrationCategories.map((category) => ({
@@ -512,7 +530,7 @@ export function WhenTriggerDialog({
             onSelect: () =>
               pushColumn(atIndex, { kind: 'typeResults', category }, category.groupKey),
           })),
-        ];
+        ].sort((x, y) => x.label.localeCompare(y.label));
     }
   };
   const groupSectionsAt = (key: GroupKey) =>
@@ -596,6 +614,7 @@ export function WhenTriggerDialog({
         areas: t('nodes:picker.search.areas'),
         devices: t('nodes:picker.search.devices'),
         entities: t('nodes:picker.search.entities'),
+        labels: t('nodes:picker.search.labels'),
       }),
     ];
   };
@@ -610,6 +629,7 @@ export function WhenTriggerDialog({
             key={index}
             sections={rootSections()}
             selectedKey={selectedKeys[index]}
+            top={<RegistryLoadNote />}
           />
         );
 
@@ -619,6 +639,7 @@ export function WhenTriggerDialog({
             key={index}
             sections={searchSections(column.query)}
             selectedKey={selectedKeys[index]}
+            empty={<SearchEmpty />}
           />
         );
 
@@ -629,6 +650,7 @@ export function WhenTriggerDialog({
             title={t('nodes:picker.rows.devices')}
             sections={devicesSections(places, index, pushColumn)}
             selectedKey={selectedKeys[index]}
+            empty={<DevicesEmpty />}
           />
         );
 
@@ -775,7 +797,9 @@ export function WhenTriggerDialog({
               // Every entity, config and diagnostic ones too: a room's battery
               // level is looked up here (#177).
               entities={allEntities}
-              onSelectEntityTarget={(entityId) => configure(index, entityTargetDraft([entityId]))}
+              onSelectEntityTarget={(entityId, platform) =>
+                configure(index, entityTargetDraft([entityId], platform))
+              }
               onSelectStateTargets={(entityIds) =>
                 pushColumn(
                   index,
@@ -790,7 +814,7 @@ export function WhenTriggerDialog({
               onSelectRecipe={(entityIds, recipe) =>
                 routeScopePick(column.scope, entityIds, triggerRecipeTakesArea(recipe), {
                   pick: (ids) => selectRecipe(index, ids, recipe),
-                  tick: (ids, areaId) =>
+                  tick: (ids, place) =>
                     pushColumn(
                       index,
                       {
@@ -798,7 +822,7 @@ export function WhenTriggerDialog({
                         label: recipe.label,
                         recipe,
                         entityIds: ids,
-                        area: areaId ? { areaId, label: column.scope.label } : undefined,
+                        place: place ? { target: place, label: column.scope.label } : undefined,
                       },
                       recipeChoiceKey(recipe.id, ids)
                     ),
@@ -814,7 +838,7 @@ export function WhenTriggerDialog({
             key={index}
             title={platformLabel(column.platform)}
             rows={entityTargetRows(entities)}
-            labels={multiTargetLabels}
+            labels={{ ...multiTargetLabels, addWithoutTargetLabel: withoutTargetLabel }}
             onCommit={(entityIds) => configure(index, platformDraft(column.platform, entityIds))}
           />
         );
@@ -839,10 +863,13 @@ export function WhenTriggerDialog({
             key={index}
             title={column.recipe.label}
             rows={entityTargetRows(offered)}
-            labels={recipeTargetLabels(
-              column.recipe,
-              offered.map((e) => e.entity_id)
-            )}
+            labels={{
+              ...recipeTargetLabels(
+                column.recipe,
+                offered.map((e) => e.entity_id)
+              ),
+              addWithoutTargetLabel: withoutTargetLabel,
+            }}
             onCommit={(entityIds) => selectRecipe(index, entityIds, column.recipe)}
           />
         );
@@ -861,10 +888,10 @@ export function WhenTriggerDialog({
             labels={recipeTargetLabels(column.recipe, column.entityIds)}
             onCommit={(entityIds) => selectRecipe(index, entityIds, column.recipe)}
             wholeArea={
-              column.area && {
-                label: t('nodes:picker.rows.anythingIn', { name: column.area.label }),
+              column.place && {
+                label: t(ANYTHING_IN[column.place.target.key], { name: column.place.label }),
                 onSelect: () =>
-                  selectRecipe(index, column.entityIds, column.recipe, column.area?.areaId),
+                  selectRecipe(index, column.entityIds, column.recipe, column.place?.target),
               }
             }
           />

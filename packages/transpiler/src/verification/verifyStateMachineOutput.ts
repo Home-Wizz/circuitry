@@ -2,26 +2,23 @@ import type { FlowGraph } from '@circuitry/shared';
 import { load as yamlLoad } from 'js-yaml';
 import { normalizeGraph } from '../analyzer/normalize';
 import { findBackEdges } from '../analyzer/topology';
-import type { BProgram } from './behaviorProgram';
-import { programsEquivalent } from './behaviorProgram';
-import { boolExprEquivalent } from './boolean';
+import { compareMachineStates, programsEquivalent } from './behaviorProgram';
 import { extractGraphSettings, SharedLoopEntryError } from './extractFromGraph';
 import { extractYamlSettings } from './extractFromYaml';
 import {
   type EntrySpec,
   expectedLoopBookkeeping,
   extractStateMachineFromGraph,
-  type LeafState,
+  machineStateFromGraph,
   type ParallelEntrySpec,
   type StateSpec,
-  type Transition,
 } from './extractStateMachineFromGraph';
 import {
   extractStateMachineFromYamlConfig,
+  machineStateFromYaml,
   type YamlEntrySpec,
   type YamlParallelEntrySpec,
   type YamlStateSpec,
-  type YamlTransition,
 } from './extractStateMachineFromYaml';
 import { compareMetadata, compareTriggerSets } from './verifyNativeOutput';
 
@@ -157,6 +154,20 @@ export function verifyStateMachineOutput(
   const entryDiff = compareEntry(graph.entry, yaml.entry);
   if (entryDiff) return { valid: false, reason: entryDiff };
 
+  // A trigger with nothing joined starts at END and must stop before the
+  // dispatch loop, or the loop's one round runs the default's log line
+  // (bug #195); with no such trigger there is no stop.
+  const needsStop =
+    graph.entry.kind === 'byTriggerIdx' && [...graph.entry.targets.values()].includes('END');
+  if (needsStop !== (yaml.noStepsStop ?? false)) {
+    return {
+      valid: false,
+      reason: needsStop
+        ? 'a trigger with nothing joined starts at END, but the stop before the dispatch loop is missing'
+        : 'the stop for a trigger with no steps is there, but every trigger has steps',
+    };
+  }
+
   const parallelDiff = compareParallelEntries(graph.parallelEntries, yaml.parallelEntries);
   if (parallelDiff) return { valid: false, reason: parallelDiff };
 
@@ -182,33 +193,20 @@ function compareEntry(g: EntrySpec, y: YamlEntrySpec): string | null {
     return `entry: expected trigger.idx-routed entry (multiple triggers with different targets), candidate YAML has a single fixed target "${y.target}"`;
   }
 
-  const missingFromIfElif: Array<[number, string]> = [];
+  // HA runs the `{% else %}` route for every trigger.idx the if/elif
+  // chain doesn't name, so each graph trigger is compared with the route
+  // HA would take for it. (This used to expect exactly one trigger left to
+  // the else and left out triggers with nothing joined, as the generator
+  // did: bug #195.)
   for (const [idx, target] of g.targets) {
-    if (y.ifElifTargets.has(idx)) {
-      const yTarget = y.ifElifTargets.get(idx)!;
-      if (yTarget !== target) return `entry trigger.idx ${idx} target changed: ${target} -> ${yTarget}`;
-    } else {
-      missingFromIfElif.push([idx, target]);
-    }
+    const yTarget = y.ifElifTargets.get(idx) ?? y.elseTarget;
+    if (yTarget !== target)
+      return `entry trigger.idx ${idx} target changed: ${target} -> ${yTarget}`;
   }
   for (const idx of y.ifElifTargets.keys()) {
     if (!g.targets.has(idx)) {
       return `entry template references trigger.idx ${idx}, which the graph has no trigger entry for`;
     }
-  }
-  // generateEntryNodeExpression's {% else %} clause deliberately never
-  // restates its own trigger.idx (it's simply "whichever index isn't
-  // covered by an if/elif") -- so exactly one graph-side idx must be the
-  // one left uncovered above, and its target must match the else clause.
-  if (missingFromIfElif.length !== 1) {
-    return (
-      `entry: expected exactly one trigger.idx to be covered only by the template's {% else %} clause, ` +
-      `found ${missingFromIfElif.length} (${JSON.stringify(missingFromIfElif)})`
-    );
-  }
-  const [, elseExpectedTarget] = missingFromIfElif[0];
-  if (elseExpectedTarget !== y.elseTarget) {
-    return `entry {% else %} target changed: ${elseExpectedTarget} -> ${y.elseTarget}`;
   }
   return null;
 }
@@ -226,7 +224,8 @@ function compareParallelEntries(
 
   for (const [id, gSpec] of g) {
     const ySpec = y.get(id)!;
-    if (ySpec.transition.kind === 'malformed') return `parallel entry "${id}": ${ySpec.transition.reason}`;
+    if (ySpec.transition.kind === 'malformed')
+      return `parallel entry "${id}": ${ySpec.transition.reason}`;
     if (ySpec.transition.target !== gSpec.convergence) {
       return `parallel entry "${id}" convergence target changed: ${gSpec.convergence} -> ${ySpec.transition.target}`;
     }
@@ -234,27 +233,6 @@ function compareParallelEntries(
     if (!progDiff.equal) return progDiff.reason ?? `parallel entry "${id}" content mismatch`;
   }
   return null;
-}
-
-function transitionTarget(t: Transition): string {
-  return t.kind === 'single' ? t.target : t.convergence;
-}
-
-function compareTransitionTarget(label: string, g: Transition, y: YamlTransition): string | null {
-  if (y.kind === 'malformed') return `${label}: ${y.reason}`;
-  const expected = transitionTarget(g);
-  if (expected !== y.target) return `${label}: transition target changed: ${expected} -> ${y.target}`;
-  return null;
-}
-
-function leafExpectedContent(state: LeafState): BProgram {
-  const own = state.ownStep ? [state.ownStep] : [];
-  const fanout = state.transition.kind === 'fanout' ? state.transition.program : [];
-  return [...own, ...fanout];
-}
-
-function conditionBranchExpectedContent(t: Transition): BProgram {
-  return t.kind === 'fanout' ? t.program : [];
 }
 
 /** #157: each drawn loop's round count, at its head, and its limit where
@@ -283,79 +261,12 @@ function compareLoopBookkeeping(
   return null;
 }
 
+/** The main dispatcher's states, compared as every branch machine's are
+ * (behaviorProgram.ts's compareMachineStates); its loop bookkeeping is
+ * compared on its own (compareLoopBookkeeping). */
 function compareStates(g: Map<string, StateSpec>, y: Map<string, YamlStateSpec>): string | null {
-  for (const id of g.keys()) {
-    if (!y.has(id)) return `state "${id}" is missing from the candidate YAML's dispatcher`;
-  }
-  for (const id of y.keys()) {
-    if (!g.has(id)) return `candidate YAML dispatcher has an unexpected state "${id}"`;
-  }
-
-  for (const [id, gState] of g) {
-    const yState = y.get(id)!;
-    if (yState.kind === 'malformed') return `state "${id}": ${yState.reason}`;
-    if (gState.kind !== yState.kind) {
-      return `state "${id}" kind changed: ${gState.kind} -> ${yState.kind}`;
-    }
-
-    if (gState.kind === 'condition' && yState.kind === 'condition') {
-      const condDiff = boolExprEquivalent(gState.cond, yState.cond);
-      if (!condDiff.equivalent) return `state "${id}".cond: ${condDiff.reason}`;
-
-      let diff = compareTransitionTarget(`state "${id}".true`, gState.trueTransition, yState.trueTransition);
-      if (diff) return diff;
-      diff = compareTransitionTarget(`state "${id}".false`, gState.falseTransition, yState.falseTransition);
-      if (diff) return diff;
-
-      const trueProgDiff = programsEquivalent(
-        conditionBranchExpectedContent(gState.trueTransition),
-        yState.trueContent,
-        `state "${id}".then`
-      );
-      if (!trueProgDiff.equal) return trueProgDiff.reason ?? `state "${id}".then content mismatch`;
-
-      const falseProgDiff = programsEquivalent(
-        conditionBranchExpectedContent(gState.falseTransition),
-        yState.falseContent,
-        `state "${id}".else`
-      );
-      if (!falseProgDiff.equal) return falseProgDiff.reason ?? `state "${id}".else content mismatch`;
-
-      // Bug #63: an until test must leave the loop when it can't be
-      // evaluated (an error guard to the loop's exit); nothing else may
-      // carry one.
-      if (gState.errorTransition && !yState.errorTransition) {
-        return `state "${id}": an until test without its error guard (an error would re-run the loop)`;
-      }
-      if (!gState.errorTransition && yState.errorTransition) {
-        return `state "${id}": an unexpected error guard`;
-      }
-      if (gState.errorTransition && yState.errorTransition) {
-        diff = compareTransitionTarget(
-          `state "${id}".error`,
-          gState.errorTransition,
-          yState.errorTransition
-        );
-        if (diff) return diff;
-        const errorProgDiff = programsEquivalent(
-          conditionBranchExpectedContent(gState.errorTransition),
-          yState.errorContent ?? [],
-          `state "${id}".error`
-        );
-        if (!errorProgDiff.equal)
-          return errorProgDiff.reason ?? `state "${id}".error content mismatch`;
-      }
-      continue;
-    }
-
-    if (gState.kind === 'leaf' && yState.kind === 'leaf') {
-      const diff = compareTransitionTarget(`state "${id}"`, gState.transition, yState.transition);
-      if (diff) return diff;
-
-      const progDiff = programsEquivalent(leafExpectedContent(gState), yState.content, `state "${id}"`);
-      if (!progDiff.equal) return progDiff.reason ?? `state "${id}" content mismatch`;
-      continue;
-    }
-  }
-  return null;
+  return compareMachineStates(
+    [...g].map(([id, state]) => machineStateFromGraph(id, state)),
+    [...y].map(([id, state]) => machineStateFromYaml(id, state))
+  );
 }

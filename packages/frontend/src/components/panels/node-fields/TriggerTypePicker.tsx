@@ -281,7 +281,7 @@ export function sortedDomainGroups(
 interface TriggerTypePickerProps {
   entities: HassEntity[];
   onSelectPlatform: (platform: TriggerPlatform) => void;
-  onSelectEntityTarget: (entityId: string) => void;
+  onSelectEntityTarget: (entityId: string, platform?: 'state' | 'numeric_state') => void;
   onSelectDeviceTrigger: (trigger: DeviceTrigger) => void;
   onSelectRecipe: (entityIds: string[], recipe: TriggerRecipe) => void;
 }

@@ -20,6 +20,8 @@ import {
   OPAQUE_STEP_KEY,
 } from '@circuitry/shared';
 import { generateEdgeId } from '../utils/generateIds';
+import { nodeKey } from '../utils/nodeKey';
+import { separateOverlaps } from './layout';
 
 /**
  * Extract Circuitry metadata from variables section
@@ -71,7 +73,10 @@ export function extractMetadata(
       }
     }
   } catch (err) {
-    console.warn('Circuitry: error reading saved layout metadata, falling back to auto-layout', err);
+    console.warn(
+      'Circuitry: error reading saved layout metadata, falling back to auto-layout',
+      err
+    );
     warnings?.push(
       'Saved node layout could not be restored (error reading metadata) — automation was auto-arranged.'
     );
@@ -156,10 +161,10 @@ export function importCondition(condition: unknown, where: string): HACondition 
       `${where}: this condition can't be read (it has no condition type): ${JSON.stringify(condition)}`
     );
   }
-  const issues = result.error.issues
-    .map((issue) => `${issue.path.join('.') || '(condition)'}: ${issue.message}`)
-    .join('; ');
-  throw new Error(`${where}: this condition can't be read (${issues}): ${JSON.stringify(condition)}`);
+  const issues = schemaIssueText(result.error.issues);
+  throw new Error(
+    `${where}: this condition can't be read (${issues}): ${JSON.stringify(condition)}`
+  );
 }
 
 /**
@@ -234,10 +239,83 @@ export function createOpaqueStepNode(
  * Apply positions from metadata
  */
 export function applyMetadataPositions(nodes: FlowNode[], metadata: CircuitryMetadata): FlowNode[] {
+  const keys = metadata.node_keys;
+  if (
+    keys &&
+    !nodes.every((node) => keys[node.id] === undefined || keys[node.id] === nodeKey(node))
+  ) {
+    return positionsByKind(nodes, metadata, keys);
+  }
   return nodes.map((node) => ({
     ...node,
     position: metadata.nodes[node.id] || node.position,
   }));
+}
+
+/** Where a card was made in the parse: its saved id's place in the saved
+ * order, or past it, by the index a new id carries (generateNodeId). */
+function creationIndex(id: string, savedOrder: Map<string, number>): number {
+  const saved = savedOrder.get(id);
+  if (saved !== undefined) return saved;
+  const match = /_(\d+)_\d+$/.exec(id);
+  return savedOrder.size + (match ? Number(match[1]) : 0);
+}
+
+/**
+ * Positions for an automation whose steps changed since it was saved (bug
+ * #222): the parsed cards, in the order they were read, are matched to the
+ * saved cards by kind (a longest common subsequence, so an added or
+ * removed step doesn't shift the rest); a matched card takes its saved
+ * card's position, a new one goes below the card read before it, and no
+ * two end up overlapping.
+ */
+function positionsByKind(
+  nodes: FlowNode[],
+  metadata: CircuitryMetadata,
+  keys: Record<string, string>
+): FlowNode[] {
+  const savedIds = Object.keys(metadata.nodes);
+  const savedOrder = new Map(savedIds.map((id, i) => [id, i]));
+  const parsed = [...nodes].sort(
+    (a, b) => creationIndex(a.id, savedOrder) - creationIndex(b.id, savedOrder)
+  );
+  const a = parsed.map(nodeKey);
+  const b = savedIds.map((id) => keys[id] ?? '');
+  // lcs[i][j]: the longest match of a[i..] and b[j..].
+  const lcs = Array.from({ length: a.length + 1 }, () => new Array<number>(b.length + 1).fill(0));
+  for (let i = a.length - 1; i >= 0; i--) {
+    for (let j = b.length - 1; j >= 0; j--) {
+      lcs[i][j] = a[i] === b[j] ? lcs[i + 1][j + 1] + 1 : Math.max(lcs[i + 1][j], lcs[i][j + 1]);
+    }
+  }
+  const position = new Map<string, { x: number; y: number }>();
+  let i = 0;
+  let j = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) {
+      position.set(parsed[i].id, metadata.nodes[savedIds[j]]);
+      i++;
+      j++;
+    } else if (lcs[i + 1][j] >= lcs[i][j + 1]) {
+      i++;
+    } else {
+      j++;
+    }
+  }
+  let previous: { x: number; y: number } | undefined;
+  for (const node of parsed) {
+    const at = position.get(node.id);
+    if (at) {
+      previous = at;
+    } else {
+      const placed = previous ? { x: previous.x, y: previous.y + 140 } : { x: 40, y: 40 };
+      position.set(node.id, placed);
+      previous = placed;
+    }
+  }
+  return separateOverlaps(
+    nodes.map((node) => ({ ...node, position: position.get(node.id) ?? node.position }))
+  );
 }
 
 /**
@@ -252,6 +330,115 @@ export function createEdge(source: string, target: string, sourceHandle?: string
   };
 }
 
+/** The part of a schema check's issue that a refusal reads. */
+interface SchemaIssue {
+  readonly path: readonly PropertyKey[];
+  readonly message: string;
+  readonly code?: string;
+  readonly expected?: string;
+  readonly errors?: readonly (readonly SchemaIssue[])[];
+}
+
+const EXPECTED_WORDS: Readonly<Record<string, string>> = {
+  string: 'text',
+  array: 'a list',
+  null: 'null',
+  number: 'a number',
+  boolean: 'true or false',
+  object: 'a mapping',
+};
+const RECEIVED_WORDS: Readonly<Record<string, string>> = {
+  string: 'text',
+  array: 'a list',
+  null: 'null',
+  undefined: 'nothing',
+  number: 'a number',
+  boolean: 'true or false',
+  object: 'a mapping',
+  Date: 'a date',
+};
+
+/** One issue as a field and what was wrong with it. Of a union's
+ * alternatives the one that read furthest into the value is the one meant
+ * (a list with a number in it: the number). */
+function issueWords(issue: SchemaIssue, prefix: readonly PropertyKey[]): string {
+  const branches = issue.code === 'invalid_union' ? (issue.errors ?? []) : [];
+  const deeper = branches.map((b) => b[0]).find((i) => i !== undefined && i.path.length > 0);
+  if (deeper) return issueWords(deeper, [...prefix, ...issue.path]);
+  const alternatives = branches.length > 0 ? branches.map((b) => b[0]) : [issue];
+  const typed = alternatives.filter(
+    (i): i is SchemaIssue & { expected: string } =>
+      i !== undefined && i.code === 'invalid_type' && typeof i.expected === 'string'
+  );
+  const field = [...prefix, ...issue.path].map(String).join('.') || '(whole)';
+  if (typed.length === 0 || typed.length !== alternatives.length) {
+    return `${field}: ${issue.message}`;
+  }
+  const expected = [...new Set(typed.map((i) => EXPECTED_WORDS[i.expected] ?? i.expected))];
+  const received = /received (\w+)/.exec(typed[0]?.message ?? '')?.[1];
+  const listed =
+    expected.length > 1
+      ? `${expected.slice(0, -1).join(', ')} or ${expected[expected.length - 1]}`
+      : expected[0];
+  return `${field}: expected ${listed}${received ? `, received ${RECEIVED_WORDS[received] ?? received}` : ''}`;
+}
+
+/** Why a schema refused a value, in words: each field and what it
+ * expected (bug #233: a refused trigger's reason was the check's raw JSON). */
+export function schemaIssueText(issues: readonly SchemaIssue[]): string {
+  return issues.map((issue) => issueWords(issue, [])).join('; ');
+}
+
+const isMapping = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/**
+ * Why HA refuses a step whose shape the reading below would otherwise
+ * rewrite into one it takes (bug #245, decision D3: refused, with the
+ * reason). Checked against HA 2026.10's script schema: a step with both
+ * `service:` and `action:`, a `repeat:` without `sequence:`, an `if:`
+ * without `then:` (`then: null` is taken), a choose option without
+ * `conditions:`. They were read as the action alone, an internal schema
+ * dump, a save that failed with "please report", and an option that
+ * always runs.
+ */
+export function stepShapeRefusal(step: Record<string, unknown>): string | undefined {
+  if ('service' in step && 'action' in step) {
+    return 'it has both `service:` and `action:` (Home Assistant takes only `action:`)';
+  }
+  if (isMapping(step.repeat) && !('sequence' in step.repeat)) {
+    return 'its `repeat:` has no `sequence:` (the steps it repeats)';
+  }
+  if ('if' in step && !('then' in step)) return 'its `if:` has no `then:`';
+  const options = Array.isArray(step.choose)
+    ? step.choose
+    : isMapping(step.choose)
+      ? [step.choose]
+      : [];
+  if (options.some((option) => isMapping(option) && !('conditions' in option))) {
+    return 'an option of its `choose:` has no `conditions:`';
+  }
+  return undefined;
+}
+
+/**
+ * Why HA refuses a trigger the schema below would read anyway (bug #245):
+ * one with no type (it was read as a state trigger), and one with
+ * `trigger:` and `platform:` naming different types (`platform:` was
+ * dropped). HA refuses both keys even when they agree; that one is kept,
+ * as `trigger:`, since it can only mean one thing.
+ */
+export function triggerShapeRefusal(trigger: unknown): string | undefined {
+  if (!isMapping(trigger)) return undefined;
+  if (!('trigger' in trigger) && !('platform' in trigger)) {
+    return 'it has no trigger type (`trigger:`)';
+  }
+  if ('trigger' in trigger && 'platform' in trigger && trigger.trigger !== trigger.platform) {
+    return 'it has both `trigger:` and `platform:`, naming different types (Home Assistant takes only `trigger:`)';
+  }
+  return undefined;
+}
+
 /**
  * The triggers of a `wait_for_trigger` step, read the way top-level
  * triggers are. A trigger the schema can't read stops the import with the
@@ -261,10 +448,14 @@ export function createEdge(source: string, target: string, sourceHandle?: string
  */
 export function importWaitTriggers(triggers: readonly unknown[]): HATrigger[] {
   return triggers.map((trigger, index) => {
+    const refused = triggerShapeRefusal(trigger);
+    if (refused) {
+      throw new Error(`Could not read trigger ${index + 1} of a wait_for_trigger: ${refused}`);
+    }
     const result = HATriggerSchema.safeParse(trigger);
     if (!result.success) {
       throw new Error(
-        `Could not read trigger ${index + 1} of a wait_for_trigger: ${result.error.message}`
+        `Could not read trigger ${index + 1} of a wait_for_trigger: ${schemaIssueText(result.error.issues)}`
       );
     }
     return unfoldEventContextUserId(result.data);
@@ -285,11 +476,13 @@ export function parseTriggers(
   getNextNodeId: (type: string) => string
 ): FlowNode[] {
   return triggers.map((trigger, index) => {
+    const refused = triggerShapeRefusal(trigger);
+    if (refused) throw new Error(`Could not read trigger ${index + 1}: ${refused}`);
     const result = HATriggerSchema.safeParse(trigger);
     if (!result.success || typeof trigger !== 'object' || trigger === null) {
       throw new Error(
         `Could not read trigger ${index + 1}: ${
-          result.success ? 'a trigger is a mapping' : result.error.message
+          result.success ? 'a trigger is a mapping' : schemaIssueText(result.error.issues)
         }`
       );
     }
@@ -302,4 +495,3 @@ export function parseTriggers(
     return node;
   });
 }
-

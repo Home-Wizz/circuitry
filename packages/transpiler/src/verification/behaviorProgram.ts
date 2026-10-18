@@ -40,7 +40,46 @@ export type BStep =
       test?: BoolExpr; // while/until
       count?: string; // count -- normalized to a string so `5` and `"5"` compare equal
       body: BProgram;
+    }
+  | {
+      /** #284: a fan-out branch written as a state machine of its own
+       * (utils/branchMachine.ts), read state by state as the main
+       * dispatcher is. The states' variables are read under the main
+       * machine's names; `name` is the branch's own. */
+      k: 'machine';
+      name: string;
+      entry: string;
+      /** By state id, sorted (an array, so canonicalProgramKey sees it). */
+      states: MachineState[];
+      /** What is wrong with the machine's fixed form, if anything. */
+      malformed?: string;
     };
+
+/** Where a state goes next: one state, or a transition that isn't one. */
+export type MachineNext =
+  | { kind: 'single'; target: string }
+  | { kind: 'malformed'; reason: string };
+
+/**
+ * One state of a dispatcher, as both readers give it (the graph's
+ * StateSpec and the YAML's YamlStateSpec, each put in this form): what it
+ * runs and where it goes. `loopSteps` is its loop bookkeeping (#157) as
+ * JSON, when compared here (the main dispatcher's is compared on its own).
+ */
+export type MachineState = { id: string; loopSteps?: string } & (
+  | { kind: 'leaf'; content: BProgram; next: MachineNext }
+  | {
+      kind: 'condition';
+      cond: BoolExpr;
+      then: BProgram;
+      thenNext: MachineNext;
+      else: BProgram;
+      elseNext: MachineNext;
+      /** Bug #63: an until test's error guard. */
+      error?: { content: BProgram; next: MachineNext };
+    }
+  | { kind: 'malformed'; reason: string }
+);
 
 export interface CompareResult {
   equal: boolean;
@@ -328,7 +367,22 @@ function commonSuffixLength(a: BProgram, b: BProgram): number {
   return n;
 }
 
+/** normalizeStep's results, per step object and pass: a step shared
+ * between branches (the rest the YAML reading threads into each) is
+ * normalized once, not once per branch (bug #220). Steps are never
+ * changed once built, and normalizeStep is a function of its arguments. */
+const normalizedSteps = [new WeakMap<BStep, BStep>(), new WeakMap<BStep, BStep>()];
+
 function normalizeStep(step: BStep, stopRules: boolean): BStep {
+  const cache = normalizedSteps[stopRules ? 1 : 0];
+  const cached = cache.get(step);
+  if (cached) return cached;
+  const result = normalizeStepOnce(step, stopRules);
+  cache.set(step, result);
+  return result;
+}
+
+function normalizeStepOnce(step: BStep, stopRules: boolean): BStep {
   if (step.k === 'if') {
     let then = normalizeTree(step.then, stopRules);
     let elseProgram = normalizeTree(step.else, stopRules);
@@ -404,28 +458,64 @@ function normalizeStep(step: BStep, stopRules: boolean): BStep {
  * normalized (sorted) so two structurally-equivalent-but-reordered ASTs
  * produce the identical key -- used only to decide whether normalizeStep's
  * AND-fold applies, not as the final equivalence check (that's
- * boolExprEquivalent's exact truth-table comparison). */
-function canonicalProgramKey(value: unknown): string {
-  return JSON.stringify(canonicalizeForKey(value));
+ * boolExprEquivalent's exact truth-table comparison).
+ *
+ * Built from the keys of its parts, each worked out once per object: the
+ * YAML reading shares "the rest" between every branch it's read into, and
+ * re-encoding it in each branch doubled the work per if (the save freeze,
+ * bug #220). The string is exactly JSON.stringify of the canonical form. */
+export function canonicalProgramKey(value: unknown): string {
+  return keyOf(value);
 }
 
-function canonicalizeForKey(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalizeForKey);
-  if (value && typeof value === 'object') {
+const keyCache = new WeakMap<object, string>();
+
+function keyOf(value: unknown): string {
+  if (value === null || typeof value !== 'object') {
+    // As JSON.stringify writes a value inside an array (undefined -> null).
+    return value === undefined ? 'null' : JSON.stringify(value);
+  }
+  const cached = keyCache.get(value);
+  if (cached !== undefined) return cached;
+  let key: string;
+  if (Array.isArray(value)) {
+    key = `[${value.map(keyOf).join(',')}]`;
+  } else {
     const obj = value as Record<string, unknown>;
     if ((obj.op === 'and' || obj.op === 'or') && Array.isArray(obj.args)) {
-      const args = obj.args.map(canonicalizeForKey);
-      args.sort((x, y) => (JSON.stringify(x) < JSON.stringify(y) ? -1 : JSON.stringify(x) > JSON.stringify(y) ? 1 : 0));
-      return { op: obj.op, args };
+      const args = obj.args.map(keyOf).sort((x, y) => (x < y ? -1 : x > y ? 1 : 0));
+      key = `{"op":${JSON.stringify(obj.op)},"args":[${args.join(',')}]}`;
+    } else {
+      const parts: string[] = [];
+      for (const k of Object.keys(obj).sort()) {
+        // JSON.stringify leaves out a key whose value is undefined.
+        if (obj[k] === undefined) continue;
+        parts.push(`${JSON.stringify(k)}:${keyOf(obj[k])}`);
+      }
+      key = `{${parts.join(',')}}`;
     }
-    const out: Record<string, unknown> = {};
-    for (const key of Object.keys(obj).sort()) out[key] = canonicalizeForKey(obj[key]);
-    return out;
   }
-  return value;
+  keyCache.set(value, key);
+  return key;
 }
 
+/** Pairs of steps already found equivalent: shared parts are compared
+ * once (bug #220). Only "equal" is kept -- a difference still returns at
+ * once, with its own path. */
+const provenEqual = new WeakMap<BStep, WeakSet<BStep>>();
+
 function stepEquivalent(a: BStep, b: BStep, path: string): CompareResult {
+  if (provenEqual.get(a)?.has(b)) return { equal: true };
+  const result = stepEquivalentOnce(a, b, path);
+  if (result.equal) {
+    const seen = provenEqual.get(a) ?? new WeakSet<BStep>();
+    seen.add(b);
+    provenEqual.set(a, seen);
+  }
+  return result;
+}
+
+function stepEquivalentOnce(a: BStep, b: BStep, path: string): CompareResult {
   if (a.k !== b.k) {
     return { equal: false, reason: `${path}: step kind changed ("${a.k}" -> "${b.k}")` };
   }
@@ -473,7 +563,107 @@ function stepEquivalent(a: BStep, b: BStep, path: string): CompareResult {
     return programsEquivalent(a.body, b.body, `${path}.body`);
   }
 
+  if (a.k === 'machine' && b.k === 'machine') {
+    for (const m of [a, b]) {
+      if (m.malformed) return { equal: false, reason: `${path}: branch machine: ${m.malformed}` };
+    }
+    if (a.name !== b.name) {
+      return {
+        equal: false,
+        reason: `${path}: branch machine name changed (${a.name} -> ${b.name})`,
+      };
+    }
+    if (a.entry !== b.entry) {
+      return {
+        equal: false,
+        reason: `${path}: branch machine entry changed (${a.entry} -> ${b.entry})`,
+      };
+    }
+    const diff = compareMachineStates(a.states, b.states, `${path}: branch machine `);
+    return diff ? { equal: false, reason: diff } : { equal: true };
+  }
+
   return { equal: false, reason: `${path}: unreachable step kind mismatch` };
+}
+
+function compareNext(label: string, g: MachineNext, y: MachineNext): string | null {
+  for (const next of [g, y]) if (next.kind === 'malformed') return `${label}: ${next.reason}`;
+  const want = g.kind === 'single' ? g.target : '';
+  const got = y.kind === 'single' ? y.target : '';
+  return want === got ? null : `${label}: transition target changed: ${want} -> ${got}`;
+}
+
+/**
+ * A dispatcher's states, read from the graph (`g`) and from the YAML
+ * (`y`), compared state by state: the same states, each the same kind,
+ * running the same steps and going to the same states (the main
+ * dispatcher's and every branch machine's, #284). `prefix` starts each
+ * reason.
+ */
+export function compareMachineStates(
+  g: MachineState[],
+  y: MachineState[],
+  prefix = ''
+): string | null {
+  const ys = new Map(y.map((s) => [s.id, s]));
+  const gs = new Map(g.map((s) => [s.id, s]));
+  for (const id of gs.keys()) {
+    if (!ys.has(id))
+      return `${prefix}state "${id}" is missing from the candidate YAML's dispatcher`;
+  }
+  for (const id of ys.keys()) {
+    if (!gs.has(id)) return `${prefix}candidate YAML dispatcher has an unexpected state "${id}"`;
+  }
+  for (const gState of g) {
+    const id = gState.id;
+    const at = `${prefix}state "${id}"`;
+    const yState = ys.get(id)!;
+    if (gState.kind === 'malformed') return `${at}: ${gState.reason}`;
+    if (yState.kind === 'malformed') return `${at}: ${yState.reason}`;
+    if (gState.kind !== yState.kind) return `${at} kind changed: ${gState.kind} -> ${yState.kind}`;
+    if (gState.loopSteps !== undefined && gState.loopSteps !== yState.loopSteps) {
+      return `${at}: its loop round count and limit aren't the ones its loops need (#157): ${(yState.loopSteps ?? '').slice(0, 300)}`;
+    }
+
+    if (gState.kind === 'condition' && yState.kind === 'condition') {
+      const condDiff = boolExprEquivalent(gState.cond, yState.cond);
+      if (!condDiff.equivalent) return `${at}.cond: ${condDiff.reason}`;
+      const diff =
+        compareNext(`${at}.true`, gState.thenNext, yState.thenNext) ??
+        compareNext(`${at}.false`, gState.elseNext, yState.elseNext);
+      if (diff) return diff;
+      const thenDiff = programsEquivalent(gState.then, yState.then, `${at}.then`);
+      if (!thenDiff.equal) return thenDiff.reason ?? `${at}.then content mismatch`;
+      const elseDiff = programsEquivalent(gState.else, yState.else, `${at}.else`);
+      if (!elseDiff.equal) return elseDiff.reason ?? `${at}.else content mismatch`;
+      // Bug #63: an until test must leave the loop when it can't be
+      // evaluated (an error guard to the loop's exit); nothing else may
+      // carry one.
+      if (gState.error && !yState.error) {
+        return `${at}: an until test without its error guard (an error would re-run the loop)`;
+      }
+      if (!gState.error && yState.error) return `${at}: an unexpected error guard`;
+      if (gState.error && yState.error) {
+        const errorDiff = compareNext(`${at}.error`, gState.error.next, yState.error.next);
+        if (errorDiff) return errorDiff;
+        const errorProgDiff = programsEquivalent(
+          gState.error.content,
+          yState.error.content,
+          `${at}.error`
+        );
+        if (!errorProgDiff.equal) return errorProgDiff.reason ?? `${at}.error content mismatch`;
+      }
+      continue;
+    }
+
+    if (gState.kind === 'leaf' && yState.kind === 'leaf') {
+      const diff = compareNext(at, gState.next, yState.next);
+      if (diff) return diff;
+      const progDiff = programsEquivalent(gState.content, yState.content, at);
+      if (!progDiff.equal) return progDiff.reason ?? `${at} content mismatch`;
+    }
+  }
+  return null;
 }
 
 /**

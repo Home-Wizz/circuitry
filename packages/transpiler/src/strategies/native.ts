@@ -1,8 +1,10 @@
 import type { ConditionNode, FlowGraph, FlowNode, TriggerNode } from '@circuitry/shared';
 import { isStartNode } from '@circuitry/shared';
+import { counterVariableOf } from '../analyzer/count-loop';
 import type { TopologyAnalysis } from '../analyzer/topology';
 import { findBackEdges } from '../analyzer/topology';
 import { GraphClaimError } from '../utils/theOnly';
+import { undominated } from '../utils/undominated';
 import { BaseStrategy, bareParallelBranch, type HAYamlOutput } from './base';
 
 /** The same node ids, in any order. */
@@ -16,7 +18,9 @@ function sameIds(a: string[], b: string[]): boolean {
  * Describes a detected repeat pattern in the flow graph
  */
 interface RepeatPattern {
-  type: 'while' | 'until' | 'count';
+  /** 'do-while' (bug #259): a condition the user drew after the body,
+   * whose true edge loops back -- written as `until: [not C]`. */
+  type: 'while' | 'until' | 'count' | 'do-while';
   /** The node ID that serves as the entry point to this repeat pattern */
   entryNodeId: string;
   /** Condition node IDs in the repeat (for while/until) */
@@ -81,6 +85,23 @@ interface SequencePattern {
 }
 
 /**
+ * #284: what of the graph a walk reads its loops in. `unread`: steps whose
+ * loops it doesn't read at all (a branch the state machine writes as a
+ * machine; every step, for a reachability question). `walked`: the steps
+ * it walks; a line back no loop owns, from or to a step outside them, is
+ * where its branch ends, not a loop it can't write.
+ */
+interface LoopReading {
+  unread?: Set<string>;
+  walked?: Set<string>;
+}
+
+/** Every step of `flow` (prepareForTraversal reading no loop at all). */
+function allNodes(flow: FlowGraph): Set<string> {
+  return new Set(flow.nodes.map((n) => n.id));
+}
+
+/**
  * Native strategy for simple tree-shaped automations
  * Generates standard nested Home Assistant YAML with choose blocks
  */
@@ -88,7 +109,7 @@ interface SequencePattern {
  * native can write (see NativeStrategy.classifyRepeatBackEdge's doc). The
  * state machine reads loops the same way to give each its own budget
  * (decision of #129's follow-up). */
-export type LoopBackEdgeKind = 'while' | 'while-body-exit' | 'until' | 'count' | null;
+export type LoopBackEdgeKind = 'while' | 'while-body-exit' | 'until' | 'count' | 'do-while' | null;
 
 export function classifyLoopBackEdge(
   sourceNode: FlowNode,
@@ -108,7 +129,9 @@ export function classifyLoopBackEdge(
     return targetNode.type === 'condition' ? 'while-body-exit' : null;
   }
   if (sourceHandle === 'false') return 'until';
-  if (sourceHandle === 'true') return 'count';
+  // Bug #259: only the parser's counter test makes a true-handle loop-back
+  // a count loop; a condition the user drew is a do-while.
+  if (sourceHandle === 'true') return counterVariableOf(sourceNode) ? 'count' : 'do-while';
   return null;
 }
 
@@ -178,7 +201,12 @@ export class NativeStrategy extends BaseStrategy {
    * Returns the hint-stripped flow, since callers need to pass that same
    * flow into buildSequenceFromNode/getOutgoingEdges afterward.
    */
-  private prepareForTraversal(flow: FlowGraph): FlowGraph {
+  private prepareForTraversal(
+    flow: FlowGraph,
+    entries: string[] = [],
+    /** #284: what of the graph this walk reads (see LoopReading). */
+    reading: LoopReading = {}
+  ): FlowGraph {
     this.nodeVisitOrder = [];
 
     // Strip hint edges (visual-only trigger-routing aids) before any processing
@@ -187,11 +215,12 @@ export class NativeStrategy extends BaseStrategy {
       edges: flow.edges.filter((e) => e.type !== 'hint' && e.type !== 'choose-hint'),
     };
 
-    // Structurally detect back-edges using DFS
-    this.backEdgeIds = findBackEdges(flow);
+    // Structurally detect back-edges using DFS (from `entries` first: a
+    // trigger's own steps read loops from where its run joins them, #282)
+    this.backEdgeIds = findBackEdges(flow, entries);
 
     // Pre-detect repeat patterns from structural back-edges
-    this.repeatPatterns = this.detectRepeatPatterns(flow);
+    this.repeatPatterns = this.detectRepeatPatterns(flow, reading);
     this.repeatInternalNodeIds = new Set();
     this.loopTestNodeIds = new Set();
     for (const pattern of this.repeatPatterns.values()) {
@@ -227,7 +256,9 @@ export class NativeStrategy extends BaseStrategy {
    * dropping any action that came after the branches reconverged).
    */
   findConvergencePointForBranches(flow: FlowGraph, branchStartIds: string[]): string | null {
-    const preparedFlow = this.prepareForTraversal(flow);
+    // Reachability only: no loop is read (one native couldn't write isn't
+    // this caller's to refuse, #284).
+    const preparedFlow = this.prepareForTraversal(flow, [], { unread: allNodes(flow) });
     return this.findConvergencePoint(preparedFlow, branchStartIds);
   }
 
@@ -240,8 +271,13 @@ export class NativeStrategy extends BaseStrategy {
    * via the randomized fuzzer, 2026-09-06). See findConvergenceSet's own
    * doc comment for the full explanation.
    */
-  findConvergenceSetForBranches(flow: FlowGraph, branchStartIds: string[]): string[] {
-    const preparedFlow = this.prepareForTraversal(flow);
+  findConvergenceSetForBranches(
+    flow: FlowGraph,
+    branchStartIds: string[],
+    entries: string[] = []
+  ): string[] {
+    // Reachability only, as above.
+    const preparedFlow = this.prepareForTraversal(flow, entries, { unread: allNodes(flow) });
     return this.findConvergenceSet(preparedFlow, branchStartIds);
   }
 
@@ -432,25 +468,8 @@ export class NativeStrategy extends BaseStrategy {
       automation.variables = flow.userVariables;
     }
 
-    // Add optional metadata
-    if (flow.metadata?.max) {
-      automation.max = flow.metadata.max;
-    }
-    if (flow.metadata?.max_exceeded) {
-      automation.max_exceeded = flow.metadata.max_exceeded;
-    }
-    if (flow.metadata?.initial_state === false) {
-      automation.initial_state = false;
-    }
-    if (flow.metadata?.trace) {
-      automation.trace = flow.metadata.trace;
-    }
-    if (flow.userTriggerVariables && Object.keys(flow.userTriggerVariables).length > 0) {
-      automation.trigger_variables = flow.userTriggerVariables;
-    }
-
     return {
-      automation,
+      automation: this.withAutomationSettings(flow, automation),
       warnings,
       strategy: this.name,
       nodeOrder: this.nodeVisitOrder,
@@ -562,11 +581,19 @@ export class NativeStrategy extends BaseStrategy {
    * - Back-edge source is a condition with sourceHandle='false' → until
    * - Back-edge source is a condition with sourceHandle='true' → count
    */
-  private detectRepeatPatterns(flow: FlowGraph): Map<string, RepeatPattern> {
+  private detectRepeatPatterns(
+    flow: FlowGraph,
+    reading: LoopReading = {}
+  ): Map<string, RepeatPattern> {
+    const unread = reading.unread ?? new Set<string>();
+    const walked = reading.walked;
     const patterns = new Map<string, RepeatPattern>();
 
     for (const edge of flow.edges) {
       if (!this.backEdgeIds.has(edge.id)) continue;
+      // A line back among steps not read (both its ends): that loop isn't
+      // this walk's.
+      if (unread.has(edge.source) && unread.has(edge.target)) continue;
 
       const sourceNode = this.getNode(flow, edge.source);
       const targetNode = this.getNode(flow, edge.target);
@@ -578,6 +605,11 @@ export class NativeStrategy extends BaseStrategy {
       // a loop's head (a loop drawn by hand inside or next to another).
       // Ignoring it made the side look empty and the loop vanish from the
       // output. Native can't write it; the state machine follows it.
+      // One leading back from or to a step the walk doesn't walk (to where
+      // its branch ends, or round a loop it is in) is no loop it writes
+      // (#284).
+      if (edgeKind === null && walked && !(walked.has(edge.source) && walked.has(edge.target)))
+        continue;
       if (edgeKind === null) {
         throw new GraphClaimError(
           `the edge from "${edge.source}" back to "${edge.target}" isn't a loop native can write`
@@ -780,6 +812,22 @@ export class NativeStrategy extends BaseStrategy {
           bodyNodeIds,
           bodyEntryNodeIds,
           backEdgeSourceId: firstCondId,
+        });
+      } else if (edgeKind === 'do-while') {
+        // ── do-while pattern (bug #259) ──
+        // Back-edge: condition →(true)→ first body node; the body runs,
+        // then the test, and while it holds the body runs again: HA's
+        // `repeat: until: [not C]`. One condition only; anything the
+        // walker can't bound inside the body is the gate's to refuse.
+        const firstBodyId = edge.target;
+        const condId = edge.source;
+        patterns.set(firstBodyId, {
+          type: 'do-while',
+          entryNodeId: firstBodyId,
+          conditionNodeIds: [condId],
+          bodyNodeIds: this.collectNodesUntil(flow, firstBodyId, new Set([condId])),
+          bodyEntryNodeIds: [firstBodyId],
+          backEdgeSourceId: condId,
         });
       } else if (edgeKind === 'count') {
         // ── count pattern ──
@@ -1056,7 +1104,8 @@ export class NativeStrategy extends BaseStrategy {
         endNodeId,
         bodyEntryNodeIds,
         bodyNodeIds,
-        alias: 'alias' in node.data && typeof node.data.alias === 'string' ? node.data.alias : undefined,
+        alias:
+          'alias' in node.data && typeof node.data.alias === 'string' ? node.data.alias : undefined,
         frame: (node.data as Record<string, unknown>)._frame === true,
       });
     }
@@ -1435,6 +1484,18 @@ export class NativeStrategy extends BaseStrategy {
       return result;
     }
 
+    if (pattern.type === 'do-while') {
+      const test = this.getNode(flow, pattern.conditionNodeIds[0]) as ConditionNode;
+      const result: Record<string, unknown> = {
+        repeat: {
+          until: [{ condition: 'not', conditions: [this.buildCondition(test)] }],
+          sequence: bodySequence,
+        },
+      };
+      if (alias) result.alias = alias;
+      return result;
+    }
+
     if (pattern.type === 'count') {
       if (pattern.initNodeId) {
         const initNode = this.getNode(flow, pattern.initNodeId);
@@ -1491,7 +1552,9 @@ export class NativeStrategy extends BaseStrategy {
     // were dropped).
     for (const cond of conditions) {
       const trueEdges = flow.edges.filter((e) => e.source === cond.id && e.sourceHandle === 'true');
-      const falseEdges = flow.edges.filter((e) => e.source === cond.id && e.sourceHandle === 'false');
+      const falseEdges = flow.edges.filter(
+        (e) => e.source === cond.id && e.sourceHandle === 'false'
+      );
       for (const edge of trueEdges) trueTargets.add(edge.target);
       for (const edge of falseEdges) falseTargets.add(edge.target);
       if (trueEdges.length > 0) conditionsWithTruePath++;
@@ -1569,6 +1632,10 @@ export class NativeStrategy extends BaseStrategy {
     while (currentId) {
       const node = this.getNode(flow, currentId);
       if (!node || node.type !== 'condition') break;
+
+      // A condition that was a step of the run, read so from the source,
+      // stays one (bug #246): top-level, HA checks it before a run starts.
+      if ((node as ConditionNode).data._conditionStep === true) break;
 
       // Don't promote conditions that are part of a repeat pattern
       if (this.repeatPatterns.has(currentId) || this.repeatInternalNodeIds.has(currentId)) break;
@@ -2012,7 +2079,9 @@ export class NativeStrategy extends BaseStrategy {
         ];
         const convergenceSet = this.findConvergenceSet(
           flow,
-          branchGroups.map((g) => this.withoutStopOnly(flow, g))
+          branchGroups.map((g) => this.withoutStopOnly(flow, g)),
+          undefined,
+          true
         );
         const convergenceBoundSet = convergenceSet.length > 0 ? new Set(convergenceSet) : null;
 
@@ -2023,7 +2092,12 @@ export class NativeStrategy extends BaseStrategy {
           const branchSeq =
             branch.thenNodeIds.length > 0
               ? convergenceBoundSet
-                ? this.buildFanOutUntilNode(flow, branch.thenNodeIds, convergenceBoundSet, new Set(visited))
+                ? this.buildFanOutUntilNode(
+                    flow,
+                    branch.thenNodeIds,
+                    convergenceBoundSet,
+                    new Set(visited)
+                  )
                 : this.buildFanOut(flow, branch.thenNodeIds, new Set(visited))
               : [];
           chooseOptions.push({
@@ -2148,10 +2222,12 @@ export class NativeStrategy extends BaseStrategy {
         // convergence node -- see findConvergenceSet's own doc comment).
         const convergenceSet =
           thenNodeIds.length > 0 && elseNodeIds.length > 0
-            ? this.findConvergenceSet(flow, [
-                this.withoutStopOnly(flow, thenNodeIds),
-                this.withoutStopOnly(flow, elseNodeIds),
-              ])
+            ? this.findConvergenceSet(
+                flow,
+                [this.withoutStopOnly(flow, thenNodeIds), this.withoutStopOnly(flow, elseNodeIds)],
+                undefined,
+                true
+              )
             : [];
         const convergenceBoundSet = convergenceSet.length > 0 ? new Set(convergenceSet) : null;
 
@@ -2159,10 +2235,20 @@ export class NativeStrategy extends BaseStrategy {
         // found via empirical audit, 2026-09-06, as bug #12: a genuine multi-target then/else fan-out (an ordinary `parallel:` block as an if/then's or a choose case's own content) was being flattened via .flatMap into a plain sequential list instead of wrapped in `{ parallel: [...] }` -- silently turning concurrent branches into sequential ones, a real behavior change for any branch containing a delay/wait (same class of bug as #4/#9/#11, just on the DEFAULT/native if-then-else and choose-case builders instead of a loop/sequence-group body or StateMachineStrategy).
         if (convergenceBoundSet) {
           if (thenNodeIds.length > 0) {
-            ifAction.then = this.buildFanOutUntilNode(flow, thenNodeIds, convergenceBoundSet, new Set(visited));
+            ifAction.then = this.buildFanOutUntilNode(
+              flow,
+              thenNodeIds,
+              convergenceBoundSet,
+              new Set(visited)
+            );
           }
           if (elseNodeIds.length > 0) {
-            ifAction.else = this.buildFanOutUntilNode(flow, elseNodeIds, convergenceBoundSet, new Set(visited));
+            ifAction.else = this.buildFanOutUntilNode(
+              flow,
+              elseNodeIds,
+              convergenceBoundSet,
+              new Set(visited)
+            );
           }
           sequence.push(ifAction);
           if (convergenceSet.length === 1) {
@@ -2188,7 +2274,13 @@ export class NativeStrategy extends BaseStrategy {
       }
 
       if (outgoing.length >= 1) {
-        sequence.push(...this.buildFanOut(flow, outgoing.map((e) => e.target), visited));
+        sequence.push(
+          ...this.buildFanOut(
+            flow,
+            outgoing.map((e) => e.target),
+            visited
+          )
+        );
       }
     }
 
@@ -2212,9 +2304,12 @@ export class NativeStrategy extends BaseStrategy {
     flow: FlowGraph,
     targetIds: string[],
     bound: Set<string> | null,
-    visited: Set<string>
+    visited: Set<string>,
+    /** Groups the caller writes itself (#284): left empty, unwalked. */
+    skip?: (group: string[]) => boolean
   ): { targets: string[]; steps: unknown[] }[] {
     return this.meetingGroups(flow, targetIds, bound).map((group) => {
+      if (skip?.(group)) return { targets: group, steps: [] };
       if (group.length === 1) {
         const steps = bound
           ? this.buildSequenceUntilNode(flow, group[0], bound, new Set(visited))
@@ -2246,10 +2341,33 @@ export class NativeStrategy extends BaseStrategy {
   buildParallelBranchesForTargets(
     flow: FlowGraph,
     targetIds: string[],
-    bound: Set<string> | null
+    bound: Set<string> | null,
+    /** Where the run these branches belong to starts (#282). */
+    entries: string[] = [],
+    /** #284: the steps of a group the state machine writes as a branch
+     * machine, or null; such a group is left empty and its steps unread. */
+    machineRegion?: (group: string[]) => Set<string> | null
   ): { targets: string[]; steps: unknown[] }[] {
-    const preparedFlow = this.prepareForTraversal(flow);
-    return this.buildParallelBranches(preparedFlow, targetIds, bound, new Set());
+    // The groups first (they need only the back edges), then the walk: a
+    // machine's loops unread, and a loop it couldn't write but doesn't walk
+    // (after where the branches meet, say) no reason to refuse the whole
+    // state machine (#284).
+    const hintless = this.prepareForTraversal(flow, entries, { unread: allNodes(flow) });
+    const groups = this.meetingGroups(hintless, targetIds, bound);
+    const isMachine = (group: string[]) => (machineRegion?.(group) ?? null) !== null;
+    const walked = new Set<string>();
+    const queue = groups.filter((group) => !isMachine(group)).flat();
+    while (queue.length > 0) {
+      const id = queue.shift()!;
+      if (walked.has(id) || bound?.has(id)) continue;
+      walked.add(id);
+      for (const e of this.getOutgoingEdges(hintless, id)) {
+        if (!this.backEdgeIds.has(e.id)) queue.push(e.target);
+      }
+    }
+    const unread = new Set(groups.flatMap((group) => [...(machineRegion?.(group) ?? [])]));
+    const preparedFlow = this.prepareForTraversal(flow, entries, { unread, walked });
+    return this.buildParallelBranches(preparedFlow, targetIds, bound, new Set(), isMachine);
   }
 
   /**
@@ -2314,7 +2432,12 @@ export class NativeStrategy extends BaseStrategy {
    * fan-out in this file, instead of only ever following one branch and
    * silently dropping the rest (found via empirical audit, 2026-09-06).
    */
-  private buildFanOut(flow: FlowGraph, targetIds: string[], visited: Set<string>): unknown[] {
+  private buildFanOut(flow: FlowGraph, allTargetIds: string[], visited: Set<string>): unknown[] {
+    // Bug #267: a target already written -- a loop's test, beside a step
+    // its body fans out to -- adds no branch; the steps beside it are
+    // written as they are, one branch inline (extractFromGraph reads them
+    // the same way).
+    const targetIds = allTargetIds.filter((id) => !visited.has(id));
     if (targetIds.length === 0) return [];
     if (targetIds.length === 1) {
       // Matches the copy-per-branch convention used everywhere else in
@@ -2601,7 +2724,7 @@ export class NativeStrategy extends BaseStrategy {
     const trueTargets = this.withoutStopOnly(flow, targets('true'));
     const falseTargets = this.withoutStopOnly(flow, targets('false'));
     if (trueTargets.length === 0 || falseTargets.length === 0) return false;
-    const meet = this.findConvergenceSet(flow, [trueTargets, falseTargets]);
+    const meet = this.findConvergenceSet(flow, [trueTargets, falseTargets], undefined, true);
     if (meet.length === 0) return false;
     return !earlierCases.every((c) => {
       if (c.thenNodeIds.length === 0) return false;
@@ -2687,6 +2810,61 @@ export class NativeStrategy extends BaseStrategy {
   }
 
   /**
+   * Bug #266: whether a run down one of an if's (or a choose's) branches can
+   * get past `meeting` -- to something it leads to -- without running it:
+   * a condition there takes one side, a step runs all of its lines, and a
+   * line straight to a step after the meeting point beside a line to it
+   * (D4) still runs it. Then `meeting` is not where the branches meet.
+   */
+  private someWayGetsPast(
+    flow: FlowGraph,
+    groups: string[][],
+    meeting: string[],
+    boundary?: Set<string>
+  ): boolean {
+    const forward = (id: string, handle?: string) =>
+      this.getOutgoingEdges(flow, id)
+        .filter(
+          (e) => !this.backEdgeIds.has(e.id) && (handle === undefined || e.sourceHandle === handle)
+        )
+        .map((e) => e.target);
+    const at = new Set(meeting);
+    const after = new Set<string>();
+    const queue = meeting.flatMap((id) => forward(id));
+    while (queue.length > 0) {
+      const id = queue.shift()!;
+      if (after.has(id) || at.has(id)) continue;
+      after.add(id);
+      if (boundary?.has(id)) continue;
+      queue.push(...forward(id));
+    }
+    // Per node: does every run from it run the meeting point, and can one
+    // get past it without? A run that ends first does neither.
+    const memo = new Map<string, { always: boolean; past: boolean }>();
+    const ofAll = (ids: string[]) => {
+      const each = ids.map(visit);
+      const always = each.some((r) => r.always);
+      return { always, past: !always && each.some((r) => r.past) };
+    };
+    const visit = (id: string): { always: boolean; past: boolean } => {
+      const known = memo.get(id);
+      if (known) return known;
+      memo.set(id, { always: false, past: false });
+      let result: { always: boolean; past: boolean };
+      if (at.has(id)) result = { always: true, past: false };
+      else if (after.has(id)) result = { always: false, past: true };
+      else if (boundary?.has(id)) result = { always: false, past: false };
+      else if (this.getNode(flow, id)?.type === 'condition') {
+        const sides = ['true', 'false'].map((h) => ofAll(forward(id, h)));
+        result = { always: sides.every((r) => r.always), past: sides.some((r) => r.past) };
+      } else result = ofAll(forward(id));
+      memo.set(id, result);
+      return result;
+    };
+    return groups.some((group) => ofAll(group).past);
+  }
+
+  /**
    * Generalizes findConvergencePoint to the case where 2+ branches share
    * 2+ SIBLING downstream nodes rather than a single dominating one (bug
    * #12, found via the randomized fuzzer, 2026-09-06): e.g. two `parallel:`
@@ -2710,7 +2888,10 @@ export class NativeStrategy extends BaseStrategy {
   private findConvergenceSet(
     flow: FlowGraph,
     branchStartsOrGroups: (string | string[])[],
-    boundary?: Set<string>
+    boundary?: Set<string>,
+    /** The branches of an if or a choose (one of them runs), not a fan-out's
+     * (all of them run): a meeting some run gets past doesn't count (#266). */
+    exclusive = false
   ): string[] {
     // Bug #50 (2026-09-26): a branch can start with several nodes (an if's
     // else that is itself a parallel). Each such group is ONE branch: what
@@ -2754,44 +2935,36 @@ export class NativeStrategy extends BaseStrategy {
     });
 
     const firstSet = reachableSets[0];
-    const commonNodes = [...firstSet].filter((nodeId) =>
+    let commonNodes = [...firstSet].filter((nodeId) =>
       reachableSets.every((set) => set.has(nodeId))
     );
-
-    if (commonNodes.length === 0) return [];
-    if (commonNodes.length === 1) return commonNodes;
+    const forward = (id: string) =>
+      this.getOutgoingEdges(flow, id)
+        .filter((e) => !this.backEdgeIds.has(e.id))
+        .map((e) => e.target);
+    const isBoundary = (id: string) => boundary?.has(id) ?? false;
 
     // Reduce to the minimal/undominated antichain: drop any common node
     // that is itself reachable (forward, excluding back edges) from
     // another common node -- it isn't a true sibling, it's downstream of
     // one, and belongs after that sibling's own convergence rather than
     // alongside it. Conceptually the same "drop dominated targets" idea
-    // as state-machine.ts's filterIndependentFanOutTargets, reimplemented
-    // locally here to avoid a cross-file dependency. Bounded by the same
-    // `boundary` as above, for the same reason.
-    const reaches = (fromId: string, toId: string): boolean => {
-      if (fromId === toId) return false;
-      const visited = new Set<string>();
-      const queue = [fromId];
-      while (queue.length > 0) {
-        const nodeId = queue.shift()!;
-        if (visited.has(nodeId)) continue;
-        visited.add(nodeId);
-        if (boundary?.has(nodeId)) continue;
-        const outgoing = this.getOutgoingEdges(flow, nodeId).filter(
-          (e) => !this.backEdgeIds.has(e.id)
-        );
-        for (const edge of outgoing) {
-          if (edge.target === toId) return true;
-          if (!visited.has(edge.target)) queue.push(edge.target);
-        }
-      }
-      return false;
-    };
-
-    const minimal = commonNodes.filter(
-      (nodeId) => !commonNodes.some((other) => other !== nodeId && reaches(other, nodeId))
-    );
+    // as state-machine.ts's filterIndependentFanOutTargets. Bounded by the
+    // same `boundary` as above, for the same reason.
+    //
+    // Bug #266: and only a meeting no path gets past -- one some paths of a
+    // branch go around, to what follows it, isn't where the branches meet:
+    // written after them, it ran on those paths too. The branches then meet
+    // further on (the antichain after it).
+    let minimal: string[] = [];
+    while (commonNodes.length > 0) {
+      minimal = undominated(commonNodes, forward, isBoundary);
+      if (!exclusive || !this.someWayGetsPast(flow, groups, minimal, boundary)) break;
+      const passed = new Set(minimal);
+      commonNodes = commonNodes.filter((id) => !passed.has(id));
+      minimal = [];
+    }
+    if (minimal.length === 0) return [];
 
     if (minimal.length <= 1) return minimal;
 
@@ -2921,7 +3094,8 @@ export class NativeStrategy extends BaseStrategy {
           ? this.findConvergenceSet(
               flow,
               [this.withoutStopOnly(flow, thenNodeIds), this.withoutStopOnly(flow, elseNodeIds)],
-              stopSet
+              stopSet,
+              true
             ).filter((id) => !stopSet.has(id))
           : [];
       const innerBoundSet: string | Set<string> =
@@ -2929,17 +3103,31 @@ export class NativeStrategy extends BaseStrategy {
 
       // buildFanOutUntilNode, not a plain .flatMap -- found via empirical audit, 2026-09-06, as bug #12: a genuine multi-target then/else fan-out (an ordinary `parallel:` block as an if/then's or a choose case's own content) was being flattened via .flatMap into a plain sequential list instead of wrapped in `{ parallel: [...] }` -- silently turning concurrent branches into sequential ones, a real behavior change for any branch containing a delay/wait (same class of bug as #4/#9/#11, just on the DEFAULT/native if-then-else and choose-case builders instead of a loop/sequence-group body or StateMachineStrategy).
       if (thenNodeIds.length > 0) {
-        chooseAction.then = this.buildFanOutUntilNode(flow, thenNodeIds, innerBoundSet, new Set(visited));
+        chooseAction.then = this.buildFanOutUntilNode(
+          flow,
+          thenNodeIds,
+          innerBoundSet,
+          new Set(visited)
+        );
       }
 
       if (elseNodeIds.length > 0) {
-        chooseAction.else = this.buildFanOutUntilNode(flow, elseNodeIds, innerBoundSet, new Set(visited));
+        chooseAction.else = this.buildFanOutUntilNode(
+          flow,
+          elseNodeIds,
+          innerBoundSet,
+          new Set(visited)
+        );
       }
 
       if (innerConvergenceSet.length === 1) {
-        sequence.push(...this.buildSequenceUntilNode(flow, innerConvergenceSet[0], stopNodeId, new Set(visited)));
+        sequence.push(
+          ...this.buildSequenceUntilNode(flow, innerConvergenceSet[0], stopNodeId, new Set(visited))
+        );
       } else if (innerConvergenceSet.length > 1) {
-        sequence.push(...this.buildFanOutUntilNode(flow, innerConvergenceSet, stopNodeId, new Set(visited)));
+        sequence.push(
+          ...this.buildFanOutUntilNode(flow, innerConvergenceSet, stopNodeId, new Set(visited))
+        );
       }
     } else if (outgoing.length === 1) {
       // Single outgoing edge - continue if not at stop node
@@ -3080,5 +3268,4 @@ export class NativeStrategy extends BaseStrategy {
       );
     return this.buildConditionData(node.data, !!suppressGateAlias);
   }
-
 }

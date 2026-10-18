@@ -5,7 +5,12 @@ import { Button } from '@/components/ui/button';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
-import { type FlowTabState, useFlowStore } from '@/store/flow-store';
+import {
+  type FlowTabState,
+  snapshotAsTab,
+  tabHasUnsavedChanges,
+  useFlowStore,
+} from '@/store/flow-store';
 
 interface TabSummary {
   flowId: string;
@@ -22,7 +27,11 @@ function resolveTabSummary(
   if (flowId === activeTab.flowId) return activeTab;
   const background = backgroundTabs.find((tab) => tab.flowId === flowId);
   return background
-    ? { flowId: background.flowId, flowName: background.flowName, hasUnsavedChanges: background.hasUnsavedChanges }
+    ? {
+        flowId: background.flowId,
+        flowName: background.flowName,
+        hasUnsavedChanges: tabHasUnsavedChanges(background),
+      }
     : { flowId, flowName: '', hasUnsavedChanges: false };
 }
 
@@ -40,8 +49,8 @@ function resolveTabSummary(
  */
 export function TabBar() {
   const { t } = useTranslation(['common']);
-  const { flowId, flowName, hasUnsavedChanges, tabOrder, backgroundTabs, switchTab, closeTab, openInNewTab } =
-    useFlowStore();
+  const store = useFlowStore();
+  const { flowId, flowName, tabOrder, backgroundTabs, switchTab, closeTab, openInNewTab } = store;
 
   // A tab with unsaved changes asks before it's closed (closing drops them).
   const [pendingClose, setPendingClose] = useState<TabSummary | null>(null);
@@ -52,7 +61,11 @@ export function TabBar() {
 
   if (tabOrder.length <= 1) return null;
 
-  const activeTab: TabSummary = { flowId, flowName, hasUnsavedChanges };
+  const activeTab: TabSummary = {
+    flowId,
+    flowName,
+    hasUnsavedChanges: tabHasUnsavedChanges(snapshotAsTab(store)),
+  };
   const tabs = tabOrder.map((id) => resolveTabSummary(id, activeTab, backgroundTabs));
 
   return (

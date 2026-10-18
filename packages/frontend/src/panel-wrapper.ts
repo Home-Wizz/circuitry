@@ -29,6 +29,21 @@ class CircuitryPanelWrapper extends HTMLElement {
   private _languageOverride: string | undefined;
   private appHandle: CircuitryAppHandle | null = null;
 
+  constructor() {
+    super();
+    // Home Assistant can create this element and set its properties before
+    // the class is defined: the loader (public/assets/panel-wrapper.js)
+    // defines it only once it has asked which build is current. They are
+    // then plain properties of the element, hiding the setters below, and
+    // the panel never got `hass`. Taken off and set again, they go through.
+    for (const key of ['hass', 'narrow', 'panel']) {
+      if (!Object.hasOwn(this, key)) continue;
+      const value = Reflect.get(this, key);
+      Reflect.deleteProperty(this, key);
+      Reflect.set(this, key, value);
+    }
+  }
+
   set hass(value: HomeAssistant | undefined) {
     this._hass = value;
     this.appHandle?.update(value, this._narrow, this._languageOverride);

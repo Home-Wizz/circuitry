@@ -30,6 +30,8 @@
  * `target`.
  */
 
+import { prettify } from '@/lib/utils';
+
 export interface ActionRecipe {
   id: string;
   label: string;
@@ -353,9 +355,49 @@ function buildCategories(): EntityActionCategory[] {
 
 export const ENTITY_ACTION_CATEGORIES: EntityActionCategory[] = buildCategories();
 
-const CATEGORIES_BY_DOMAIN = new Map<string, EntityActionCategory>(
-  ENTITY_ACTION_CATEGORIES.map((c) => [c.domain, c])
-);
+/** A service as HA describes it (`hass.services`): its name and wording. */
+interface DescribedService {
+  name?: string;
+  description?: string;
+}
+
+/** HA's name and description for a service in HA's language (its
+ * `services` translations), where it has them. */
+export type ServiceTexts = (domain: string, service: string) => DescribedService;
+
+/**
+ * The Then picker's categories as the connected HA has them: the catalog's,
+ * each with the services HA has in its domain that the catalog doesn't name
+ * added, named as HA names them. HA's own dialog lists every service of a
+ * domain; the catalog left out 32 that HA 2026.9 has (input_select.
+ * set_options, media_player.media_seek, timer.change, vacuum.clean_area,
+ * ...), so they could only be had through Perform action (bug #231).
+ */
+export function actionCatalog(
+  services: Readonly<Record<string, Readonly<Record<string, DescribedService>>>> | undefined,
+  texts?: ServiceTexts
+): EntityActionCategory[] {
+  if (!services) return ENTITY_ACTION_CATEGORIES;
+  return ENTITY_ACTION_CATEGORIES.map((category) => {
+    const named = new Set(category.recipes.map((r) => r.service));
+    const added = Object.entries(services[category.domain] ?? {})
+      .filter(([name]) => !named.has(`${category.domain}.${name}`))
+      .map(([name, described]): ActionRecipe => {
+        // HA's own name: its translation, else its description's (core
+        // services have none there), else the id made readable.
+        const text = texts?.(category.domain, name);
+        const description = text?.description || described.description;
+        return {
+          id: `discovered:${category.domain}.${name}`,
+          label: text?.name || described.name || prettify(name),
+          ...(description ? { description } : {}),
+          service: `${category.domain}.${name}`,
+        };
+      })
+      .sort((a, b) => a.label.localeCompare(b.label));
+    return added.length > 0 ? { ...category, recipes: [...category.recipes, ...added] } : category;
+  });
+}
 
 /**
  * Resolve the action category for a single entity, keyed by domain only —
@@ -363,7 +405,10 @@ const CATEGORIES_BY_DOMAIN = new Map<string, EntityActionCategory>(
  * actions are purely domain-scoped service calls, no purpose-specific
  * device-class-prefixed form exists for them (see this file's doc comment).
  */
-export function getEntityActionCategory(entityId: string): EntityActionCategory | null {
+export function getEntityActionCategory(
+  entityId: string,
+  categories: readonly EntityActionCategory[] = ENTITY_ACTION_CATEGORIES
+): EntityActionCategory | null {
   const domain = entityId.split('.')[0];
-  return CATEGORIES_BY_DOMAIN.get(domain) ?? null;
+  return categories.find((c) => c.domain === domain) ?? null;
 }

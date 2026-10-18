@@ -7,7 +7,7 @@ import { useTranslation } from 'react-i18next';
 import { TruncatedTooltip } from '@/components/ui/truncated-tooltip';
 import { compoundTypes } from '@/config/nodeTypeCatalog';
 import { useMoreInfo } from '@/hooks/useMoreInfo';
-import { useEditableTargets, useWholeArea } from '@/hooks/useStepTargets';
+import { useEditableTargets, useWholePlace } from '@/hooks/useStepTargets';
 import { useNodeCardDisplay } from '@/hooks/useNodeCardDisplay';
 import { useNodeErrors } from '@/hooks/useNodeErrors';
 import { useTraceNodeState } from '@/hooks/useTraceNodeState';
@@ -391,7 +391,7 @@ export const ActionNode = memo(function ActionNode({ id, data, selected }: Actio
   // entity, else what it does, its entities as a pill below.
   const titleIsPill = !data.alias && titleIsTarget(data, pillProps.targets);
   // "Turn on anything in Hallway": a whole area as its target.
-  const wholeArea = useWholeArea(isStopAction ? undefined : data.target);
+  const wholeArea = useWholePlace(isStopAction ? undefined : data.target);
   // Its settings ("with [Brightness 40 %]"), for a service call.
   const values = serviceName ? <ValuePills nodeId={id} data={data} tone="action" /> : null;
   // What it acts on and how, around its verb: "turn on [Kitchen light] at

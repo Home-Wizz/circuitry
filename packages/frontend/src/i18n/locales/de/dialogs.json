@@ -11,7 +11,12 @@
     "categoryLabel": "Kategorie (Optional)",
     "categoryPlaceholder": "Bestehenden oder neuen Kategorienamen eingeben...",
     "labelsLabel": "Labels (Optional)",
-    "areaLabel": "Bereich (Optional)"
+    "areaLabel": "Bereich (Optional)",
+    "changedElsewhere": "Diese Automation wurde nach dem Öffnen in Home Assistant geändert. Drücken Sie erneut auf Aktualisieren, um diese Änderungen durch diese Version zu ersetzen, oder brechen Sie ab und öffnen Sie sie neu, um sie zuerst anzusehen.",
+    "inProgress": "Diese Automation wird bereits gespeichert; warten Sie, bis das Speichern abgeschlossen ist.",
+    "keptElsewhere": "In einer YAML-Datei gespeichert; dort bearbeiten",
+    "registryNotSet": "Gespeichert, aber Symbol, Bereich, Labels oder Kategorie konnten nicht gesetzt werden. Setzen Sie sie in den Automatisierungseinstellungen von Home Assistant.",
+    "readingDiffers": "Schreibgeschützt geöffnet: der Canvas läuft nicht wie diese Automatisierung; als Kopie speichern und vergleichen"
   },
   "import": {
     "title": "Automatisierung öffnen",
@@ -58,8 +63,9 @@
     "discardDescription": "Ihre aktuelle Automatisierung hat ungespeicherte Änderungen. Das Erstellen oder Öffnen einer neuen Automatisierung verwirft diese Änderungen.",
     "confirmDiscard": "Verwerfen & Fortfahren",
     "importSuccess": "Automatisierung \"{{name}}\" erfolgreich importiert!",
-    "openedWarning": "Automatisierung \"{{name}}\" geöffnet!",
-    "openedWarningDescription": "Konfiguration konnte nicht automatisch abgerufen werden. Sie können jetzt einen neuen Flow mit demselben Namen erstellen.",
+    "configUnavailable": "Home Assistant konnte die Einstellungen dieser Automatisierung nicht liefern, daher wurde sie nicht geöffnet. Es wurde nichts geändert.",
+    "notEditable": "\"{{name}}\" schreibgeschützt geöffnet",
+    "notEditableDescription": "Sie ist in einer YAML-Datei außerhalb von automations.yaml gespeichert und kann daher nicht überschrieben werden (auch nicht im Editor von Home Assistant). Bearbeiten Sie sie in dieser Datei, oder erstellen Sie mit „Als Kopie speichern“ eine neue Automatisierung; schalten Sie das Original aus, wenn Sie die Kopie behalten.",
     "lossyImportWarning": "\"{{name}}\" importiert, aber nicht perfekt",
     "lossyImportWarningDescription": "{{count}} Teil(e) wurden nicht erkannt — Details unter Einstellungen > Repairs.",
     "importFailed": "Automatisierung konnte nicht importiert werden: {{message}}",
@@ -71,7 +77,9 @@
     "deleteDescription": "\"{{name}}\" wird dauerhaft aus Home Assistant gelöscht. Dies kann nicht rückgängig gemacht werden.",
     "confirmDelete": "Löschen",
     "automationDeleted": "Automatisierung \"{{name}}\" gelöscht.",
-    "deleteFailed": "Automatisierung konnte nicht gelöscht werden: {{message}}"
+    "deleteFailed": "Automatisierung konnte nicht gelöscht werden: {{message}}",
+    "readingDiffers": "\"{{name}}\" schreibgeschützt geöffnet: wird möglicherweise nicht so gelesen, wie sie läuft",
+    "readingDiffersDescription": "Mit Testwerten ausgeführt tat der Canvas etwas anderes als die Automatisierung, aus der er gelesen wurde ({{detail}}). Überschreiben könnte ihr Verhalten ändern, daher ist nur „Als Kopie speichern“ möglich. Bearbeiten Sie sie in Home Assistant, oder vergleichen Sie die Kopie mit dem Original."
   },
   "importYaml": {
     "title": "YAML-Automatisierung importieren",

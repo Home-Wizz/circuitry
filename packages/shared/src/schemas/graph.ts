@@ -68,7 +68,8 @@ export const FlowGraphSchema = z.object({
   /**
    * Human-readable name (becomes the automation alias)
    */
-  name: z.string().min(1),
+  // HA takes an empty alias (cv.string); the save dialog asks for a name (#219).
+  name: z.string(),
   /**
    * Optional description
    */

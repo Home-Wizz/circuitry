@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Input } from '@/components/ui/input';
 import { useHass } from '@/contexts/HassContext';
@@ -31,6 +31,11 @@ export function CategoryFallback({ label, value, onChange, disabled }: CategoryF
   const { hass } = useHass();
   const [categories, setCategories] = useState<{ category_id: string; name: string }[]>([]);
   const [text, setText] = useState('');
+  // Whether the text was typed since the last commit. A blur sets only what
+  // was typed: it set what was shown, so a blur before the category's name
+  // was known (the save dialog's fields blur as it opens) set "no category"
+  // and Update cleared the automation's category (bug #257).
+  const edited = useRef(false);
 
   // Keyed on HA's connection, not `hass` (a new object every few seconds):
   // keyed on `hass`, the categories were fetched again and the name being
@@ -47,6 +52,8 @@ export function CategoryFallback({ label, value, onChange, disabled }: CategoryF
   }, [value, categories]);
 
   const commit = async () => {
+    if (!edited.current) return;
+    edited.current = false;
     const trimmed = text.trim();
     if (!trimmed) {
       onChange('');
@@ -68,7 +75,10 @@ export function CategoryFallback({ label, value, onChange, disabled }: CategoryF
       <span className="block text-muted-foreground text-xs">{label}</span>
       <Input
         value={text}
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => {
+          edited.current = true;
+          setText(e.target.value);
+        }}
         onBlur={commit}
         placeholder={t('dialogs:save.categoryPlaceholder')}
         disabled={disabled}

@@ -1,10 +1,35 @@
 import path from 'node:path';
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
-import { defineConfig } from 'vite';
+import { defineConfig, type Plugin } from 'vite';
+
+/**
+ * Names the current build of the panel: `assets/panel-build.json` holds the
+ * panel entry's file name, which changes with every build. The loader HA
+ * loads (public/assets/panel-wrapper.js, which never changes) asks for it
+ * through Circuitry's API at each panel load, so a new build is used without
+ * restarting Home Assistant (whose service worker serves files from its
+ * cache first).
+ */
+function panelBuildFile(): Plugin {
+  return {
+    name: 'circuitry-panel-build',
+    generateBundle(_options, bundle) {
+      const entry = Object.values(bundle).find(
+        (file) => file.type === 'chunk' && file.isEntry && file.name === 'panel-app'
+      );
+      if (!entry) throw new Error('circuitry-panel-build: no panel-app entry in the build');
+      this.emitFile({
+        type: 'asset',
+        fileName: 'assets/panel-build.json',
+        source: `${JSON.stringify({ entry: entry.fileName.replace(/^assets\//, '') })}\n`,
+      });
+    },
+  };
+}
 
 export default defineConfig({
-  plugins: [tailwindcss(), react()],
+  plugins: [tailwindcss(), react(), panelBuildFile()],
   base: '/circuitry-hass/',
   resolve: {
     alias: {
@@ -26,18 +51,13 @@ export default defineConfig({
         // Standalone dev preview only (`yarn dev` / index.html) — the real HA
         // panel is mounted by panel-wrapper.ts, not this entry.
         main: path.resolve(__dirname, 'index.html'),
-        // Panel wrapper entry (loaded by HA as a module; mounts into a Shadow
-        // DOM instead of an iframe, see panel-wrapper.ts for the rationale).
-        'panel-wrapper': path.resolve(__dirname, 'src/panel-wrapper.ts'),
+        // The panel itself (mounts into a Shadow DOM instead of an iframe,
+        // see panel-wrapper.ts for the rationale). Its name changes with each
+        // build; HA loads public/assets/panel-wrapper.js, which loads it.
+        'panel-app': path.resolve(__dirname, 'src/panel-wrapper.ts'),
       },
       output: {
-        // Ensure panel-wrapper has a predictable name for HA to load
-        entryFileNames: (chunkInfo) => {
-          if (chunkInfo.name === 'panel-wrapper') {
-            return 'assets/panel-wrapper.js';
-          }
-          return 'assets/[name]-[hash].js';
-        },
+        entryFileNames: 'assets/[name]-[hash].js',
         // Split heavy vendor libs into separate, long-term cacheable chunks
         // so the main bundle stays small and updates don't re-download vendors.
         manualChunks: (id) => {

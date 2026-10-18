@@ -7,6 +7,9 @@
     "noTrigger": "Automation must have at least one trigger node. Please add a trigger from the node palette.",
     "noAction": "Automation must have at least one action node. Please add an action from the node palette.",
     "validationFailed": "Validation failed: {{errors}}",
+    "orphanedCards_one": "{{count}} card isn't joined to a trigger. Join it to the flow or delete it.",
+    "orphanedCards_other": "{{count}} cards aren't joined to a trigger. Join them to the flow or delete them.",
+    "invalidAction": "\"{{service}}\" isn't an action name Home Assistant takes. Use domain.action, like light.turn_on, or a template.",
     "transpileFailed": "Failed to transpile flow to automation config",
     "noAutomationId": "No automation ID set. Use saveAutomation() for new automations.",
     "node": {
@@ -42,6 +45,8 @@
       "geoEventRequired": "Event (enter/leave) is required",
       "commandRequired": "At least one sentence is required",
       "timePatternRequired": "Set hours, minutes or seconds (Home Assistant needs at least one)",
+      "timePatternInvalid": "Use *, a whole number, or /N for every N (hours 0-23, minutes and seconds 0-59)",
+      "sunOffsetInvalid": "Write the offset as H:MM or H:MM:SS, with whole hours and minutes",
       "calendarRequired": "Calendar is required",
       "entityEmpty": "No entities are selected, so this never triggers",
       "boundRequired": "Set Above, Below, or both (Home Assistant needs at least one)",
@@ -58,6 +63,7 @@
       "serviceFormat": "Service must be in domain.service format (e.g., light.turn_on)",
       "fieldEmpty": "A field this action needs is empty: Home Assistant saves it, but the step fails when it runs",
       "oneOfEmpty": "This action needs one of these filled in (or a pair of them together): Home Assistant saves it, but the step fails when it runs",
+      "responseNeeded": "This action returns a response: name a response variable, or Home Assistant refuses the step when it runs",
       "entityUnsupported": "An entity here can't do this action (it lacks a feature the action needs): Home Assistant saves it, but the step fails when it runs",
       "eventEmpty": "The event name is empty, so this fires an event with no name"
     },

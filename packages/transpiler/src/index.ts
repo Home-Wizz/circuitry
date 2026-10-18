@@ -2,6 +2,7 @@
 
 export type { ConventionMarkers } from './analyzer/convention-markers';
 export { conventionMarkers } from './analyzer/convention-markers';
+export { isStateMachineVariableName } from './analyzer/state-machine-variables';
 export type { TopologyAnalysis } from './analyzer/topology';
 // Analyzer
 export { analyzeTopology, getNodeDepths } from './analyzer/topology';
@@ -20,3 +21,5 @@ export type { HAYamlOutput, TranspilerStrategy } from './strategies/base';
 export { BaseStrategy } from './strategies/base';
 export { NativeStrategy } from './strategies/native';
 export { StateMachineStrategy } from './strategies/state-machine';
+export type { ImportCheck } from './verification/importCheck';
+export { checkImport } from './verification/importCheck';

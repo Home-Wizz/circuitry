@@ -1,8 +1,9 @@
 import { haBoolean, haCoerceAutomation, TRIGGER_KEYS_KEEPING_NULL } from '@circuitry/shared';
 import type { BProgram, BStep } from './behaviorProgram';
 import { normalizeActionData } from './behaviorProgram';
-import { yamlStepToCompiled } from './compiledAction';
 import { isConditionShorthand, parseConditionExpr } from './boolean';
+import { yamlStepToCompiled } from './compiledAction';
+import { readBranchMachine } from './extractStateMachineFromYaml';
 
 /**
  * Extracts a canonical BProgram directly from a parsed Home Assistant
@@ -196,6 +197,10 @@ export function parseActionSequence(steps: unknown[]): BProgram {
   // flag from a block passed the gate.
   if (step.enabled === false) return parseActionSequence(tail);
 
+  // #284: a fan-out branch written as a state machine of its own.
+  const machine = readBranchMachine(steps);
+  if (machine) return [machine.step, ...parseActionSequence(machine.rest)];
+
   // A block whose `enabled:` is a template runs or not as HA renders it
   // when it gets there, so there's no structure to compare: it is compared
   // exactly as written, like a leaf step (bug #70; the graph keeps such a
@@ -248,10 +253,16 @@ export function parseActionSequence(steps: unknown[]): BProgram {
     const body = parseActionSequence(asArray(repeat.sequence));
     const rest = parseActionSequence(tail);
     if (repeat.while !== undefined) {
-      return [{ k: 'repeat', mode: 'while', test: parseConditionExpr(repeat.while), body }, ...rest];
+      return [
+        { k: 'repeat', mode: 'while', test: parseConditionExpr(repeat.while), body },
+        ...rest,
+      ];
     }
     if (repeat.until !== undefined) {
-      return [{ k: 'repeat', mode: 'until', test: parseConditionExpr(repeat.until), body }, ...rest];
+      return [
+        { k: 'repeat', mode: 'until', test: parseConditionExpr(repeat.until), body },
+        ...rest,
+      ];
     }
     return [{ k: 'repeat', mode: 'count', count: normalizeCount(repeat.count), body }, ...rest];
   }
@@ -306,7 +317,12 @@ function desugarChoose(
   rest: BProgram
 ): BStep {
   if (index >= cases.length) {
-    return { k: 'if', cond: { op: 'const', value: true }, then: [...parseActionSequence(defaultSeq), ...rest], else: [] };
+    return {
+      k: 'if',
+      cond: { op: 'const', value: true },
+      then: [...parseActionSequence(defaultSeq), ...rest],
+      else: [],
+    };
   }
   const c = cases[index];
   const cond = parseConditionExpr(c.conditions);
@@ -315,7 +331,12 @@ function desugarChoose(
     const elseProgram = [...parseActionSequence(defaultSeq), ...rest];
     return { k: 'if', cond, then: thenProgram, else: elseProgram };
   }
-  return { k: 'if', cond, then: thenProgram, else: [desugarChoose(cases, index + 1, defaultSeq, rest)] };
+  return {
+    k: 'if',
+    cond,
+    then: thenProgram,
+    else: [desugarChoose(cases, index + 1, defaultSeq, rest)],
+  };
 }
 
 export function normalizeTrigger(trigger: Record<string, unknown>): Record<string, unknown> {

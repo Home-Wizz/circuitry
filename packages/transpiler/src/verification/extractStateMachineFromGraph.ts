@@ -1,12 +1,14 @@
 import type { ConditionNode, FlowEdge, FlowGraph, FlowNode } from '@circuitry/shared';
 import { isStartNode } from '@circuitry/shared';
+import { branchMachineRegion, untilExit } from '../analyzer/loops';
 import { findBackEdges } from '../analyzer/topology';
-import type { BProgram, BStep } from './behaviorProgram';
-import { type BoolExpr, parseConditionExpr } from './boolean';
+import { branchMachineName } from '../utils/branchMachine';
 import { loopLimitStep, loopRoundsStep } from '../utils/stateMachineLoops';
+import type { BProgram, BStep, MachineNext, MachineState } from './behaviorProgram';
+import { type BoolExpr, parseConditionExpr } from './boolean';
 import {
   buildTrigger,
-  extractGraphParallelBranches,
+  extractGraphParallelBranchGroups,
   normalizeNodeAction,
 } from './extractFromGraph';
 
@@ -115,9 +117,15 @@ interface Ctx {
   flow: FlowGraph;
   outgoing: Map<string, FlowEdge[]>;
   backEdgeIds: Set<string>;
+  /** Where the run being read starts, when it is one trigger's (#282). */
+  entries: string[];
+  /** #284: the steps of the branch machine whose states are being read: a
+   * line out of them is where the branch ends, and the steps outside are
+   * every fan-out's bound. */
+  region?: Set<string>;
 }
 
-function buildCtx(flow: FlowGraph): Ctx {
+function buildCtx(flow: FlowGraph, entries: string[] = []): Ctx {
   const stripped: FlowGraph = {
     ...flow,
     edges: flow.edges.filter((e) => e.type !== 'hint' && e.type !== 'choose-hint'),
@@ -126,8 +134,8 @@ function buildCtx(flow: FlowGraph): Ctx {
   for (const e of stripped.edges) {
     (outgoing.get(e.source) ?? outgoing.set(e.source, []).get(e.source)!).push(e);
   }
-  const backEdgeIds = findBackEdges(stripped);
-  return { flow: stripped, outgoing, backEdgeIds };
+  const backEdgeIds = findBackEdges(stripped, entries);
+  return { flow: stripped, outgoing, backEdgeIds, entries };
 }
 
 function outgoingEdges(ctx: Ctx, nodeId: string): FlowEdge[] {
@@ -202,7 +210,9 @@ function findConvergenceSet(ctx: Ctx, starts: string[]): string[] {
     return false;
   };
 
-  const minimal = common.filter((id) => !common.some((other) => other !== id && reaches(other, id)));
+  const minimal = common.filter(
+    (id) => !common.some((other) => other !== id && reaches(other, id))
+  );
   if (minimal.length <= 1) return minimal;
 
   const withDistance = minimal.map((id) => ({
@@ -236,7 +246,7 @@ function shortestDistance(ctx: Ctx, start: string, target: string): number {
  * forward-reachable subgraph) must be back-edges to one and the same node.
  * A fan-out whose branches loop back rather than reaching an ordinary
  * downstream node still has a well-defined shared continuation -- the
- * loop head they all return to.
+ * loop head they all return to. Back-edges to two nodes: refused (#285).
  */
 function findLoopBackConvergence(ctx: Ctx, targetIds: string[]): string | null {
   // Bug #25 (2026-09-26): each branch's exits are its dead ends and the
@@ -257,7 +267,11 @@ function findLoopBackConvergence(ctx: Ctx, targetIds: string[]): string | null {
     for (const nodeId of reachable) {
       for (const e of outgoingEdges(ctx, nodeId)) {
         if (!ctx.backEdgeIds.has(e.id) || reachable.has(e.target)) continue;
-        if (loopTarget !== null && loopTarget !== e.target) return null;
+        // #285: branches going round different loops: none runs that.
+        if (loopTarget !== null && loopTarget !== e.target)
+          throw new Error(
+            `branches of a parallel go back round two loops ("${loopTarget}", "${e.target}")`
+          );
         loopTarget = e.target;
       }
     }
@@ -275,23 +289,260 @@ function findLoopBackConvergence(ctx: Ctx, targetIds: string[]): string | null {
  * fan-out sibling, it's structural bookkeeping already covered by the
  * other branch's own continuation.
  */
-function filterIndependentTargets(ctx: Ctx, targetIds: string[]): string[] {
+function filterIndependentTargets(ctx: Ctx, targetIds: string[], source?: string): string[] {
   if (targetIds.length <= 1) return targetIds;
+  // Not through the step that fans out: that is its next pass (#285).
   const reaches = (fromId: string, toId: string): boolean => {
     const visited = new Set<string>();
     const queue = [fromId];
     while (queue.length > 0) {
       const id = queue.shift()!;
       if (id === toId) return true;
-      if (visited.has(id)) continue;
+      if (visited.has(id) || id === source) continue;
       visited.add(id);
       for (const e of forwardOutgoing(ctx, id)) queue.push(e.target);
     }
     return false;
   };
   return targetIds.filter(
-    (id) => !targetIds.some((otherId) => otherId !== id && reaches(otherId, id) && !reaches(id, otherId))
+    (id) =>
+      !targetIds.some((otherId) => otherId !== id && reaches(otherId, id) && !reaches(id, otherId))
   );
+}
+
+/**
+ * Bug #267: the target where the flow carries on -- one other paths also
+ * lead to (forward), or a loop's test at its end -- when no other target
+ * gets there; null unless there is exactly one. Same rule as
+ * state-machine.ts's carryOnTarget, written independently.
+ */
+function carryOnTarget(ctx: Ctx, targetIds: string[]): string | null {
+  const reach = (id: string) => forwardReachFrom(ctx, [id]);
+  const isCarry = (id: string) => {
+    // ctx.flow's edges are without hints already.
+    const waysIn = ctx.flow.edges.filter((e) => e.target === id && !ctx.backEdgeIds.has(e.id));
+    // A loop's own test at its end: a condition going back on its own
+    // (no block of another kind; an until block's own no side), not to a
+    // Repeat While head -- not a choose case or an if going back to an
+    // enclosing while's head.
+    const node = ctx.flow.nodes.find((n) => n.id === id);
+    const blockKey = (n: FlowNode | undefined) =>
+      (n?.data as Record<string, unknown> | undefined)?._blockKey;
+    const testAtEnd =
+      node?.type === 'condition' &&
+      outgoingEdges(ctx, id).some((e) => {
+        if (!ctx.backEdgeIds.has(e.id)) return false;
+        const own = blockKey(node);
+        const ownUntil = e.sourceHandle === 'false' && own === 'repeat_until';
+        const head = ctx.flow.nodes.find((n) => n.id === e.target);
+        return ownUntil || (own === undefined && blockKey(head) !== 'repeat_while');
+      });
+    return waysIn.length > 1 || testAtEnd;
+  };
+  const found = targetIds.filter(
+    (id) => isCarry(id) && !targetIds.some((other) => other !== id && reach(other).has(id))
+  );
+  if (found.length !== 1) return null;
+  // Another target leading back round a loop (a line back from its steps
+  // to a node outside them) is where the flow goes on itself.
+  const leadsRound = (id: string) => {
+    const own = reach(id);
+    return [...own].some((n) =>
+      outgoingEdges(ctx, n).some((e) => ctx.backEdgeIds.has(e.id) && !own.has(e.target))
+    );
+  };
+  return targetIds.some((id) => id !== found[0] && leadsRound(id)) ? null : found[0];
+}
+
+/**
+ * #267: whether every way on from `id` just ends -- through no step two
+ * lines lead to (forward), and with no line back round a loop. Same rule as
+ * state-machine.ts's endingAlone, written independently.
+ */
+function endsOnItsOwn(ctx: Ctx, id: string): boolean {
+  for (const n of forwardReachFrom(ctx, [id])) {
+    const waysIn = ctx.flow.edges.filter((e) => e.target === n && !ctx.backEdgeIds.has(e.id));
+    if (waysIn.length > 1) return false;
+    if (outgoingEdges(ctx, n).some((e) => ctx.backEdgeIds.has(e.id))) return false;
+  }
+  return true;
+}
+
+/**
+ * #99: whether the branches meet at `meeting` on their own -- every way into
+ * them and into it from one place, or from within them -- so it runs inside
+ * the parallel, not after the branches beside. Same rule as
+ * state-machine.ts's theirOwnMeeting, written independently.
+ */
+function meetOnTheirOwn(ctx: Ctx, branches: string[], meeting: string): boolean {
+  const before = new Set<string>();
+  const stack = [...branches];
+  while (stack.length > 0) {
+    const id = stack.pop()!;
+    if (before.has(id) || id === meeting) continue;
+    before.add(id);
+    for (const e of forwardOutgoing(ctx, id)) stack.push(e.target);
+  }
+  const waysIn = (id: string) =>
+    ctx.flow.edges.filter((e) => e.target === id && !ctx.backEdgeIds.has(e.id));
+  const from = new Set(
+    branches.flatMap((b) => waysIn(b).map((e) => e.source)).filter((id) => !before.has(id))
+  );
+  if (from.size !== 1) return false;
+  for (const id of [...before, meeting]) {
+    if (waysIn(id).some((e) => !before.has(e.source) && !from.has(e.source))) return false;
+  }
+  return true;
+}
+
+/**
+ * #265: one target gone back to round a loop, the others steps beside it
+ * that lead nowhere the loop does (their own region); null otherwise. Same
+ * rule as state-machine.ts's stepsBesideGoingRound, written independently.
+ */
+function stepsBesideGoingRound(
+  ctx: Ctx,
+  targetIds: string[],
+  goesRound: string[]
+): { round: string; sides: string[] } | null {
+  const round = [...new Set(goesRound.filter((t) => targetIds.includes(t)))];
+  if (round.length !== 1) return null;
+  const sides = [...new Set(targetIds.filter((t) => t !== round[0]))];
+  if (sides.length === 0) return null;
+  const besideRegion = forwardReachFrom(ctx, sides);
+  const loopRegion = forwardReachFrom(ctx, [round[0]]);
+  // The steps beside don't lead back into the loop.
+  for (const id of besideRegion) {
+    for (const e of forwardOutgoing(ctx, id)) {
+      if (loopRegion.has(e.target) && !besideRegion.has(e.target)) return null;
+    }
+  }
+  return { round: round[0], sides };
+}
+
+/**
+ * #284: a fan-out's branches as programs, grouped where they meet (#99):
+ * each the steps it runs or, for a branch going round a loop of its own
+ * (analyzer/loops.ts's branchMachineRegion: the structural rule the
+ * strategy follows too, shared as findBackEdges is), one `machine` step
+ * holding its states, read here as the main dispatcher's are. Such a
+ * branch isn't walked as a tree: a loop there is what a walk can misread.
+ */
+function branchGroupPrograms(
+  ctx: Ctx,
+  targetIds: string[],
+  givenBound: Set<string> | null,
+  source: string
+): { targets: string[]; program: BProgram }[] {
+  const region = ctx.region;
+  const bound = region
+    ? new Set([
+        ...(givenBound ?? []),
+        ...ctx.flow.nodes.map((n) => n.id).filter((id) => !region.has(id)),
+      ])
+    : givenBound;
+  const regions = new Map<string, Set<string> | null>();
+  const regionOf = (group: string[]) => {
+    const key = group.join('\u0000');
+    if (!regions.has(key)) regions.set(key, branchMachineRegion(ctx.flow, group, bound, source));
+    return regions.get(key) ?? null;
+  };
+  return extractGraphParallelBranchGroups(
+    ctx.flow,
+    targetIds,
+    bound,
+    ctx.entries,
+    (group) => regionOf(group) !== null
+  ).map((group) => {
+    const region = regionOf(group.targets);
+    return region
+      ? { targets: group.targets, program: [branchMachineStep(ctx, region, group.targets[0])] }
+      : group;
+  });
+}
+
+function branchPrograms(
+  ctx: Ctx,
+  targetIds: string[],
+  bound: Set<string> | null,
+  source: string
+): BProgram[] {
+  return branchGroupPrograms(ctx, targetIds, bound, source).map((group) => group.program);
+}
+
+/**
+ * #284: the machine a branch is written as: one state per step in
+ * `region`, read from the whole drawing as the main dispatcher's states
+ * are (a branch of a trigger's own fan-out included), with a move out of
+ * the branch a move to END (the branch ends there; the enclosing run goes
+ * on where the branches meet), and each state's loop bookkeeping (#157).
+ */
+function branchMachineStep(ctx: Ctx, region: Set<string>, entry: string): BStep {
+  const main = { ...(ctx.entries.length === 0 ? ctx : buildCtx(ctx.flow)), region };
+  const bookkeeping = expectedLoopBookkeeping(ctx.flow).states;
+  const inside = (target: string) => (region.has(target) ? target : 'END');
+  const states = main.flow.nodes
+    .filter((n) => region.has(n.id) && n.type !== 'trigger' && n.type !== 'start')
+    .map((n) =>
+      machineStateFromGraph(
+        n.id,
+        n.type === 'condition'
+          ? buildConditionState(main, n as ConditionNode)
+          : buildLeafState(main, n),
+        inside,
+        JSON.stringify(bookkeeping.get(n.id) ?? { head: [], inThen: [] })
+      )
+    )
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return { k: 'machine', name: branchMachineName(region, entry), entry, states };
+}
+
+/**
+ * A state as the shared comparison takes it (behaviorProgram.ts's
+ * MachineState): the steps it runs and the state it goes to, `inside`
+ * applied to every move (a branch machine's moves out of the branch are
+ * to END). `loopSteps` is its loop bookkeeping as JSON, when the
+ * comparison is to check it.
+ */
+export function machineStateFromGraph(
+  id: string,
+  state: StateSpec,
+  inside: (target: string) => string = (target) => target,
+  loopSteps?: string
+): MachineState {
+  const next = (t: Transition): MachineNext => ({
+    kind: 'single',
+    target: inside(t.kind === 'single' ? t.target : t.convergence),
+  });
+  const content = (t: Transition): BProgram => (t.kind === 'fanout' ? t.program : []);
+  const kept = loopSteps === undefined ? {} : { loopSteps };
+  if (state.kind === 'leaf') {
+    return {
+      id,
+      ...kept,
+      kind: 'leaf',
+      content: [...(state.ownStep ? [state.ownStep] : []), ...content(state.transition)],
+      next: next(state.transition),
+    };
+  }
+  return {
+    id,
+    ...kept,
+    kind: 'condition',
+    cond: state.cond,
+    then: content(state.trueTransition),
+    thenNext: next(state.trueTransition),
+    else: content(state.falseTransition),
+    elseNext: next(state.falseTransition),
+    ...(state.errorTransition
+      ? {
+          error: {
+            content: content(state.errorTransition),
+            next: next(state.errorTransition),
+          },
+        }
+      : {}),
+  };
 }
 
 /**
@@ -308,10 +559,82 @@ function filterIndependentTargets(ctx: Ctx, targetIds: string[]): string[] {
  * convergence search, read directly from source (that function calls
  * `findConvergencePointForBranches` alone, nothing else).
  */
-function resolveTransition(ctx: Ctx, rawTargetIds: string[], midFlow: boolean): Transition {
-  const targetIds = midFlow ? filterIndependentTargets(ctx, rawTargetIds) : rawTargetIds;
+function resolveTransition(
+  ctx: Ctx,
+  rawTargetIds: string[],
+  midFlow: boolean,
+  /** The step that fans out (#284: see branchPrograms). */
+  source: string,
+  /** Targets the node goes back to round a loop (#265). */
+  goesRoundAll: string[] = []
+): Transition {
+  // #284: inside a branch machine a line out of the branch is where it
+  // ends, not a branch of this fan-out.
+  const inside = (ids: string[]) => (ctx.region ? ids.filter((id) => ctx.region!.has(id)) : ids);
+  rawTargetIds = inside(rawTargetIds);
+  const goesRound = inside(goesRoundAll);
+  // #265: a line back round a loop beside steps of their own: they run
+  // first, as steps of this state, then the loop goes round. (Read before
+  // the shortcut filter, which took them for steps the loop reaches.)
+  const besideRound = stepsBesideGoingRound(ctx, rawTargetIds, goesRound);
+  if (besideRound !== null) {
+    const groups = branchPrograms(ctx, besideRound.sides, null, source);
+    return {
+      kind: 'fanout',
+      targets: rawTargetIds,
+      convergence: besideRound.round,
+      program: groups.length === 1 ? groups[0] : [{ k: 'parallel', branches: groups }],
+    };
+  }
+  const targetIds = midFlow ? filterIndependentTargets(ctx, rawTargetIds, source) : rawTargetIds;
   if (targetIds.length === 0) return { kind: 'single', target: 'END' };
   if (targetIds.length === 1) return { kind: 'single', target: targetIds[0] };
+
+  // Bug #267: a line to where the flow carries on (a meeting point, a
+  // loop's test at its end) beside branches that don't get there: they run
+  // first, as steps of this state, then the flow goes on there.
+  const carry = midFlow ? carryOnTarget(ctx, targetIds) : null;
+  if (carry !== null) {
+    const sides = targetIds.filter((id) => id !== carry);
+    const groups = branchPrograms(ctx, sides, forwardReachFrom(ctx, [carry]), source);
+    return {
+      kind: 'fanout',
+      targets: targetIds,
+      convergence: carry,
+      program: groups.length === 1 ? groups[0] : [{ k: 'parallel', branches: groups }],
+    };
+  }
+
+  // #267: branches that end on their own beside two or more that meet: one
+  // parallel of them all, then the meeting point.
+  const alone = midFlow ? targetIds.filter((id) => endsOnItsOwn(ctx, id)) : [];
+  const together = targetIds.filter((id) => !alone.includes(id));
+  if (alone.length > 0 && together.length >= 2) {
+    const rest = resolveTransition(ctx, together, midFlow, source);
+    if (
+      rest.kind === 'fanout' &&
+      rest.convergence !== 'END' &&
+      ctx.flow.nodes.some((n) => n.id === rest.convergence) &&
+      !meetOnTheirOwn(ctx, together, rest.convergence)
+    ) {
+      // One branch per one that ends on its own, one for the rest, in the
+      // order they were drawn.
+      const first = (ids: string[]) => Math.min(...ids.map((id) => targetIds.indexOf(id)));
+      const branches = [
+        ...branchGroupPrograms(ctx, alone, null, source).map((group) => ({
+          at: first(group.targets),
+          program: group.program,
+        })),
+        { at: first(together), program: rest.program },
+      ].sort((a, b) => a.at - b.at);
+      return {
+        kind: 'fanout',
+        targets: targetIds,
+        convergence: rest.convergence,
+        program: [{ k: 'parallel', branches: branches.map((b) => b.program) }],
+      };
+    }
+  }
 
   let convergenceSet = findConvergenceSet(ctx, targetIds);
   // Decision D4: a branch stops at where the branches meet and at anything
@@ -329,8 +652,9 @@ function resolveTransition(ctx: Ctx, rawTargetIds: string[], midFlow: boolean): 
   }
   // Branches that meet before the boundary when not all of them do are
   // one branch (#99).
-  const branchPrograms = extractGraphParallelBranches(ctx.flow, targetIds, boundSet);
-  const program: BProgram = [{ k: 'parallel', branches: branchPrograms }];
+  const program: BProgram = [
+    { k: 'parallel', branches: branchPrograms(ctx, targetIds, boundSet, source) },
+  ];
 
   if (convergenceSet.length <= 1) {
     return {
@@ -348,7 +672,7 @@ function resolveTransition(ctx: Ctx, rawTargetIds: string[], midFlow: boolean): 
   // sequential BSteps, bubbling up its resolved scalar convergence.
   // Mirrors state-machine.ts's own buildFanOutFromTargets recursive-splice
   // fix exactly.
-  const inner = resolveTransition(ctx, convergenceSet, midFlow);
+  const inner = resolveTransition(ctx, convergenceSet, midFlow, source);
   const innerProgram = inner.kind === 'fanout' ? inner.program : [];
   const innerConvergence = inner.kind === 'fanout' ? inner.convergence : inner.target;
   return {
@@ -367,10 +691,26 @@ function buildLeafState(ctx: Ctx, node: FlowNode): LeafState {
     (node.data as Record<string, unknown> | undefined)?.enabled === false
       ? null
       : normalizeNodeAction(node);
-  const targets = outgoingEdges(ctx, node.id).map((e) => e.target);
-  const transition = resolveTransition(ctx, targets, true);
+  const out = outgoingEdges(ctx, node.id);
+  const transition = resolveTransition(
+    ctx,
+    out.map((e) => e.target),
+    true,
+    node.id,
+    out.filter((e) => ctx.backEdgeIds.has(e.id)).map((e) => e.target)
+  );
   return { kind: 'leaf', ownStep, transition };
 }
+
+/** The counter a count loop's test (`{{ _repeat_counter_X < N }}`) reads,
+ * read here on its own (analyzer/count-loop.ts states the convention). */
+function counterVariable(node: FlowNode | undefined): string | undefined {
+  if (node?.type !== 'condition') return undefined;
+  const data = node.data as Record<string, unknown>;
+  if (data.condition !== 'template' || typeof data.value_template !== 'string') return undefined;
+  return data.value_template.match(/(_repeat_counter_[A-Za-z0-9_]+)\s*<\s*\d+/)?.[1];
+}
+const isCounterTest = (node: FlowNode | undefined): boolean => counterVariable(node) !== undefined;
 
 /**
  * Bug #23 (2026-09-26): a count loop's test condition (`{{
@@ -381,9 +721,7 @@ function buildLeafState(ctx: Ctx, node: FlowNode): LeafState {
  * the real next states are the init node's own successors.
  */
 function countLoopRepeatTargets(ctx: Ctx, node: ConditionNode, targetId: string): string[] | null {
-  const data = node.data as Record<string, unknown>;
-  if (data.condition !== 'template' || typeof data.value_template !== 'string') return null;
-  const counter = data.value_template.match(/(_repeat_counter_[A-Za-z0-9_]+)\s*<\s*\d+/)?.[1];
+  const counter = counterVariable(node);
   if (!counter) return null;
   const target = ctx.flow.nodes.find((n) => n.id === targetId);
   if (target?.type !== 'set_variables') return null;
@@ -442,52 +780,15 @@ function andMemberFalseTargets(ctx: Ctx, conditionId: string, seen: Set<string>)
 /**
  * Bug #63: for a condition of an until test -- the head, whose own false
  * edge loops back, or a later member of its list -- the loop's exit (the
- * last member's true targets); null otherwise. The head is a `repeat_until`
- * head, or a plain condition (no `_blockKey`) whose false back-edge doesn't
- * go to a `repeat_while` head (extractFromGraph.ts's loop reading). Written
- * separately from state-machine.ts's untilErrorExitTargets, like the rest
- * of this file.
+ * last member's true targets); null otherwise. Which conditions guard a
+ * loop comes from analyzer/loops.ts (#283), the structural definition the
+ * strategy and the graph walk read too: a definition shared the way
+ * findBackEdges always was, not a reading of the strategy's output. The
+ * independent check of all three is the fuzzers' reference programs and
+ * the YAML-side readers.
  */
 function untilErrorExit(ctx: Ctx, node: ConditionNode): string[] | null {
-  // A disabled condition is never evaluated, so it can't fail.
-  if ((node.data as Record<string, unknown>).enabled === false) return null;
-  const byId = (id: string) => ctx.flow.nodes.find((n) => n.id === id);
-  const key = (id: string) => (byId(id)?.data as Record<string, unknown> | undefined)?._blockKey;
-  const handleEdges = (id: string, handle: string) =>
-    outgoingEdges(ctx, id).filter((e) => e.sourceHandle === handle);
-  const memberOf = (id: string): string | null => {
-    if (handleEdges(id, 'false').length > 0) return null;
-    if (andMemberFalseTargets(ctx, id, new Set()).length === 0) return null;
-    const incoming = ctx.flow.edges.filter((e) => e.target === id && !ctx.backEdgeIds.has(e.id));
-    return incoming.length === 1 ? incoming[0].source : null;
-  };
-
-  let head = node.id;
-  const seen = new Set<string>();
-  while (handleEdges(head, 'false').length === 0) {
-    if (seen.has(head)) return null;
-    seen.add(head);
-    const parent = memberOf(head);
-    if (parent === null || byId(parent)?.type !== 'condition') return null;
-    head = parent;
-  }
-  const loopsBackAsUntil = handleEdges(head, 'false').some(
-    (e) =>
-      ctx.backEdgeIds.has(e.id) &&
-      (key(head) === 'repeat_until' ||
-        (key(head) === undefined && key(e.target) !== 'repeat_while'))
-  );
-  if (!loopsBackAsUntil) return null;
-
-  let last = head;
-  for (;;) {
-    const forwardTrue = handleEdges(last, 'true').filter((e) => !ctx.backEdgeIds.has(e.id));
-    if (forwardTrue.length !== 1) break;
-    const next = forwardTrue[0].target;
-    if (byId(next)?.type !== 'condition' || memberOf(next) !== last) break;
-    last = next;
-  }
-  return handleEdges(last, 'true').map((e) => e.target);
+  return untilExit(ctx.flow, node.id)?.map((e) => e.target) ?? null;
 }
 
 function buildConditionState(ctx: Ctx, node: ConditionNode): ConditionState {
@@ -501,12 +802,16 @@ function buildConditionState(ctx: Ctx, node: ConditionNode): ConditionState {
   const falseTargets =
     ownFalse.length > 0 ? ownFalse : andMemberFalseTargets(ctx, node.id, new Set());
   const errorExit = untilErrorExit(ctx, node);
+  const roundTargets = (handle: string) =>
+    outgoingEdges(ctx, node.id)
+      .filter((e) => e.sourceHandle === handle && ctx.backEdgeIds.has(e.id))
+      .map((e) => e.target);
   return {
     kind: 'condition',
     cond,
-    trueTransition: resolveTransition(ctx, trueTargets, true),
-    falseTransition: resolveTransition(ctx, falseTargets, true),
-    ...(errorExit ? { errorTransition: resolveTransition(ctx, errorExit, true) } : {}),
+    trueTransition: resolveTransition(ctx, trueTargets, true, node.id, roundTargets('true')),
+    falseTransition: resolveTransition(ctx, falseTargets, true, node.id, roundTargets('false')),
+    ...(errorExit ? { errorTransition: resolveTransition(ctx, errorExit, true, node.id) } : {}),
   };
 }
 
@@ -518,17 +823,17 @@ export function extractStateMachineFromGraph(flow: FlowGraph): StateMachineGraph
   // `start` node -- mirrors buildTriggerRouting's own fallback exactly.
   const triggerNodes = ctx.flow.nodes.filter((n) => n.type === 'trigger');
   const triggers = triggerNodes.map(buildTrigger);
-  const entryCandidates: Array<{ index: number; targets: string[] }> = [];
+  const entryCandidates: Array<{ index: number; targets: string[]; nodeId: string }> = [];
   if (triggerNodes.length > 0) {
     triggerNodes.forEach((t, i) => {
       const targets = outgoingEdges(ctx, t.id).map((e) => e.target);
-      if (targets.length > 0) entryCandidates.push({ index: i, targets });
+      if (targets.length > 0) entryCandidates.push({ index: i, targets, nodeId: t.id });
     });
   } else {
     const startNode = ctx.flow.nodes.find(isStartNode);
     if (startNode) {
       const targets = outgoingEdges(ctx, startNode.id).map((e) => e.target);
-      if (targets.length > 0) entryCandidates.push({ index: 0, targets });
+      if (targets.length > 0) entryCandidates.push({ index: 0, targets, nodeId: startNode.id });
     }
   }
 
@@ -544,7 +849,7 @@ export function extractStateMachineFromGraph(flow: FlowGraph): StateMachineGraph
 
   const parallelEntries = new Map<string, ParallelEntrySpec>();
   const effectiveEntries = new Map<number, string>();
-  for (const { index, targets: rawTargets } of entryCandidates) {
+  for (const { index, targets: rawTargets, nodeId } of entryCandidates) {
     // Mirrors buildTriggerRouting's own fix (Phase B item 6 audit,
     // 2026-09-06): a trigger's raw outgoing targets can include a
     // one-way "shortcut" target that's already reachable from another
@@ -565,7 +870,9 @@ export function extractStateMachineFromGraph(flow: FlowGraph): StateMachineGraph
     }
     const parallelId = `__parallel_trigger_${index}`;
     effectiveEntries.set(index, parallelId);
-    const transition = resolveTransition(ctx, targets, false);
+    // Read from this trigger (#282): a loop another trigger joins elsewhere
+    // is read from where this trigger's run joins it.
+    const transition = resolveTransition(buildCtx(flow, [nodeId]), targets, false, nodeId);
     // targets.length > 1 here always resolves to 'fanout' (resolveTransition
     // only returns 'single' for 0 or 1 targets), but branch defensively
     // rather than assume.
@@ -580,6 +887,12 @@ export function extractStateMachineFromGraph(flow: FlowGraph): StateMachineGraph
     }
   }
 
+  // A trigger with nothing joined to it does nothing: it routes to END,
+  // as generateEntryNodeExpression writes it (bug #195).
+  triggerNodes.forEach((_t, i) => {
+    if (!effectiveEntries.has(i)) effectiveEntries.set(i, 'END');
+  });
+
   const uniqueTargets = new Set(effectiveEntries.values());
   const entry: EntrySpec =
     uniqueTargets.size === 1
@@ -591,7 +904,12 @@ export function extractStateMachineFromGraph(flow: FlowGraph): StateMachineGraph
   const states = new Map<string, StateSpec>();
   for (const node of ctx.flow.nodes) {
     if (node.type === 'trigger' || node.type === 'start') continue;
-    states.set(node.id, node.type === 'condition' ? buildConditionState(ctx, node as ConditionNode) : buildLeafState(ctx, node));
+    states.set(
+      node.id,
+      node.type === 'condition'
+        ? buildConditionState(ctx, node as ConditionNode)
+        : buildLeafState(ctx, node)
+    );
   }
 
   return { isEmpty: false, triggers, states, parallelEntries, entry };
@@ -640,13 +958,17 @@ export function expectedLoopBookkeeping(flow: FlowGraph): {
         (typeof blockKey(source) === 'string' || blockKey(headNode) === 'repeat_while')
       );
     });
+    // Only the parser's counter test on that yes side is a count loop; any
+    // other condition there is a do-while the user drew, with a budget
+    // like an until (bug #259).
     const allCount = into.every((e) => {
       const source = nodes.get(e.source);
       return (
         source?.type === 'condition' &&
         e.sourceHandle === 'true' &&
         blockKey(source) === undefined &&
-        blockKey(headNode) !== 'repeat_while'
+        blockKey(headNode) !== 'repeat_while' &&
+        isCounterTest(source)
       );
     });
     if (allCount) continue;

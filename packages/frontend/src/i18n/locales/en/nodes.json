@@ -500,6 +500,7 @@
     "string": "String",
     "object": "Object",
     "placeholder": "00:00:05.500",
+    "days": "Days",
     "hours": "Hours",
     "minutes": "Minutes",
     "seconds": "Seconds",
@@ -1009,6 +1010,7 @@
     "addTrigger": "Add trigger",
     "addAction": "Add action",
     "addCondition": "Add condition",
+    "continueWithoutTarget": "Continue without a target",
     "stillNeeded": "Still needed",
     "gaps": {
       "target": "Choose what it acts on",
@@ -1043,7 +1045,9 @@
       "showMore_one": "Show {{count}} more",
       "showMore_other": "Show {{count}} more",
       "performAction": "Perform action",
-      "anythingIn": "Anything in {{name}}"
+      "anythingIn": "Anything in {{name}}",
+      "anythingOn": "Anything on {{name}}",
+      "anythingLabelled": "Anything labelled {{name}}"
     },
     "groups": {
       "labels": "Labels",
@@ -1063,7 +1067,8 @@
       "types": "Types",
       "areas": "Areas",
       "devices": "Devices",
-      "entities": "Entities"
+      "entities": "Entities",
+      "labels": "Labels"
     },
     "kinds": {
       "when": "When",
@@ -1082,7 +1087,17 @@
       "services": "Services"
     },
     "current": "Current",
-    "loadingDevices": "Finding devices…"
+    "loadingDevices": "Finding devices…",
+    "registriesFailedTitle": "Rooms and devices didn't load",
+    "registriesFailedText": "Home Assistant didn't answer. Types still work.",
+    "searchEmpty": "Nothing matches your search.",
+    "devicesFailedTitle": "Devices didn't load",
+    "devicesFailedText": "Home Assistant didn't answer, so this list may be missing devices.",
+    "noRoomDevices": "No devices are in a room yet.",
+    "noRoomDevicesWhere": "Devices without a room are under {{place}}.",
+    "devicesUnanswered_one": "{{count}} device didn't answer, so it may be missing here.",
+    "devicesUnanswered_other": "{{count}} devices didn't answer, so they may be missing here.",
+    "tryAgain": "Try again"
   },
   "pill": {
     "upTo": "up to",

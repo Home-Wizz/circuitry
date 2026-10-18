@@ -19,6 +19,9 @@ import { serviceFieldList } from '@/lib/serviceFields';
 export interface ServiceNeeds {
   fields: string[];
   oneOf: string[][];
+  /** HA runs it only with a `response_variable` (its response isn't
+   * optional: `todo.get_items`, `calendar.get_events`, ...). */
+  response?: boolean;
 }
 
 /** Each service's needs: `domain.service` -> what a step must give. */
@@ -86,7 +89,18 @@ export function serviceNeeds(described: Record<string, string[]>): ServiceRequir
 }
 
 export function requiredServiceFields(services: HassServices): ServiceRequiredFields {
-  return serviceNeeds(describedRequiredFields(services));
+  const needs = serviceNeeds(describedRequiredFields(services));
+  // A service whose response isn't optional: HA saves a step without a
+  // `response_variable` and refuses it when it runs ("Script requires
+  // 'response_variable' for response data", bug #237).
+  for (const [domain, domainServices] of Object.entries(services ?? {})) {
+    for (const [service, description] of Object.entries(domainServices ?? {})) {
+      if (description?.response?.optional !== false) continue;
+      const key = `${domain}.${service}`;
+      needs[key] = { ...(needs[key] ?? { fields: [], oneOf: [] }), response: true };
+    }
+  }
+  return needs;
 }
 
 const isEmpty = isEmptyValue;
@@ -116,5 +130,19 @@ export function serviceFieldIssues(
     .map((f) => warning(f, 'errors:validation.action.fieldEmpty'));
   const wayGiven = needs.oneOf.some((way) => !way.some(empty));
   const groupFields = wayGiven ? [] : [...new Set(needs.oneOf.flat())].filter(empty);
-  return [...missing, ...groupFields.map((f) => warning(f, 'errors:validation.action.oneOfEmpty'))];
+  const response =
+    needs.response && isEmpty(data.response_variable)
+      ? [
+          {
+            path: ['response_variable'],
+            message: 'errors:validation.action.responseNeeded',
+            severity: 'warning' as const,
+          },
+        ]
+      : [];
+  return [
+    ...missing,
+    ...groupFields.map((f) => warning(f, 'errors:validation.action.oneOfEmpty')),
+    ...response,
+  ];
 }

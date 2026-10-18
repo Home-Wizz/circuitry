@@ -168,7 +168,11 @@ export function entityRecipeGroups<R, C extends RecipeCategory<R>>(
   offers: (type: string) => boolean,
   describe: (type: string) => NativeDescription | null | undefined
 ): C[] {
-  const own = found && { ...found, recipes: found.recipes.filter((r) => offers(typeOf(r))) };
+  // Its own category as the connected HA has it: a type HA added to it
+  // (lawn_mower.became_idle, HA 2026.10) is in the catalog's copy, not the
+  // hand-written one -- and the catalog's copy is skipped below as "own".
+  const live = found && (catalog.find((c) => c.groupKey === found.groupKey) ?? found);
+  const own = live && { ...live, recipes: live.recipes.filter((r) => offers(typeOf(r))) };
   return entity
     ? categoriesForEntity(entity, own, catalog, kind, typeOf, describe)
     : own

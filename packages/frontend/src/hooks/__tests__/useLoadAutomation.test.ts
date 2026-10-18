@@ -24,12 +24,14 @@ const {
   mockFromFlowGraph,
   mockSetFlowName,
   mockSetAutomationId,
+  mockSetSavedConfigHash,
+  mockSetKeptElsewhere,
   mockFromYaml,
   mockComputeSourceHash,
   mockLoadGraphIfFresh,
   mockSaveGraph,
   mockIsConnected,
-  mockGetAutomationConfigWithFallback,
+  mockGetAutomationConfig,
   mockReportImportIssue,
 } = vi.hoisted(() => ({
   mockFitView: vi.fn(),
@@ -38,12 +40,14 @@ const {
   mockFromFlowGraph: vi.fn(),
   mockSetFlowName: vi.fn(),
   mockSetAutomationId: vi.fn(),
+  mockSetSavedConfigHash: vi.fn(),
+  mockSetKeptElsewhere: vi.fn(),
   mockFromYaml: vi.fn(),
   mockComputeSourceHash: vi.fn(),
   mockLoadGraphIfFresh: vi.fn(),
   mockSaveGraph: vi.fn(),
   mockIsConnected: vi.fn(),
-  mockGetAutomationConfigWithFallback: vi.fn(),
+  mockGetAutomationConfig: vi.fn(),
   mockReportImportIssue: vi.fn(),
 }));
 
@@ -59,14 +63,22 @@ vi.mock('@/contexts/HassContext', () => ({
   useHass: () => ({ hass: {}, config: {} }),
 }));
 
+// The active tab's id, as the store has it now (a test switches tabs by
+// changing it mid-load).
+const activeTab = { flowId: 'tab-1' };
 vi.mock('@/store/flow-store', () => ({
-  useFlowStore: () => ({
-    reset: mockReset,
-    openInNewTab: mockOpenInNewTab,
-    fromFlowGraph: mockFromFlowGraph,
-    setFlowName: mockSetFlowName,
-    setAutomationId: mockSetAutomationId,
-  }),
+  useFlowStore: Object.assign(
+    () => ({
+      reset: mockReset,
+      openInNewTab: mockOpenInNewTab,
+      fromFlowGraph: mockFromFlowGraph,
+      setFlowName: mockSetFlowName,
+      setAutomationId: mockSetAutomationId,
+      setSavedConfigHash: mockSetSavedConfigHash,
+      setKeptElsewhere: mockSetKeptElsewhere,
+    }),
+    { getState: () => activeTab }
+  ),
 }));
 
 vi.mock('@/lib/haToast', () => ({
@@ -77,6 +89,8 @@ vi.mock('@/lib/haToast', () => ({
 
 vi.mock('@circuitry/transpiler', () => ({
   transpiler: { fromYaml: mockFromYaml },
+  // The graphs here are stand-ins the interpreters can't run: unchecked.
+  checkImport: () => ({ verdict: 'unchecked', runs: 0 }),
 }));
 
 vi.mock('@/lib/graph-storage', () => ({
@@ -85,10 +99,15 @@ vi.mock('@/lib/graph-storage', () => ({
   saveGraph: mockSaveGraph,
 }));
 
+// Whether the automation read is kept in automations.yaml (#205).
+const source = { editable: true };
 vi.mock('@/lib/ha-api', () => ({
   getHomeAssistantAPI: () => ({
     isConnected: mockIsConnected,
-    getAutomationConfigWithFallback: mockGetAutomationConfigWithFallback,
+    readAutomation: async (id: string) => {
+      const config = await mockGetAutomationConfig(id);
+      return config ? { config, editable: source.editable } : null;
+    },
     reportImportIssue: mockReportImportIssue,
   }),
 }));
@@ -107,7 +126,7 @@ describe('useLoadAutomation -- JSON-canonical-store staleness gap (Phase B)', ()
   beforeEach(() => {
     vi.clearAllMocks();
     mockIsConnected.mockReturnValue(true);
-    mockGetAutomationConfigWithFallback.mockResolvedValue(FAKE_CONFIG);
+    mockGetAutomationConfig.mockResolvedValue(FAKE_CONFIG);
     mockComputeSourceHash.mockReturnValue(FAKE_HASH);
   });
 

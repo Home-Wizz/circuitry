@@ -1,6 +1,19 @@
-import { Copy, Loader2, Pencil, Play, Power, Settings2, Tags, Trash2, Wrench } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import {
+  Copy,
+  ListChecks,
+  Loader2,
+  Pencil,
+  Play,
+  Power,
+  Settings2,
+  Tags,
+  Trash2,
+  Wrench,
+} from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { AutomationSettingsPanel } from '@/components/panels/AutomationSettingsPanel';
+import { SelfCheckDialog } from '@/components/panels/SelfCheckDialog';
 import { Button } from '@/components/ui/button';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import {
@@ -19,7 +32,6 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { NameDialog } from '@/components/ui/name-dialog';
-import { AutomationSettingsPanel } from '@/components/panels/AutomationSettingsPanel';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useHass } from '@/contexts/HassContext';
 import { CategoryFallback, HaCategoryPicker } from '@/ha';
@@ -44,20 +56,21 @@ import { useFlowStore } from '@/store/flow-store';
  * (`automationId`/its resolved `entity_id`) rather than the in-progress
  * canvas edit — Run/Enable-Disable/Assign category are all disabled until
  * there's something in HA to act on. Rename is the one exception: it always
- * works, persisting immediately via updateAutomation() if there's already a
- * saved automation, or just updating the local flowName (picked up by the
- * next Save) if there isn't yet.
+ * works, renaming the saved automation in HA at once (its name only, via
+ * renameAutomation(); the canvas isn't saved) if there is one, or just
+ * updating the local flowName (picked up by the next Save) if there isn't
+ * yet.
  */
 export function AutomationToolsMenu() {
   const { t } = useTranslation(['common', 'dialogs', 'errors']);
   const { hass } = useHass();
-  const { flowName, automationId, setFlowName, setAutomationId, saveAutomation, closeTab, flowId } =
-    useFlowStore();
+  const { flowName, automationId, saveAsNewAutomation, closeTab, flowId } = useFlowStore();
 
   const [renameOpen, setRenameOpen] = useState(false);
   const [categoryOpen, setCategoryOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [selfCheckOpen, setSelfCheckOpen] = useState(false);
   const [busyAction, setBusyAction] = useState<'run' | 'toggle' | 'duplicate' | 'delete' | null>(
     null
   );
@@ -105,9 +118,7 @@ export function AutomationToolsMenu() {
     setBusyAction('duplicate');
     try {
       const copyName = await api.getUniqueAutomationAlias(flowName);
-      setFlowName(copyName);
-      setAutomationId(null);
-      await saveAutomation(hass);
+      await saveAsNewAutomation(hass, copyName);
       showSuccessToast(t('common:toolsMenu.duplicatedToast', { name: copyName }));
     } catch (err) {
       showErrorToast(err instanceof Error ? err.message : t('errors:api.unknownError'));
@@ -147,7 +158,7 @@ export function AutomationToolsMenu() {
         <Tooltip>
           <TooltipTrigger asChild>
             <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="icon">
+              <Button variant="ghost" size="icon" aria-label={t('common:titles.automationTools')}>
                 <Wrench className="h-5 w-5" />
               </Button>
             </DropdownMenuTrigger>
@@ -166,6 +177,11 @@ export function AutomationToolsMenu() {
           <DropdownMenuItem onClick={() => setSettingsOpen(true)}>
             <Settings2 className="mr-2 h-4 w-4" />
             {t('common:toolsMenu.settings')}
+          </DropdownMenuItem>
+          {/* Every automation, not this one: opens each and checks it. */}
+          <DropdownMenuItem disabled={!hass} onClick={() => setSelfCheckOpen(true)}>
+            <ListChecks className="mr-2 h-4 w-4" />
+            {t('common:toolsMenu.selfCheck')}
           </DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem disabled={!hasTarget || busyAction === 'run'} onClick={handleRun}>
@@ -227,6 +243,7 @@ export function AutomationToolsMenu() {
           <AutomationSettingsPanel inDialog />
         </DialogContent>
       </Dialog>
+      <SelfCheckDialog open={selfCheckOpen} onOpenChange={setSelfCheckOpen} />
       <DeleteAutomationDialog
         open={deleteOpen}
         onOpenChange={setDeleteOpen}
@@ -261,7 +278,7 @@ function RenameAutomationDialog({
 }) {
   const { t } = useTranslation(['common', 'dialogs', 'errors']);
   const { hass } = useHass();
-  const { flowName, automationId, setFlowName, updateAutomation } = useFlowStore();
+  const { flowName, automationId, setFlowName, renameAutomation } = useFlowStore();
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -270,17 +287,18 @@ function RenameAutomationDialog({
   }, [open]);
 
   const handleSave = async (trimmed: string) => {
-    setFlowName(trimmed);
     if (!automationId || !hass) {
       // Nothing saved yet — the new name is just local state now, picked up
       // by whichever Save the user runs next.
+      setFlowName(trimmed);
       onOpenChange(false);
       return;
     }
     setSaving(true);
     setError(null);
     try {
-      await updateAutomation(hass);
+      // The saved automation's name only; the canvas is not saved (#206).
+      await renameAutomation(hass, trimmed);
       showSuccessToast(t('common:toolsMenu.renamedToast', { name: trimmed }));
       onOpenChange(false);
     } catch (err) {
@@ -308,7 +326,7 @@ function RenameAutomationDialog({
 /** Assigns the automation's HA category registry entry — same picker (and
  * fallback) AutomationSaveDialog.tsx uses, just scoped to a single field
  * committed immediately rather than bundled into the full save form. */
-function AssignCategoryDialog({
+export function AssignCategoryDialog({
   open,
   onOpenChange,
   entityId,
@@ -319,9 +337,18 @@ function AssignCategoryDialog({
 }) {
   const { t } = useTranslation(['common', 'dialogs', 'errors']);
   const { hass } = useHass();
-  const [category, setCategory] = useState('');
+  const [category, setCategoryState] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // HA's category arrives after the dialog opens: until it has, or one is
+  // picked, Save would write the empty field as "no category"; and arriving
+  // after a pick, it replaced the pick (bug #257).
+  const [loaded, setLoaded] = useState(false);
+  const picked = useRef(false);
+  const setCategory = (value: string) => {
+    picked.current = true;
+    setCategoryState(value);
+  };
 
   // Keyed on HA's connection, not `hass` (a new object every few seconds):
   // keyed on `hass`, the stored category came back over the one being
@@ -331,9 +358,14 @@ function AssignCategoryDialog({
     const current = getHass();
     if (!open || !current || !connection) return;
     setError(null);
+    setLoaded(false);
+    picked.current = false;
     getHomeAssistantAPI(current)
       .getEntityRegistryEntry(entityId)
-      .then((entry) => setCategory(entry?.categories?.automation ?? ''));
+      .then((entry) => {
+        if (!picked.current) setCategoryState(entry?.categories?.automation ?? '');
+        setLoaded(true);
+      });
   }, [open, connection, getHass, entityId]);
 
   const handleSave = async () => {
@@ -384,7 +416,7 @@ function AssignCategoryDialog({
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>
             {t('common:buttons.cancel')}
           </Button>
-          <Button onClick={handleSave} disabled={saving}>
+          <Button onClick={handleSave} disabled={saving || (!loaded && !picked.current)}>
             {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
             {t('common:buttons.save')}
           </Button>

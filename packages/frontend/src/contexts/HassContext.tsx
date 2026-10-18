@@ -16,6 +16,7 @@ import {
   useRef,
   useState,
 } from 'react';
+import { restRequest } from '@/lib/restApi';
 import { readStored, writeStored } from '@/lib/storage';
 import type { HassEntity, HassService, HomeAssistant } from '@/types/hass';
 
@@ -203,6 +204,12 @@ interface HassContextProps {
   labels: LabelRegistryEntry[];
   /** An entity's own labels, unioned with its device's labels (HA's own UI treats a device's labels as applying to all its entities too) — deduped. */
   getLabelIdsForEntity: (entityId: string) => string[];
+  /** Home Assistant didn't answer when asked for its registries: rooms,
+   * devices and labels are missing, not absent (bug #228). Optional: a
+   * context without a registry has none. */
+  registriesFailed?: boolean;
+  /** Asks Home Assistant for the registries again. */
+  retryRegistries?: () => void;
 }
 
 /**
@@ -315,19 +322,6 @@ export const HassProvider: FC<
           setRemoteServices(services);
         });
 
-        // Fetch device and entity registries
-        loadRegistries(connection)
-          .then(({ areas, devices, entities, labels, floors }) => {
-            setAreaRegistry(areas);
-            setDeviceRegistry(devices);
-            setEntityRegistry(entities);
-            setLabelRegistry(labels);
-            setFloorRegistry(floors);
-          })
-          .catch((error) => {
-            console.error('Circuitry: Failed to fetch registries:', error);
-          });
-
         // Cleanup function
         return () => {
           unsubscribeEntities();
@@ -353,22 +347,37 @@ export const HassProvider: FC<
     };
   }, [shouldUseRemote, config.url, config.token]);
 
-  // Fetch registries when using externalHass (panel mode)
+  // The registries (areas, devices, entities, labels, floors), from HA's
+  // own connection in the panel or the remote one. A failure used to show
+  // only in the console, and the pickers listed no rooms or devices as if
+  // there were none (bug #228); it's now kept, and Try again asks again.
+  const registryConnection = externalHass?.connection ?? (shouldUseRemote ? wsConnection : null);
+  const [registriesFailed, setRegistriesFailed] = useState(false);
+  const [registryAttempt, setRegistryAttempt] = useState(0);
+  const retryRegistries = useCallback(() => setRegistryAttempt((n) => n + 1), []);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: registryAttempt is the Try again signal
   useEffect(() => {
-    if (!externalHass?.connection) return;
-
-    loadRegistries(externalHass.connection)
+    if (!registryConnection) return;
+    let cancelled = false;
+    loadRegistries(registryConnection)
       .then(({ areas, devices, entities, labels, floors }) => {
+        if (cancelled) return;
         setAreaRegistry(areas);
         setDeviceRegistry(devices);
         setEntityRegistry(entities);
         setLabelRegistry(labels);
         setFloorRegistry(floors);
+        setRegistriesFailed(false);
       })
       .catch((error) => {
-        console.error('Circuitry: Failed to fetch registries from externalHass:', error);
+        if (cancelled) return;
+        console.error('Circuitry: Failed to fetch registries:', error);
+        setRegistriesFailed(true);
       });
-  }, [externalHass?.connection]);
+    return () => {
+      cancelled = true;
+    };
+  }, [registryConnection, registryAttempt]);
 
   // Use refs to store frequently changing data without triggering hass object recreation
   const statesRef = useRef<Record<string, HassEntity>>({});
@@ -434,28 +443,12 @@ export const HassProvider: FC<
           return servicesRef.current;
         },
         connection: wsConnection,
-        callApi: async (method: string, path: string, data?: unknown) => {
+        callApi: async <T,>(method: string, path: string, data?: unknown) => {
           if (!config.url || !config.token) {
             throw new Error('No authentication configured');
           }
 
-          // Use direct fetch for REST API calls
-          const url = `${config.url}/api/${path}`;
-          const response = await fetch(url, {
-            method,
-            headers: {
-              Authorization: `Bearer ${config.token}`,
-              'Content-Type': 'application/json',
-            },
-            body: data ? JSON.stringify(data) : undefined,
-          });
-
-          if (!response.ok) {
-            const error = await response.json();
-            throw new Error(`API error: ${error.message}`);
-          }
-
-          return await response.json();
+          return restRequest<T>(config.url, config.token, method, path, data);
         },
         callService: async (domain, service, data) => {
           if (!wsConnection) {
@@ -672,6 +665,8 @@ export const HassProvider: FC<
     getLabelIdsForEntity,
     isSecondaryEntity,
     getDeviceInfo,
+    registriesFailed,
+    retryRegistries,
   };
 
   return <HassContext.Provider value={value}>{children}</HassContext.Provider>;

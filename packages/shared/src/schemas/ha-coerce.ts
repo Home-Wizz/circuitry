@@ -58,6 +58,13 @@ type Coercion = (value: unknown) => unknown;
 
 /** `cv.string`, `cv.template`: any scalar, as text. */
 const text: Coercion = (value) => pythonStr(value) ?? value;
+
+/** `vol.All(cv.ensure_list, [vol.Upper])`: a list, each item upper-cased text. */
+const upperList: Coercion = (value) =>
+  mapItems(list(value), (item) => {
+    const s = pythonStr(item);
+    return s === undefined ? item : s.toUpperCase();
+  });
 /** `vol.Any(None, cv.string)`: null stays null. */
 const textOrNull: Coercion = (value) => (value === null ? null : text(value));
 /** `cv.boolean`; also `enabled:`'s `vol.Any(cv.boolean, cv.template)`, where
@@ -105,7 +112,11 @@ const TRIGGER_RULES: Record<string, Rules> = {
   template: { for: number, value_template: text },
   event: { event_type: textList },
   time: { at: list, weekday: list },
-  webhook: { webhook_id: text, allowed_methods: list },
+  // HA upper-cases each method (webhook/trigger.py: vol.Upper) and takes
+  // the MQTT payload as a template (mqtt/trigger.py: cv.template), so
+  // `allowed_methods: [post]` and `payload: 1` work there (#219).
+  webhook: { webhook_id: text, allowed_methods: upperList },
+  mqtt: { payload: text, value_template: text },
   persistent_notification: { update_type: list },
   tag: { tag_id: textList, device_id: textList },
   conversation: { command: textList },

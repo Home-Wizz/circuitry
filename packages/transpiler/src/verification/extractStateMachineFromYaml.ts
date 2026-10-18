@@ -1,4 +1,15 @@
-import type { BProgram, BStep } from './behaviorProgram';
+import {
+  BRANCH_ALIAS,
+  BRANCH_RUN_ALIAS,
+  branchNames,
+  isBranchMachineName,
+  MAIN_NAMES,
+  renameMachineVariables,
+  usesMachineNames,
+} from '../utils/branchMachine';
+import { isNoStepsStop } from '../utils/stateMachineEntry';
+import { RUN_ALIAS } from '../utils/stateMachineLoops';
+import type { BProgram, BStep, MachineState } from './behaviorProgram';
 import { type BoolExpr, boolExprEquivalent, parseConditionExpr } from './boolean';
 import { normalizeTrigger, parseActionSequence } from './extractFromYaml';
 
@@ -47,7 +58,11 @@ export interface YamlConditionState {
   errorTransition?: YamlTransition;
 }
 
-export type YamlStateSpec = (YamlLeafState | YamlConditionState | { kind: 'malformed'; reason: string }) & {
+export type YamlStateSpec = (
+  | YamlLeafState
+  | YamlConditionState
+  | { kind: 'malformed'; reason: string }
+) & {
   loopSteps?: LoopSteps;
 };
 
@@ -72,6 +87,8 @@ export interface StateMachineYamlExtraction {
   runLoop?: boolean;
   /** The loop round variables set at the start (#157). */
   loopVars?: string[];
+  /** Whether the stop for a trigger with no steps is there (#195). */
+  noStepsStop?: boolean;
 }
 
 function asArray(value: unknown): unknown[] {
@@ -86,9 +103,18 @@ function asArray(value: unknown): unknown[] {
  * as a malformed transition rather than silently treated as "no
  * transition" -- a missing/corrupted current_node assignment is exactly
  * the kind of real bug this file exists to catch. */
-function stripTrailingTransition(program: BProgram): { content: BProgram; transition: YamlTransition } {
+function stripTrailingTransition(program: BProgram): {
+  content: BProgram;
+  transition: YamlTransition;
+} {
   if (program.length === 0) {
-    return { content: program, transition: { kind: 'malformed', reason: 'no steps at all (expected a current_node transition)' } };
+    return {
+      content: program,
+      transition: {
+        kind: 'malformed',
+        reason: 'no steps at all (expected a current_node transition)',
+      },
+    };
   }
   const last = program[program.length - 1];
   if (last.k === 'action') {
@@ -108,7 +134,10 @@ function stripTrailingTransition(program: BProgram): { content: BProgram; transi
   }
   return {
     content: program,
-    transition: { kind: 'malformed', reason: `last step is not a plain current_node transition: ${JSON.stringify(last)}` },
+    transition: {
+      kind: 'malformed',
+      reason: `last step is not a plain current_node transition: ${JSON.stringify(last)}`,
+    },
   };
 }
 
@@ -164,17 +193,36 @@ function splitLoopSteps(sequence: unknown[]): { rest: unknown[]; loopSteps: Loop
   return { rest: out, loopSteps: { head, inThen } };
 }
 
+/** A step that only sets `current_node` to a name: a state's transition. */
+function isPlainTransition(step: unknown): boolean {
+  if (!isMapping(step) || Object.keys(step).length !== 1 || !isMapping(step.variables))
+    return false;
+  const vars = step.variables;
+  return Object.keys(vars).length === 1 && typeof vars.current_node === 'string';
+}
+
 function parseState(raw: unknown[]): YamlStateSpec {
   const { rest, loopSteps } = splitLoopSteps(raw);
   return { ...parseStateSteps(rest), loopSteps };
 }
 
 function parseStateSteps(sequence: unknown[]): YamlStateSpec {
+  // A state that ends by setting where to go next: that step off first,
+  // then the rest read. Read together, a state whose steps end in an `if`
+  // (a branch beside where the flow carries on, #267) had the transition
+  // folded into the if's sides, and wasn't read as a transition at all.
+  const last = sequence.at(-1);
+  if (sequence.length > 1 && isPlainTransition(last)) {
+    const { transition } = stripTrailingTransition(parseActionSequence([last]));
+    return { kind: 'leaf', content: parseActionSequence(sequence.slice(0, -1)), transition };
+  }
   const program = parseActionSequence(sequence);
 
   if (program.length === 1 && program[0].k === 'if') {
     const ifStep = program[0] as Extract<BStep, { k: 'if' }>;
-    const { content: trueContent, transition: trueTransition } = stripTrailingTransition(ifStep.then);
+    const { content: trueContent, transition: trueTransition } = stripTrailingTransition(
+      ifStep.then
+    );
     // Bug #63: an until test's else may be an error guard -- only an `if:`
     // on the test's negation, then (really false) / else (the test couldn't
     // be evaluated). Recognized by its meaning: the guard's condition must
@@ -235,7 +283,11 @@ function findEntryExpression(steps: unknown[]): string | null {
   for (const step of steps) {
     if (!step || typeof step !== 'object') continue;
     const vars = (step as Record<string, unknown>).variables;
-    if (vars && typeof vars === 'object' && typeof (vars as Record<string, unknown>).current_node === 'string') {
+    if (
+      vars &&
+      typeof vars === 'object' &&
+      typeof (vars as Record<string, unknown>).current_node === 'string'
+    ) {
       return (vars as Record<string, unknown>).current_node as string;
     }
   }
@@ -261,15 +313,16 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
  * that ran before (each drawn loop counts its own rounds from it). Held to
  * its exact form: a round that records the wrong state, or a chunk past
  * HA's limit, still runs the same actions until a loop runs long. */
-const RUN_RESET = { variables: { run_rounds: 0 } };
-const RUN_UNTIL = '{{ current_node == "END" or run_rounds >= 9999 }}';
-const RUN_ROUND = {
+type Names = typeof MAIN_NAMES | ReturnType<typeof branchNames>;
+const runReset = (n: Names) => ({ variables: { [n.rounds]: 0 } });
+const runUntil = (n: Names) => `{{ ${n.node} == "END" or ${n.rounds} >= 9999 }}`;
+const runRound = (n: Names) => ({
   variables: {
-    prev_node: '{{ this_node }}',
-    this_node: '{{ current_node }}',
-    run_rounds: '{{ run_rounds + 1 }}',
+    [n.prev]: `{{ ${n.this} }}`,
+    [n.this]: `{{ ${n.node} }}`,
+    [n.rounds]: `{{ ${n.rounds} + 1 }}`,
   },
-};
+});
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 
 function dispatchIn(steps: unknown[]): Record<string, unknown> | null {
@@ -277,7 +330,13 @@ function dispatchIn(steps: unknown[]): Record<string, unknown> | null {
   return (found as Record<string, unknown> | undefined) ?? null;
 }
 
-function findChooseBlocks(steps: unknown[]): DispatcherBlocks | null {
+function findChooseBlocks(
+  steps: unknown[],
+  /** The run loop's alias and the machine's names: the main one's, or a
+   * branch machine's (#284). */
+  runAlias: string = RUN_ALIAS,
+  names: Names = MAIN_NAMES
+): DispatcherBlocks | null {
   for (const step of steps) {
     if (!isRecord(step) || !isRecord(step.repeat)) continue;
     const loopSteps = asArray(step.repeat.sequence);
@@ -294,14 +353,14 @@ function findChooseBlocks(steps: unknown[]): DispatcherBlocks | null {
     if (!dispatch) continue;
     const exact =
       loopSteps.length === 2 &&
-      same(loopSteps[0], RUN_RESET) &&
+      same(loopSteps[0], runReset(names)) &&
       loopSteps[1] === run &&
-      run.alias === 'State Machine Run' &&
+      run.alias === runAlias &&
       Object.keys(run).sort().join() === 'alias,repeat' &&
-      run.repeat.until === RUN_UNTIL &&
+      run.repeat.until === runUntil(names) &&
       Object.keys(run.repeat).sort().join() === 'sequence,until' &&
       runSteps.length === 2 &&
-      same(runSteps[0], RUN_ROUND) &&
+      same(runSteps[0], runRound(names)) &&
       runSteps[1] === dispatch;
     return {
       choose: dispatch.choose as unknown[],
@@ -332,12 +391,14 @@ function isExpectedDefaultBlock(value: unknown): boolean {
   const [logStep, endStep] = value;
   if (!logStep || typeof logStep !== 'object') return false;
   const log = logStep as Record<string, unknown>;
-  if (log.service !== 'system_log.write') return false;
+  // `action` since bug #280; saves before it say `service`.
+  if ((log.action ?? log.service) !== 'system_log.write') return false;
   const data = log.data;
   if (!data || typeof data !== 'object') return false;
   const logData = data as Record<string, unknown>;
   if (logData.level !== 'warning') return false;
-  if (typeof logData.message !== 'string' || !logData.message.includes('Unknown state')) return false;
+  if (typeof logData.message !== 'string' || !logData.message.includes('Unknown state'))
+    return false;
   if (!endStep || typeof endStep !== 'object') return false;
   const vars = (endStep as Record<string, unknown>).variables;
   if (!vars || typeof vars !== 'object' || Array.isArray(vars)) return false;
@@ -350,11 +411,10 @@ function isExpectedDefaultBlock(value: unknown): boolean {
  * node id (no Jinja) is `{kind:'single'}`. Otherwise it must be the exact
  * if/elif/else chain generateEntryNodeExpression builds (read directly
  * from source): `{% if trigger.idx == "N" %}TARGET{% elif ... %}TARGET
- * {% else %}TARGET{% endif %}`. That template deliberately never restates
- * the else-clause's own trigger index (it's whichever index isn't covered
- * by an if/elif) -- so this returns the else target separately, and the
- * caller (which has the graph's own real index set) resolves which index
- * it belongs to, rather than this file guessing.
+ * {% else %}TARGET{% endif %}`. The else clause names no index: HA takes
+ * it for every trigger the chain doesn't name, so this returns it
+ * separately and the caller, which has the graph's own index set, gives
+ * it to each of those (bug #195).
  */
 function parseEntryExpression(expr: string): YamlEntrySpec {
   if (!expr.includes('{%')) {
@@ -365,19 +425,127 @@ function parseEntryExpression(expr: string): YamlEntrySpec {
   let m: RegExpExecArray | null;
   // eslint-disable-next-line no-cond-assign
   while ((m = re.exec(expr)) !== null) {
-    ifElifTargets.set(Number(m[1]), m[2].trim());
+    // The first clause naming an index is the one HA takes.
+    if (!ifElifTargets.has(Number(m[1]))) ifElifTargets.set(Number(m[1]), m[2].trim());
   }
   const elseMatch = expr.match(/\{%\s*else\s*%\}([^{]*)/);
   if (!elseMatch) {
-    return { kind: 'malformed', reason: `templated entry expression has no {% else %} clause: ${expr}` };
+    return {
+      kind: 'malformed',
+      reason: `templated entry expression has no {% else %} clause: ${expr}`,
+    };
   }
   if (ifElifTargets.size === 0) {
-    return { kind: 'malformed', reason: `templated entry expression has no if/elif clause: ${expr}` };
+    return {
+      kind: 'malformed',
+      reason: `templated entry expression has no if/elif clause: ${expr}`,
+    };
   }
   return { kind: 'byTriggerIdx', ifElifTargets, elseTarget: elseMatch[1].trim() };
 }
 
-export function extractStateMachineFromYamlConfig(config: Record<string, unknown>): StateMachineYamlExtraction {
+/**
+ * A state as the shared comparison takes it (behaviorProgram.ts's
+ * MachineState); with `withLoopSteps`, its loop bookkeeping too (a branch
+ * machine's, compared there; the main dispatcher's is compared on its own).
+ */
+export function machineStateFromYaml(
+  id: string,
+  state: YamlStateSpec,
+  withLoopSteps = false
+): MachineState {
+  const kept = withLoopSteps
+    ? { loopSteps: JSON.stringify(state.loopSteps ?? { head: [], inThen: [] }) }
+    : {};
+  if (state.kind === 'malformed') return { id, ...kept, kind: 'malformed', reason: state.reason };
+  if (state.kind === 'leaf') {
+    return { id, ...kept, kind: 'leaf', content: state.content, next: state.transition };
+  }
+  return {
+    id,
+    ...kept,
+    kind: 'condition',
+    cond: state.cond,
+    then: state.trueContent,
+    thenNext: state.trueTransition,
+    else: state.falseContent,
+    elseNext: state.falseTransition,
+    ...(state.errorTransition
+      ? { error: { content: state.errorContent ?? [], next: state.errorTransition } }
+      : {}),
+  };
+}
+
+/**
+ * #284: a branch machine at the start of `steps` (utils/branchMachine.ts's
+ * fixed form: its start, then its loop, recognized by the loop's alias and
+ * a variable named as a branch machine's), read as the main dispatcher is:
+ * the steps after it in `rest`. Its states are read under the main
+ * machine's names, once it is clear it uses only its own; anything off the
+ * fixed form is a malformed machine, which never compares equal. Null when
+ * `steps` doesn't start with one.
+ */
+export function readBranchMachine(steps: unknown[]): { step: BStep; rest: unknown[] } | null {
+  const [init, loop] = steps;
+  if (!isRecord(init) || !isRecord(init.variables)) return null;
+  if (!isRecord(loop) || loop.alias !== BRANCH_ALIAS) return null;
+  const name = Object.keys(init.variables).find(isBranchMachineName);
+  if (name === undefined) return null;
+  const rest = steps.slice(2);
+  const n = branchNames(name);
+  const malformed = (reason: string) => ({
+    step: { k: 'machine' as const, name, entry: '', states: [], malformed: reason },
+    rest,
+  });
+  const entry = init.variables[n.node];
+  const start = { [n.node]: entry, [n.prev]: '', [n.this]: '', [n.rounds]: 0 };
+  if (
+    Object.keys(init).join() !== 'variables' ||
+    typeof entry !== 'string' ||
+    !same(init.variables, start)
+  ) {
+    return malformed(`its start isn't the fixed form: ${JSON.stringify(init).slice(0, 300)}`);
+  }
+  const repeat = loop.repeat;
+  if (
+    Object.keys(loop).sort().join() !== 'alias,repeat' ||
+    !isRecord(repeat) ||
+    Object.keys(repeat).sort().join() !== 'sequence,until' ||
+    repeat.until !== `{{ ${n.node} == "END" }}`
+  ) {
+    return malformed(`its loop isn't the fixed form: ${JSON.stringify(loop).slice(0, 300)}`);
+  }
+  const dispatcher = findChooseBlocks([loop], BRANCH_RUN_ALIAS, n);
+  if (dispatcher === null || !dispatcher.runLoop) {
+    return malformed('its states are not in a run loop of their own');
+  }
+  if (dispatcher.malformed) return malformed(dispatcher.malformed);
+  // HA writes a branch's `variables:` up to where the name already is, so
+  // a branch machine using the main machine's names moves the main one.
+  if (usesMachineNames([init, loop], MAIN_NAMES)) {
+    return malformed("it uses the main machine's variables");
+  }
+  const cases = renameMachineVariables(dispatcher.choose, n, MAIN_NAMES) as unknown[];
+  const fallback = renameMachineVariables(dispatcher.defaultBlock, n, MAIN_NAMES);
+  if (!isExpectedDefaultBlock(fallback)) {
+    return malformed(`its default isn't the fixed log line and END: ${JSON.stringify(fallback)}`);
+  }
+  const states: MachineState[] = [];
+  for (const rawCase of cases) {
+    if (!isRecord(rawCase)) continue;
+    const id = extractDispatchId(rawCase);
+    if (id === null) continue;
+    // HA runs the first case that matches: a second for the same state never runs.
+    if (states.some((s) => s.id === id)) return malformed(`two states for "${id}"`);
+    states.push(machineStateFromYaml(id, parseState(asArray(rawCase.sequence)), true));
+  }
+  states.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return { step: { k: 'machine', name, entry, states }, rest };
+}
+
+export function extractStateMachineFromYamlConfig(
+  config: Record<string, unknown>
+): StateMachineYamlExtraction {
   const rawTriggers = asArray(config.triggers ?? config.trigger) as Record<string, unknown>[];
   const triggers = rawTriggers.map(normalizeTrigger);
 
@@ -474,5 +642,6 @@ export function extractStateMachineFromYamlConfig(config: Record<string, unknown
     entry,
     runLoop: dispatcher.runLoop,
     loopVars,
+    noStepsStop: steps.some(isNoStepsStop),
   };
 }

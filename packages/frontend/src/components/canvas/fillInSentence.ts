@@ -10,7 +10,7 @@ import { thresholdPhrase, triggerEventPhrase } from '@/components/nodes/cardWord
 import { durationUnits, formatDuration } from '@/components/nodes/formatDuration';
 import type { DurationValue } from '@/components/panels/node-fields/DurationField';
 import { useNodeCardDisplay } from '@/hooks/useNodeCardDisplay';
-import { useWholeArea } from '@/hooks/useStepTargets';
+import { useWholePlace } from '@/hooks/useStepTargets';
 import { isRecord } from '@/lib/utils';
 
 /** The entity ids a step names: its target's, or a legacy `entity_id`. */
@@ -41,7 +41,7 @@ export function useFillInSentence(
 ): SentencePart[] | undefined {
   const { t, i18n } = useTranslation(['nodes']);
   const { entityNames } = useNodeCardDisplay();
-  const wholeArea = useWholeArea(data.target);
+  const wholeArea = useWholePlace(data.target);
   if (!kind || threshold === undefined) return undefined;
   const type = typeof data[kind] === 'string' ? String(data[kind]) : '';
   const ids = namedEntityIds(data);

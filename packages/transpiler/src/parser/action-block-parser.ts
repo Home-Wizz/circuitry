@@ -39,10 +39,12 @@ import {
   isStepKeptAsWritten,
   isStopAction,
   isTemplateEnabledBlock,
+  isAlwaysTrueOption,
   isUnexpandableCountRepeat,
   isVariablesAction,
   isWaitAction,
   isWaitScopedParallel,
+  onlyAlwaysTrueOption,
   resolveConditionType,
   toList,
   transformConditions,
@@ -57,6 +59,7 @@ import {
   importCondition,
   importWaitTriggers,
   stepEnabledAsWritten,
+  stepShapeRefusal,
 } from './parser-shared';
 
 /**
@@ -158,7 +161,9 @@ function routingTriggerIds(
   if (ids === null) return null;
   const splits = previousNodeIds.some((id) => {
     const lane = laneOf(id, triggerNodeMap, laneIds);
-    return lane !== undefined && lane.some((t) => ids.includes(t)) && !lane.every((t) => ids.includes(t));
+    return (
+      lane !== undefined && lane.some((t) => ids.includes(t)) && !lane.every((t) => ids.includes(t))
+    );
   });
   return splits ? null : ids;
 }
@@ -398,6 +403,12 @@ export function parseActions(
         `Step ${index + 1} of an action list is not a step Home Assistant can run: ${JSON.stringify(action)}`
       );
     }
+    const refused = stepShapeRefusal(action as Record<string, unknown>);
+    if (refused) {
+      throw new Error(
+        `Step ${index + 1} of an action list is refused by Home Assistant: ${refused}`
+      );
+    }
 
     // A block whose `enabled:` is a template: kept exactly as written
     // (bug #70; see isTemplateEnabledBlock). Inside a disabled block its
@@ -433,6 +444,8 @@ export function parseActions(
       isConditionListAction(action) ||
       isConditionShorthandAction(action);
 
+    const alwaysTrueOption = onlyAlwaysTrueOption(action);
+
     // Handle different action types
     if ((isChooseAction(action) || isParallelAction(action)) && typeof action.alias === 'string') {
       // A named `choose:` or `parallel:`: framed (#141). The block itself,
@@ -465,7 +478,7 @@ export function parseActions(
       // Shorthands (`condition: [...]`, `and:`/`or:`/`not:`) expanded the
       // way HA expands them (bug #59).
       const act = expandConditionShorthand(action);
-      const parsedData: ConditionNode['data'] = importCondition(act, `Condition step ${index}`);
+      const parsedData: ConditionNode['data'] = importCondition(act, `Condition step ${index + 1}`);
       // Apply inherited enabled state
       parsedData.enabled = getNodeEnabled(parsedData.enabled);
       const conditionNode: ConditionNode = {
@@ -585,6 +598,17 @@ export function parseActions(
       nodes.push(waitNode);
       createEdgesFromCurrent(nodeId);
       currentNodeIds = [nodeId];
+    } else if (isChooseAction(action) && alwaysTrueOption) {
+      // A choose whose only option is always true runs that option's steps
+      // every time, as a script of their own: read as a `sequence:` group,
+      // named by the option. Read as the choose's default, it hung off the
+      // "no" side of whatever came before it (bug #193).
+      parseGroup(
+        alwaysTrueOption.alias,
+        typeof action.enabled === 'boolean' ? action.enabled : undefined,
+        toList(alwaysTrueOption.sequence) as (HAAction | HACondition)[],
+        false
+      );
     } else if (isChooseAction(action)) {
       // Handle condition branching (choose blocks)
       const chooseResult = parseChooseBlock(action as Record<string, unknown>, {
@@ -845,11 +869,7 @@ export function parseActions(
         currentNodeIds = [nodeId];
       };
 
-      if (
-        blockEnabled === false ||
-        repeatSequence.length === 0 ||
-        mentionsLoopVariable(repeat)
-      ) {
+      if (blockEnabled === false || repeatSequence.length === 0 || mentionsLoopVariable(repeat)) {
         // Kept whole:
         // - a disabled loop (its own `enabled: false`, or inside a disabled
         //   block), which HA skips. Decomposed, the only way to carry that
@@ -1486,12 +1506,11 @@ export function parseChooseBlock(
 
   const choices = Array.isArray(chooseAction.choose) ? chooseAction.choose : [chooseAction.choose];
 
-  // Filter to only valid choices with non-empty conditions
-  const validChoices = choices.filter((choice) => {
-    if (typeof choice !== 'object' || choice === null) return false;
-    const conds = (choice as Record<string, unknown>).conditions;
-    return Array.isArray(conds) ? conds.length > 0 : Boolean(conds);
-  });
+  // Filter to only valid choices with non-empty conditions, by the same
+  // rule as the guards that keep other always-true shapes as written.
+  const validChoices = choices.filter(
+    (choice) => typeof choice === 'object' && choice !== null && !isAlwaysTrueOption(choice)
+  );
 
   // A choice with empty/no conditions is vacuously always-true in HA and has no
   // condition to hang a node off of. Rather than silently dropping its actions
@@ -1530,7 +1549,11 @@ export function parseChooseBlock(
       let conditionNode: ConditionNode;
 
       if (condition && Array.isArray(condition.conditions)) {
-        // Condition with nested conditions (or/and/not) - preserve structure
+        // Condition with nested conditions (or/and/not) - preserve structure.
+        // Checked whole first, as a top-level or loop condition is: one HA
+        // refuses inside the group is refused with the reason, not with the
+        // graph check's dump of the node (bug #244).
+        importCondition(condition, `choose case ${choiceIndex + 1}`);
         const conditionType = resolveConditionType(condition.condition);
 
         conditionNode = {
@@ -1917,7 +1940,9 @@ export function parseIfBlock(
     let conditionNode: ConditionNode;
 
     if (condition && Array.isArray(condition.conditions)) {
-      // Condition with nested conditions (or/and/not) - preserve structure
+      // Condition with nested conditions (or/and/not) - preserve structure,
+      // checked whole first, as in a choose case (bug #244).
+      importCondition(condition, 'if');
       const conditionType = resolveConditionType(condition.condition);
 
       conditionNode = {

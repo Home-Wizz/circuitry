@@ -22,6 +22,9 @@ variables:
       action_test_1_202:
         x: 560
         "y": 40
+    node_keys:
+      trigger_test_0_201: k4ed875af
+      action_test_1_202: kdeb34c61
     graph_id: a18b0fbb-d966-432c-aba7-4f7361da8d29
     graph_version: 1
     strategy: native
@@ -83,6 +86,11 @@ variables:
       action_test_3_200:
         x: 1080
         "y": 180
+    node_keys:
+      trigger_test_0_197: kf7ae0f15
+      condition_test_1_198: kf6326f65
+      action_test_2_199: kfa3c05a1
+      action_test_3_200: kbc48758a
     graph_id: a18b0fbb-d966-432c-aba7-4f7361da8d29
     graph_version: 1
     strategy: native
@@ -151,6 +159,15 @@ variables:
       action_test_7_196:
         x: 3680
         "y": 40
+    node_keys:
+      trigger_test_0_189: kb0626cba
+      condition_test_1_190: kba89c663
+      condition_test_2_191: k1909a818
+      condition_test_3_192: k1909a818
+      condition_test_4_193: k1909a818
+      action_test_5_194: ke79d5d53
+      condition_test_6_195: k1909a818
+      action_test_7_196: k73dd2fb8
     graph_id: a18b0fbb-d966-432c-aba7-4f7361da8d29
     graph_version: 1
     strategy: native
@@ -222,8 +239,15 @@ variables:
         x: 1080
         "y": 300
       action_test_5_188:
-        x: 1080
-        "y": 894
+        x: 560
+        "y": 467
+    node_keys:
+      trigger_test_0_183: k8d0259b3
+      condition_test_1_184: ka86e9869
+      condition_test_3_186: ka86e9869
+      action_test_2_185: k8e5cf99f
+      action_test_4_187: k8e5cf99f
+      action_test_5_188: k8e5cf99f
     graph_id: a18b0fbb-d966-432c-aba7-4f7361da8d29
     graph_version: 1
     strategy: native
@@ -281,6 +305,14 @@ variables:
       action_test_6_182:
         x: 3160
         "y": 40
+    node_keys:
+      trigger_test_0_176: k5cb0e0d3
+      action_test_1_177: kf1e002e1
+      delay_test_2_178: k7cd070b5
+      action_test_3_179: kf1e002e1
+      wait_test_4_180: k10dbdfe4
+      delay_test_5_181: k7cd070b5
+      action_test_6_182: k6dfd1a33
     graph_id: a18b0fbb-d966-432c-aba7-4f7361da8d29
     graph_version: 1
     strategy: native
@@ -335,6 +367,13 @@ variables:
       action_test_5_175:
         x: 1080
         "y": 188
+    node_keys:
+      trigger_test_0_170: k105cf9af
+      trigger_test_1_171: k4b8bcefd
+      trigger_test_2_172: kf39b072a
+      trigger_test_3_173: ka1cdb1dc
+      action_test_4_174: k162857c0
+      action_test_5_175: k2c9ad048
     graph_id: a18b0fbb-d966-432c-aba7-4f7361da8d29
     graph_version: 1
     strategy: native
@@ -364,42 +403,27 @@ triggers:
 conditions:
   - condition: template
     value_template: "{{ trigger.payload == 1 }}"
-  - condition: template
-    value_template: "{{ target_light is not none }}"
 actions:
-  - wait_template: "{{ is_state(target_light, 'on') }}"
-    timeout: "00:00:03"
   - if:
       - condition: template
-        value_template: "{{ is_state(target_light, 'on') }}"
+        value_template: "{{ target_light is not none }}"
     then:
-      - action: light.turn_on
-        target:
-          entity_id: "{{ target_light }}"
-        data:
-          brightness_pct: 100
-          transition: 0
-      - delay:
-          milliseconds: 500
-      - variables:
-          color_before: "{% set a = state_attr(target_light, 'hs_color') %} {% set b = state_attr(target_light, 'xy_color') %} {% set c = state_attr(target_light, 'color_temp_kelvin') %} {% set d = state_attr(target_light, 'color_temp') %} {{ [a, b, c, d] }}"
-      - action: adaptive_lighting.apply
-        data:
-          entity_id: switch.adaptive_lighting_adapt_color_dali
-          lights:
-            - "{{ target_light }}"
-          turn_on_lights: false
-          adapt_brightness: false
-          adapt_color: true
-          transition: 0
-      - delay:
-          milliseconds: 350
-      - variables:
-          color_after_1: "{% set a = state_attr(target_light, 'hs_color') %} {% set b = state_attr(target_light, 'xy_color') %} {% set c = state_attr(target_light, 'color_temp_kelvin') %} {% set d = state_attr(target_light, 'color_temp') %} {{ [a, b, c, d] }}"
+      - wait_template: "{{ is_state(target_light, 'on') }}"
+        timeout: "00:00:03"
       - if:
           - condition: template
-            value_template: "{{ is_state(target_light, 'on') and (color_after_1 == color_before) }}"
+            value_template: "{{ is_state(target_light, 'on') }}"
         then:
+          - action: light.turn_on
+            target:
+              entity_id: "{{ target_light }}"
+            data:
+              brightness_pct: 100
+              transition: 0
+          - delay:
+              milliseconds: 500
+          - variables:
+              color_before: "{% set a = state_attr(target_light, 'hs_color') %} {% set b = state_attr(target_light, 'xy_color') %} {% set c = state_attr(target_light, 'color_temp_kelvin') %} {% set d = state_attr(target_light, 'color_temp') %} {{ [a, b, c, d] }}"
           - action: adaptive_lighting.apply
             data:
               entity_id: switch.adaptive_lighting_adapt_color_dali
@@ -411,22 +435,40 @@ actions:
               transition: 0
           - delay:
               milliseconds: 350
-        else: []
-      - variables:
-          color_after_2: "{% set a = state_attr(target_light, 'hs_color') %} {% set b = state_attr(target_light, 'xy_color') %} {% set c = state_attr(target_light, 'color_temp_kelvin') %} {% set d = state_attr(target_light, 'color_temp') %} {{ [a, b, c, d] }}"
-      - if:
-          - condition: template
-            value_template: "{{ is_state(target_light, 'on') and (color_after_2 == color_before) }}"
-        then:
-          - action: adaptive_lighting.apply
-            data:
-              entity_id: switch.adaptive_lighting_adapt_color_dali
-              lights:
-                - "{{ target_light }}"
-              turn_on_lights: false
-              adapt_brightness: false
-              adapt_color: true
-              transition: 0
+          - variables:
+              color_after_1: "{% set a = state_attr(target_light, 'hs_color') %} {% set b = state_attr(target_light, 'xy_color') %} {% set c = state_attr(target_light, 'color_temp_kelvin') %} {% set d = state_attr(target_light, 'color_temp') %} {{ [a, b, c, d] }}"
+          - if:
+              - condition: template
+                value_template: "{{ is_state(target_light, 'on') and (color_after_1 == color_before) }}"
+            then:
+              - action: adaptive_lighting.apply
+                data:
+                  entity_id: switch.adaptive_lighting_adapt_color_dali
+                  lights:
+                    - "{{ target_light }}"
+                  turn_on_lights: false
+                  adapt_brightness: false
+                  adapt_color: true
+                  transition: 0
+              - delay:
+                  milliseconds: 350
+            else: []
+          - variables:
+              color_after_2: "{% set a = state_attr(target_light, 'hs_color') %} {% set b = state_attr(target_light, 'xy_color') %} {% set c = state_attr(target_light, 'color_temp_kelvin') %} {% set d = state_attr(target_light, 'color_temp') %} {{ [a, b, c, d] }}"
+          - if:
+              - condition: template
+                value_template: "{{ is_state(target_light, 'on') and (color_after_2 == color_before) }}"
+            then:
+              - action: adaptive_lighting.apply
+                data:
+                  entity_id: switch.adaptive_lighting_adapt_color_dali
+                  lights:
+                    - "{{ target_light }}"
+                  turn_on_lights: false
+                  adapt_brightness: false
+                  adapt_color: true
+                  transition: 0
+            else: []
         else: []
     else: []
 mode: single
@@ -497,6 +539,24 @@ variables:
       action_test_16_169:
         x: 7760
         "y": 40
+    node_keys:
+      trigger_test_0_153: kf7ae0f15
+      condition_test_1_154: k1909a818
+      condition_test_2_155: k1909a818
+      wait_test_3_156: k10dbdfe4
+      condition_test_4_157: k1909a818
+      action_test_5_158: kdedae542
+      delay_test_6_159: k7cd070b5
+      set_variables_test_7_160: k3c4be6cd
+      action_test_8_161: k3caa43e2
+      delay_test_9_162: k7cd070b5
+      set_variables_test_10_163: k3c4be6cd
+      condition_test_11_164: k1909a818
+      action_test_12_165: k3caa43e2
+      delay_test_13_166: k7cd070b5
+      set_variables_test_14_167: k3c4be6cd
+      condition_test_15_168: k1909a818
+      action_test_16_169: k3caa43e2
     graph_id: a18b0fbb-d966-432c-aba7-4f7361da8d29
     graph_version: 1
     strategy: native
@@ -526,6 +586,9 @@ variables:
       action_1767904379001_0:
         x: 195
         "y": 180
+    node_keys:
+      trigger_1767901134917_0: k8a448fd0
+      action_1767904379001_0: k75c189f0
     graph_id: 15198922-f25d-427a-bcfa-958e7a85d62b
     graph_version: 1
     strategy: native
@@ -642,6 +705,20 @@ variables:
       action_test_12_152:
         x: 2120
         "y": 419
+    node_keys:
+      trigger_test_0_140: k08222ca0
+      trigger_test_1_141: k08222ca0
+      trigger_test_2_142: k9c182181
+      condition_test_3_143: k9707bf1a
+      condition_test_4_144: k1909a818
+      condition_test_9_149: kf6326f65
+      condition_test_10_150: kedb086bc
+      condition_test_11_151: k18df621d
+      condition_test_5_145: kedb086bc
+      action_test_6_146: k32774330
+      action_test_7_147: k85adac4c
+      action_test_8_148: k32774330
+      action_test_12_152: k535fb8a8
     graph_id: a18b0fbb-d966-432c-aba7-4f7361da8d29
     graph_version: 1
     strategy: native
@@ -721,6 +798,14 @@ variables:
       action_test_6_139:
         x: 1600
         "y": 200
+    node_keys:
+      trigger_test_0_133: k582e51d6
+      trigger_test_1_134: k582e51d6
+      condition_test_2_135: kbc6dc720
+      condition_test_3_136: k9707bf1a
+      condition_test_5_138: k9707bf1a
+      action_test_4_137: k1aedabf4
+      action_test_6_139: ke72ad145
     graph_id: a18b0fbb-d966-432c-aba7-4f7361da8d29
     graph_version: 1
     strategy: native
@@ -790,7 +875,7 @@ actions:
                       - variables:
                           current_node: action-sm-1
                 default:
-                  - service: system_log.write
+                  - action: system_log.write
                     data:
                       message: "Circuitry: Unknown state \\"{{ current_node }}\\", ending flow"
                       level: warning
@@ -810,6 +895,10 @@ variables:
       action-sm-2:
         x: 150
         "y": 405
+    node_keys:
+      trigger-sm: k62a14010
+      action-sm-1: k2b38249a
+      action-sm-2: kb15c4950
     graph_id: 624cf5ff-0ab9-4881-b6c4-c2359635230f
     graph_version: 1
     strategy: state-machine
@@ -963,7 +1052,7 @@ variables:
         "y": 777
       condition_test_15_127:
         x: 1140
-        "y": 650
+        "y": 740
       condition_test_5_117:
         x: 1140
         "y": 416
@@ -984,13 +1073,13 @@ variables:
         "y": 583
       condition_test_12_124:
         x: 2180
-        "y": 566
+        "y": 635
       action_test_13_125:
         x: 2700
-        "y": 559
+        "y": 640
       condition_test_16_128:
         x: 1660
-        "y": 633
+        "y": 723
       delay_test_17_129:
         x: 2180
         "y": 525
@@ -999,10 +1088,32 @@ variables:
         "y": 520
       delay_test_19_131:
         x: 2180
-        "y": 665
+        "y": 775
       action_test_20_132:
         x: 2700
-        "y": 660
+        "y": 760
+    node_keys:
+      trigger_test_0_112: ka1cdb1dc
+      trigger_test_1_113: k8f180cb3
+      trigger_test_2_114: k8f180cb3
+      trigger_test_3_115: k0ddad80f
+      condition_test_4_116: k9707bf1a
+      condition_test_9_121: k9707bf1a
+      condition_test_14_126: k9707bf1a
+      condition_test_15_127: k3856de59
+      condition_test_5_117: k969a09e4
+      wait_test_6_118: k10dbdfe4
+      action_test_7_119: ke63e3268
+      action_test_8_120: ke63e3268
+      condition_test_10_122: k3856de59
+      condition_test_11_123: k833e628e
+      condition_test_12_124: kaebc0d9a
+      action_test_13_125: kd24bbcf1
+      condition_test_16_128: k9707bf1a
+      delay_test_17_129: k7cd070b5
+      action_test_18_130: k2d7727f3
+      delay_test_19_131: k7cd070b5
+      action_test_20_132: k2d7727f3
     graph_id: a18b0fbb-d966-432c-aba7-4f7361da8d29
     graph_version: 1
     strategy: native
@@ -1114,6 +1225,19 @@ variables:
       action_test_11_111:
         x: 3160
         "y": 360
+    node_keys:
+      trigger_test_0_100: k69049b72
+      trigger_test_1_101: k69049b72
+      condition_test_2_102: k9707bf1a
+      condition_test_3_103: ke7d18747
+      condition_test_6_106: k9707bf1a
+      condition_test_7_107: ke7d18747
+      action_test_4_104: k4e8511e3
+      action_test_5_105: k9fd429ee
+      action_test_8_108: k8c9aa20f
+      set_variables_test_9_109: k3c4be6cd
+      action_test_10_110: k4e275f3e
+      action_test_11_111: k6df157fb
     graph_id: a18b0fbb-d966-432c-aba7-4f7361da8d29
     graph_version: 1
     strategy: native
@@ -1244,6 +1368,24 @@ variables:
       sequence_end_test_16_99:
         x: 6720
         "y": 372
+    node_keys:
+      trigger_test_0_83: kf877ed5f
+      condition_test_2_85: ka86e9869
+      action_test_3_86: kd0505553
+      action_test_4_87: kb15c4950
+      action_test_5_88: kb15c4950
+      action_test_6_89: kb15c4950
+      action_test_7_90: kb15c4950
+      action_test_8_91: kf7a1cd96
+      delay_test_10_93: k7cd070b5
+      action_test_11_94: k0a1f4012
+      action_test_12_95: kf54a1a36
+      action_test_14_97: kd0505553
+      action_test_15_98: kb15c4950
+      sequence_start_test_1_84: k9548f68f
+      sequence_start_test_9_92: k9548f68f
+      sequence_end_test_13_96: k0340d28e
+      sequence_end_test_16_99: k0340d28e
     graph_id: a18b0fbb-d966-432c-aba7-4f7361da8d29
     graph_version: 1
     strategy: native
@@ -1302,6 +1444,13 @@ variables:
       action_test_5_82:
         x: 2640
         "y": 40
+    node_keys:
+      trigger_test_0_77: ke5f2bbe7
+      condition_test_1_78: k69ac302a
+      action_test_2_79: ke7f36a00
+      action_test_3_80: k83a1bc79
+      delay_test_4_81: k7cd070b5
+      action_test_5_82: ke7f36a00
     graph_id: a18b0fbb-d966-432c-aba7-4f7361da8d29
     graph_version: 1
     strategy: native
@@ -1397,6 +1546,14 @@ variables:
       action_test_6_76:
         x: 1080
         "y": 313
+    node_keys:
+      trigger_test_0_70: k246467d1
+      trigger_test_1_71: k246467d1
+      trigger_test_2_72: k19972d3c
+      trigger_test_3_73: k19972d3c
+      condition_test_4_74: kf6326f65
+      action_test_5_75: k9a1c4e9d
+      action_test_6_76: ke7ce52c1
     graph_id: a18b0fbb-d966-432c-aba7-4f7361da8d29
     graph_version: 1
     strategy: native
@@ -1433,6 +1590,9 @@ variables:
       action_test_1_69:
         x: 560
         "y": 40
+    node_keys:
+      trigger_test_0_68: kb8e5dfef
+      action_test_1_69: k6951f30b
     graph_id: a18b0fbb-d966-432c-aba7-4f7361da8d29
     graph_version: 1
     strategy: native
@@ -1469,6 +1629,10 @@ variables:
       action_test_2_67:
         x: 1080
         "y": 40
+    node_keys:
+      trigger_test_0_65: ka1cdb1dc
+      condition_test_1_66: ka86e9869
+      action_test_2_67: kd0fb1cc8
     graph_id: a18b0fbb-d966-432c-aba7-4f7361da8d29
     graph_version: 1
     strategy: native
@@ -1518,6 +1682,11 @@ variables:
       action_test_3_64:
         x: 1600
         "y": 40
+    node_keys:
+      trigger_test_0_61: kebe02085
+      condition_test_1_62: k3856de59
+      action_test_2_63: k95bb1a0d
+      action_test_3_64: kec5f2338
     graph_id: a18b0fbb-d966-432c-aba7-4f7361da8d29
     graph_version: 1
     strategy: native
@@ -1550,6 +1719,9 @@ variables:
       delay_test_1_60:
         x: 560
         "y": 45
+    node_keys:
+      trigger_test_0_59: k06fa1982
+      delay_test_1_60: k7cd070b5
     graph_id: a18b0fbb-d966-432c-aba7-4f7361da8d29
     graph_version: 1
     strategy: native
@@ -1581,6 +1753,9 @@ variables:
       action_test_1_58:
         x: 560
         "y": 40
+    node_keys:
+      trigger_test_0_57: k43579131
+      action_test_1_58: k3ec33d0c
     graph_id: a18b0fbb-d966-432c-aba7-4f7361da8d29
     graph_version: 1
     strategy: native
@@ -1620,6 +1795,10 @@ variables:
       action_test_2_56:
         x: 1080
         "y": 40
+    node_keys:
+      trigger_test_0_54: ka5cb77ea
+      action_test_1_55: kf46c6bd6
+      action_test_2_56: k25b842bf
     graph_id: a18b0fbb-d966-432c-aba7-4f7361da8d29
     graph_version: 1
     strategy: native
@@ -1708,6 +1887,12 @@ variables:
       action_test_4_53:
         x: 1920
         "y": 40
+    node_keys:
+      trigger_test_0_49: kf39b072a
+      set_variables_test_1_50: k3c4be6cd
+      action_test_2_51: k25b842bf
+      condition_test_3_52: k1909a818
+      action_test_4_53: k6c4e203d
     graph_id: a18b0fbb-d966-432c-aba7-4f7361da8d29
     graph_version: 1
     strategy: native
@@ -1750,6 +1935,11 @@ variables:
       condition_test_1_46:
         x: 560
         "y": 47
+    node_keys:
+      trigger_test_0_45: kafbc1fba
+      action_test_2_47: kdeb34c61
+      delay_test_3_48: k7cd070b5
+      condition_test_1_46: k379cd681
     graph_id: a18b0fbb-d966-432c-aba7-4f7361da8d29
     graph_version: 1
     strategy: native
@@ -1792,6 +1982,11 @@ variables:
       condition_test_3_44:
         x: 1600
         "y": 40
+    node_keys:
+      trigger_test_0_41: k63763580
+      action_test_1_42: k2c9ad048
+      delay_test_2_43: k7cd070b5
+      condition_test_3_44: k4ec426bb
     graph_id: a18b0fbb-d966-432c-aba7-4f7361da8d29
     graph_version: 1
     strategy: native
@@ -1837,6 +2032,13 @@ variables:
       condition_test_5_40:
         x: 2240
         "y": 40
+    node_keys:
+      trigger_test_0_35: kd7418ca7
+      action_test_2_37: k9fcaf7c6
+      delay_test_3_38: k7cd070b5
+      set_variables_test_1_36: k3c4be6cd
+      set_variables_test_4_39: k3c4be6cd
+      condition_test_5_40: k1909a818
     graph_id: a18b0fbb-d966-432c-aba7-4f7361da8d29
     graph_version: 1
     strategy: native
@@ -1893,6 +2095,13 @@ variables:
       action_test_5_34:
         x: 1080
         "y": 207
+    node_keys:
+      trigger_test_0_29: ka1cdb1dc
+      condition_test_1_30: k00378bb2
+      action_test_3_32: k2c9ad048
+      delay_test_4_33: k7cd070b5
+      condition_test_2_31: k1458114e
+      action_test_5_34: k2c9ad048
     graph_id: a18b0fbb-d966-432c-aba7-4f7361da8d29
     graph_version: 1
     strategy: native
@@ -1906,12 +2115,14 @@ triggers:
   - trigger: state
     entity_id: binary_sensor.motion_sensor
     to: "on"
-conditions:
-  - condition: state
-    entity_id: input_boolean.enabled
-    state: "on"
 actions:
-  - stop: Not enabled
+  - if:
+      - condition: state
+        entity_id: input_boolean.enabled
+        state: "on"
+    then:
+      - stop: Not enabled
+    else: []
 mode: single
 variables:
   _circuitry_metadata:
@@ -1926,6 +2137,10 @@ variables:
       action_test_2_28:
         x: 1080
         "y": 40
+    node_keys:
+      trigger_test_0_26: k4ed875af
+      condition_test_1_27: kbd1dc357
+      action_test_2_28: k25b842bf
     graph_id: a18b0fbb-d966-432c-aba7-4f7361da8d29
     graph_version: 1
     strategy: native
@@ -1962,6 +2177,10 @@ variables:
       action_test_2_25:
         x: 560
         "y": 53
+    node_keys:
+      trigger_test_0_23: k62cf7015
+      trigger_test_1_24: ka1cdb1dc
+      action_test_2_25: k78d3f38a
     graph_id: a18b0fbb-d966-432c-aba7-4f7361da8d29
     graph_version: 1
     strategy: native
@@ -2010,6 +2229,11 @@ variables:
       action_test_3_22:
         x: 1080
         "y": 180
+    node_keys:
+      trigger_test_0_19: kafbc1fba
+      condition_test_1_20: kf6326f65
+      action_test_2_21: ka2ce039f
+      action_test_3_22: k0aa4ef31
     graph_id: a18b0fbb-d966-432c-aba7-4f7361da8d29
     graph_version: 1
     strategy: native
@@ -2050,6 +2274,10 @@ variables:
       action_test_2_18:
         x: 1080
         "y": 40
+    node_keys:
+      trigger_test_0_16: kafbc1fba
+      condition_test_1_17: kf6326f65
+      action_test_2_18: kdeb34c61
     graph_id: a18b0fbb-d966-432c-aba7-4f7361da8d29
     graph_version: 1
     strategy: native
@@ -2086,6 +2314,10 @@ variables:
       action_test_2_15:
         x: 880
         "y": 40
+    node_keys:
+      trigger_test_0_13: kafbc1fba
+      set_variables_test_1_14: k3c4be6cd
+      action_test_2_15: kdedae542
     graph_id: a18b0fbb-d966-432c-aba7-4f7361da8d29
     graph_version: 1
     strategy: native
@@ -2122,6 +2354,9 @@ variables:
       action_test_1_12:
         x: 560
         "y": 40
+    node_keys:
+      trigger_test_0_11: kafbc1fba
+      action_test_1_12: kdedae542
     graph_id: a18b0fbb-d966-432c-aba7-4f7361da8d29
     graph_version: 1
     strategy: native
@@ -2168,6 +2403,12 @@ variables:
       action_test_4_10:
         x: 560
         "y": 188
+    node_keys:
+      trigger_test_0_6: ka2d1b18f
+      trigger_test_1_7: ka2d1b18f
+      trigger_test_2_8: ka2d1b18f
+      trigger_test_3_9: ka2d1b18f
+      action_test_4_10: k7497c529
     graph_id: a18b0fbb-d966-432c-aba7-4f7361da8d29
     graph_version: 1
     strategy: native
@@ -2196,6 +2437,9 @@ variables:
       action_test_1_5:
         x: 560
         "y": 40
+    node_keys:
+      trigger_test_0_4: kf29219d6
+      action_test_1_5: k0a1f4012
     graph_id: a18b0fbb-d966-432c-aba7-4f7361da8d29
     graph_version: 1
     strategy: native
@@ -2226,6 +2470,9 @@ variables:
       action_test_1_3:
         x: 560
         "y": 40
+    node_keys:
+      trigger_test_0_2: k1a944a58
+      action_test_1_3: keca9a483
     graph_id: a18b0fbb-d966-432c-aba7-4f7361da8d29
     graph_version: 1
     strategy: native
@@ -2262,6 +2509,9 @@ variables:
       action_test_1_1:
         x: 560
         "y": 40
+    node_keys:
+      trigger_test_0_0: k4f2a1444
+      action_test_1_1: k3f6ca6d5
     graph_id: a18b0fbb-d966-432c-aba7-4f7361da8d29
     graph_version: 1
     strategy: native

@@ -1,7 +1,18 @@
 import { useCallback } from 'react';
 import { useStore } from 'zustand';
 import { useShallow } from 'zustand/react/shallow';
-import { useFlowStore } from '@/store/flow-store';
+import { flushPendingHistoryCommit, useFlowStore } from '@/store/flow-store';
+
+/**
+ * After an undo or redo: errors re-checked, and the automation marked
+ * touched, so the unsaved mark compares it with what was saved (it skips a
+ * tab not marked touched; undo after a save looked saved, bug #201). The
+ * flag is outside undo history, so this makes no step of its own.
+ */
+function afterJump(): void {
+  useFlowStore.setState({ hasUnsavedChanges: true });
+  useFlowStore.getState().validateAllNodes();
+}
 
 /**
  * Undo/redo for the flow canvas, backed by the `temporal` (zundo) store
@@ -27,13 +38,15 @@ export function useUndoRedo() {
   );
 
   const undo = useCallback(() => {
+    flushPendingHistoryCommit();
     temporalUndo();
-    useFlowStore.getState().validateAllNodes();
+    afterJump();
   }, [temporalUndo]);
 
   const redo = useCallback(() => {
+    flushPendingHistoryCommit();
     temporalRedo();
-    useFlowStore.getState().validateAllNodes();
+    afterJump();
   }, [temporalRedo]);
 
   return { undo, redo, canUndo, canRedo };

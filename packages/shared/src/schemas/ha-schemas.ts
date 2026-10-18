@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { MaxExceededSchema } from './base';
-import { HADurationSchema } from './duration';
+import { type HADuration, HADurationSchema } from './duration';
 import { OptionalTargetSchema } from './ha-entities';
 
 /**
@@ -38,8 +38,8 @@ export const HAConditionSchema: z.ZodType<
     after?: string;
     before?: string;
     weekday?: Weekday | Weekday[];
-    after_offset?: string;
-    before_offset?: string;
+    after_offset?: HADuration;
+    before_offset?: HADuration;
     zone?: string;
     conditions?: z.infer<typeof HAConditionSchema>[];
     above?: string | number;
@@ -68,8 +68,9 @@ export const HAConditionSchema: z.ZodType<
   after: z.string().optional(),
   before: z.string().optional(),
   weekday: z.union([z.enum(VALID_WEEKDAYS), z.array(z.enum(VALID_WEEKDAYS))]).optional(),
-  after_offset: z.string().optional(),
-  before_offset: z.string().optional(),
+  // cv.time_period: text, a number of seconds or a mapping (#219).
+  after_offset: HADurationSchema.optional(),
+  before_offset: HADurationSchema.optional(),
   zone: z.string().optional(),
   conditions: z.array(z.lazy(() => HAConditionSchema)).optional(),
   above: z.union([z.string(), z.number()]).optional(),
@@ -193,18 +194,7 @@ export const HATriggerSchema = z
     // `null` too (HA's `vol.Any(str, [str], None)`; see TRIGGER_KEYS_KEEPING_NULL).
     not_from: z.union([z.string(), z.array(z.string()), z.null()]).optional(),
     not_to: z.union([z.string(), z.array(z.string()), z.null()]).optional(),
-    for: z
-      .union([
-        z.string(),
-        z.number(),
-        z.object({
-          hours: z.union([z.number(), z.string()]).optional(),
-          minutes: z.union([z.number(), z.string()]).optional(),
-          seconds: z.union([z.number(), z.string()]).optional(),
-          milliseconds: z.union([z.number(), z.string()]).optional(),
-        }),
-      ])
-      .optional(),
+    for: HADurationSchema.optional(),
     // `time` trigger: a fixed time string, an entity reference, a limited
     // template, an { entity_id, offset } mapping, or a list mixing those
     // (see TimeAtEntrySchema above) — plus a separate `weekday` filter.
@@ -286,7 +276,7 @@ export interface HATriggerInput {
   to?: string | string[] | null;
   not_from?: string | string[] | null;
   not_to?: string | string[] | null;
-  for?: string | { hours?: number; minutes?: number; seconds?: number };
+  for?: HADuration;
   at?:
     | string
     | { entity_id: string; offset?: string | number }
@@ -336,9 +326,9 @@ export interface HAAction {
   response_variable?: string;
   continue_on_error?: boolean;
   enabled?: boolean | string;
-  delay?: string | number | { hours?: number; minutes?: number; seconds?: number };
+  delay?: HADuration;
   wait_template?: string | Record<string, unknown>;
-  timeout?: string | number | Record<string, number>;
+  timeout?: HADuration;
   continue_on_timeout?: boolean;
   wait_for_trigger?: HATrigger | HATrigger[];
   choose?: HAChooseOption | HAChooseOption[];
@@ -453,6 +443,14 @@ export const CircuitryMetadataSchema = z.object({
   graph_version: z.number(),
   strategy: z.enum(['native', 'state-machine']),
   /**
+   * Each card's kind (type, what it does, what it acts on), keyed like
+   * `nodes`: a reopened automation edited outside Circuitry gives each card
+   * the position of the saved card it matches (bug #222). Optional: older
+   * saves don't have it. Only a hint, so one that doesn't read (edited by
+   * hand) is dropped rather than discarding the saved positions with it.
+   */
+  node_keys: z.record(z.string(), z.string()).optional().catch(undefined),
+  /**
    * State-machine output only (Phase 5, 2026-09-26): for each state that
    * renders a fan-out inline (key: state id, plus `:true`/`:false` for a
    * condition's branch), the graph targets it fans out to and a
@@ -547,9 +545,9 @@ export const HAActionSchema: z.ZodType<HAAction> = z.lazy(() =>
     response_variable: z.string().optional(),
     continue_on_error: z.boolean().optional(),
     enabled: EnabledSchema.optional(),
-    delay: z.union([z.string(), z.number(), z.record(z.string(), z.number())]).optional(),
+    delay: HADurationSchema.optional(),
     wait_template: z.union([z.string(), z.record(z.string(), z.unknown())]).optional(),
-    timeout: z.union([z.string(), z.number(), z.record(z.string(), z.number())]).optional(),
+    timeout: HADurationSchema.optional(),
     continue_on_timeout: z.boolean().optional(),
     wait_for_trigger: z.union([HATriggerSchema, z.array(HATriggerSchema)]).optional(),
     // Bug #85 (2026-09-27): the steps and conditions inside a block are

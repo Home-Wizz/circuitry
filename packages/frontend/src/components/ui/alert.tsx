@@ -52,9 +52,13 @@ const AlertDescription = React.forwardRef<
   // "required key not provided @ data['target']") was overflowing the
   // dialog's rounded card horizontally instead of wrapping, spilling out
   // over the canvas behind it (reported directly by a user screenshot).
+  // [overflow-wrap:anywhere] as well (bug #281): break-words alone still
+  // sizes a grid's column to the longest unbroken run, so a long path like
+  // `actions[1].repeat.sequence[1]...` widened the whole save dialog past
+  // the screen and cut the message, the fields and the buttons off.
   <div
     ref={ref}
-    className={cn('break-words text-sm [&_p]:leading-relaxed', className)}
+    className={cn('break-words [overflow-wrap:anywhere] text-sm [&_p]:leading-relaxed', className)}
     {...props}
   />
 ));

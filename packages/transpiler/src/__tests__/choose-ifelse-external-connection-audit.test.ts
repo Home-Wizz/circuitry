@@ -138,8 +138,10 @@ mode: restart
     // unconditionally present regardless of this fixture) is the ONLY
     // legitimate occurrence, so assert on the count rather than banning
     // the string outright.
-    const stubOccurrences = (yamlOut.match(/system_log\.write/g) ?? []).length;
-    expect(stubOccurrences).toBe(1);
+    // Every drawn line counts (#262): the extra line makes the step it goes
+    // to a meeting point, run once after the other path, with no
+    // placeholder step.
+    expect(yamlOut).not.toContain('Template placeholder');
     // Both real climate.set_temperature branches (22 and 20) must still be
     // present somewhere in the output -- confirms Case 2's condition
     // subtree was inlined, not dropped.
@@ -230,15 +232,13 @@ mode: single
     const after = transpiler.analyzeTopology(graph);
     expect(after.isTree).toBe(false); // now a real converging shape
 
+    // #262 (option 2, 2026-10-11): the second trigger's line goes straight
+    // to the else step and through the if, whose path doesn't always get
+    // there and is also the first trigger's: whether the else step should
+    // run either way can't be told from the drawing, so it is refused with
+    // the reason rather than saved one way or the other.
     const result = transpiler.transpile(graph);
-
-    expect(result.success).toBe(true);
-    expect(result.errors ?? []).toEqual([]);
-    const yamlOut = result.yaml ?? '';
-
-    const stubOccurrences = (yamlOut.match(/system_log\.write/g) ?? []).length;
-    expect(stubOccurrences).toBe(1);
-    expect(yamlOut).toContain('light.turn_on');
-    expect(yamlOut).toContain('light.turn_off');
+    expect(result.success).toBe(false);
+    expect(result.errors?.[0]).toMatch(/line straight to/);
   });
 });

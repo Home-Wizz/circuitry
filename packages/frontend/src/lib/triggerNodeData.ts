@@ -4,6 +4,7 @@ import type { DeviceTrigger } from '@/hooks/useDeviceAutomation';
 import { defaultThreshold, triggerIsTargetless } from '@/lib/nativeThreshold';
 import { picksZone } from '@/lib/nativeZone';
 import type { TriggerRecipe } from '@/lib/triggerRecipes';
+import { type PlaceTarget, placeTarget } from '@/lib/stepTargets';
 
 /**
  * The four outcomes the trigger picker (TriggerTargetPicker.tsx /
@@ -14,14 +15,15 @@ import type { TriggerRecipe } from '@/lib/triggerRecipes';
  */
 export type TriggerSelection =
   | { kind: 'platform'; platform: TriggerPlatform }
-  | { kind: 'entityTarget'; entityIds: string[] }
+  | { kind: 'entityTarget'; entityIds: string[]; platform?: 'state' | 'numeric_state' }
   | { kind: 'deviceTrigger'; trigger: DeviceTrigger }
   | {
       kind: 'recipe';
       entityIds: string[];
       recipe: TriggerRecipe;
-      /** A whole area as its target ("Anything in <room>"), instead of entities. */
-      areaId?: string;
+      /** A whole place as its target ("Anything in <room>", on a floor,
+       * labelled), instead of entities. */
+      place?: PlaceTarget;
     };
 
 /**
@@ -60,10 +62,14 @@ export function buildTriggerNodeData(selection: TriggerSelection): Record<string
       return { ...getTriggerDefaults(selection.platform) };
 
     case 'entityTarget':
-      // "By target" picker shortcut: jump straight to a `state` trigger
-      // pre-filled with the chosen entity, rather than making the user pick
-      // "State Change" afterward on the "By type" tab.
-      return { ...getTriggerDefaults('state'), entity_id: selection.entityIds };
+      // "By target" picker shortcut: jump straight to a `state` trigger (or,
+      // for a numeric entity, a `numeric_state` one) pre-filled with the
+      // chosen entity, rather than making the user pick "State Change"
+      // afterward on the "By type" tab.
+      return {
+        ...getTriggerDefaults(selection.platform ?? 'state'),
+        entity_id: selection.entityIds,
+      };
 
     case 'deviceTrigger': {
       const { trigger } = selection;
@@ -97,8 +103,8 @@ export function buildTriggerNodeData(selection: TriggerSelection): Record<string
         // trackers), which HA requires: an empty one, filled in the panel.
         const target = recipeIsTargetless(recipe)
           ? undefined
-          : selection.areaId && triggerRecipeTakesArea(recipe)
-            ? { area_id: selection.areaId }
+          : selection.place && triggerRecipeTakesArea(recipe)
+            ? placeTarget(selection.place)
             : { entity_id: zone ? [] : entityIds };
         // A threshold type starts with the threshold the panel shows (#124).
         const threshold = recipe.fields.thresholdless

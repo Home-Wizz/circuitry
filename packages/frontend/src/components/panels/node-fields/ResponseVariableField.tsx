@@ -1,3 +1,4 @@
+import { isStateMachineVariableName } from '@circuitry/transpiler';
 import type React from 'react';
 import { useTranslation } from 'react-i18next';
 import { FormField } from '@/components/forms/FormField';
@@ -5,10 +6,6 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import { HaSwitch } from '@/ha';
-
-/** Variables the state-machine strategy keeps its place in (#129 added
- * `pass_nodes`): a response stored under one of them would overwrite it. */
-const STATE_MACHINE_VARIABLES = ['current_node', 'flow_context', 'pass_nodes'];
 
 interface ResponseVariableFieldProps {
   /**
@@ -37,7 +34,9 @@ export function ResponseVariableField({
 }: ResponseVariableFieldProps) {
   const { t } = useTranslation(['common', 'nodes']);
   const name = responseVariable?.trim() ?? '';
-  const reserved = STATE_MACHINE_VARIABLES.includes(name) ? name : null;
+  // A response stored under one of the state machine's own variables would
+  // overwrite it (the transpiler refuses such a save; the same names).
+  const reserved = isStateMachineVariableName(name) ? name : null;
   const inputAndAlert = (
     <>
       <Input

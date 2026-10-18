@@ -13,8 +13,13 @@ type GraphInstance = InstanceType<typeof Graph>;
  *
  * This is used to identify repeat/loop patterns structurally without
  * requiring any edge metadata.
+ *
+ * Which edge of a loop is its back edge depends on where the walk first
+ * reaches the loop. `firstEntries` are walked from first (bug #282): the
+ * steps one trigger runs read a loop from where THAT trigger's run joins
+ * it, not from where another trigger's does.
  */
-export function findBackEdges(flow: FlowGraph): Set<string> {
+export function findBackEdges(flow: FlowGraph, firstEntries: string[] = []): Set<string> {
   // Ignore hint edges — they are visual-only and must not affect loop detection
   flow = {
     ...flow,
@@ -53,7 +58,7 @@ export function findBackEdges(flow: FlowGraph): Set<string> {
     inStack.delete(nodeId);
   }
 
-  for (const entry of entryNodes) {
+  for (const entry of [...firstEntries, ...entryNodes]) {
     dfs(entry);
   }
 
@@ -276,9 +281,7 @@ export function analyzeTopology(flow: FlowGraph): TopologyAnalysis {
   // this shape is ever safe to relax, and it has a materially different
   // structure (loop body precedes the condition) from the while-style
   // target case below.
-  const hasDangerousSourceRoleBranching = [...sourceRoleCounts.values()].some(
-    (count) => count > 1
-  );
+  const hasDangerousSourceRoleBranching = [...sourceRoleCounts.values()].some((count) => count > 1);
   const hasDangerousTargetRoleBranching = [...targetRoleCounts.entries()].some(
     ([condId, count]) => {
       if (count <= 1) return false;
@@ -421,7 +424,15 @@ export function analyzeTopology(flow: FlowGraph): TopologyAnalysis {
  */
 function withoutGroupMarkers(flow: FlowGraph): FlowGraph {
   let edges = flow.edges;
-  const markers = flow.nodes.filter((n) => n.type === 'sequence_start' || n.type === 'sequence_end');
+  // Bug #266: a group's end with nothing after it stays, as the step its
+  // ways in meet at. Taken out, a branch that went to it looked like a path
+  // that just ends, so a step where the other branches met before the end
+  // read as their common tail (native wrote it run every time).
+  const markers = flow.nodes.filter(
+    (n) =>
+      n.type === 'sequence_start' ||
+      (n.type === 'sequence_end' && edges.some((e) => e.source === n.id))
+  );
   for (const marker of markers) {
     const ins = edges.filter((e) => e.target === marker.id && e.source !== marker.id);
     const outs = edges.filter((e) => e.source === marker.id && e.target !== marker.id);

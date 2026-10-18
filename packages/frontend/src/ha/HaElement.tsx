@@ -1,4 +1,4 @@
-import { createElement, type ReactNode, useEffect, useRef, useState } from 'react';
+import { createElement, type ReactNode, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useHass } from '@/contexts/HassContext';
 import { notifyHaComponentIssue } from './haAvailabilityNotice';
 
@@ -53,7 +53,7 @@ export function HaElement({ tag, properties, events, className, fallback }: HaEl
   // unrelated re-render.
   const lastValues = useRef<Record<string, unknown>>({});
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (hasError) return;
     const el = ref.current;
     if (!el) return;
@@ -63,7 +63,14 @@ export function HaElement({ tag, properties, events, className, fallback }: HaEl
       const target = el as unknown as Record<string, unknown>;
       const allProps = { ...properties, hass };
       for (const [key, value] of Object.entries(allProps)) {
-        if (isEqualValue(lastValues.current[key], value)) continue;
+        // `hass` by reference: HA sends a new one on every state change, as
+        // its elements expect; comparing its content encoded the whole of it
+        // for every picker on screen (bug #209).
+        const unchanged =
+          key === 'hass'
+            ? lastValues.current[key] === value
+            : isEqualValue(lastValues.current[key], value);
+        if (unchanged) continue;
         target[key] = value;
         lastValues.current[key] = value;
       }

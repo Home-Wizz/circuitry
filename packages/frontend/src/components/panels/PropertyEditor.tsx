@@ -1,5 +1,6 @@
 import type { FlowNode } from '@circuitry/shared';
 import { Plus, Trash2 } from 'lucide-react';
+import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { FormField } from '@/components/forms/FormField';
 import { Button } from '@/components/ui/button';
@@ -46,7 +47,9 @@ export function PropertyEditor({
   // Get unhandled properties
   const unhandledProperties = Object.entries(data).filter(
     ([key, value]) =>
-      !handledProperties.has(key) && value !== undefined && value !== null && value !== ''
+      // A text cleared to '' keeps its row (it vanished while the key
+      // stayed in the step; bug #215).
+      !handledProperties.has(key) && value !== undefined && value !== null
   );
 
   // Don't render if no properties and not adding
@@ -114,9 +117,7 @@ export function PropertyEditor({
                   <SelectContent>
                     <SelectItem value="string">{t('nodes:triggers.dataTypes.string')}</SelectItem>
                     <SelectItem value="number">{t('nodes:triggers.dataTypes.number')}</SelectItem>
-                    <SelectItem value="boolean">
-                      {t('nodes:triggers.dataTypes.boolean')}
-                    </SelectItem>
+                    <SelectItem value="boolean">{t('nodes:triggers.dataTypes.boolean')}</SelectItem>
                     <SelectItem value="array">{t('nodes:triggers.dataTypes.json')}</SelectItem>
                   </SelectContent>
                 </Select>
@@ -226,57 +227,109 @@ function PropertyDisplay({ name, value, onChange, onDelete }: PropertyDisplayPro
           />
           <Label className="text-sm">{value ? t('boolean.true') : t('boolean.false')}</Label>
         </div>
-      ) : Array.isArray(value) ? (
-        <Textarea
-          value={JSON.stringify(value, null, 2)}
-          onChange={(e) => {
-            try {
-              const parsed = JSON.parse(e.target.value);
-              onChange(parsed);
-            } catch {
-              // Invalid JSON, don't update
-            }
-          }}
-          className="font-mono"
-          rows={Math.min(value.length + 1, 4)}
-          placeholder={t('nodes:placeholders.jsonArray')}
+      ) : Array.isArray(value) || typeof value === 'object' ? (
+        <DraftField
+          value={value}
+          format={formatJson}
+          parse={parseJson}
+          onChange={onChange}
+          multiline
+          rows={Array.isArray(value) ? Math.min(value.length + 1, 4) : 4}
+          placeholder={t(
+            Array.isArray(value) ? 'nodes:placeholders.jsonArray' : 'nodes:placeholders.jsonObject'
+          )}
         />
-      ) : typeof value === 'object' ? (
-        <Textarea
-          value={JSON.stringify(value, null, 2)}
-          onChange={(e) => {
-            try {
-              const parsed = JSON.parse(e.target.value);
-              onChange(parsed);
-            } catch {
-              // Invalid JSON, don't update
-            }
-          }}
-          className="font-mono"
-          rows={4}
-          placeholder={t('nodes:placeholders.jsonObject')}
+      ) : typeof value === 'number' ? (
+        <DraftField
+          value={value}
+          format={String}
+          parse={parseNumber}
+          onChange={onChange}
+          placeholder={t('nodes:placeholders.enterType', { type: typeof value })}
         />
       ) : (
         <Input
           type="text"
           value={String(value)}
-          onChange={(e) => {
-            // Try to preserve the original type
-            const newValue = e.target.value;
-            if (typeof value === 'number') {
-              const num = Number(newValue);
-              if (!Number.isNaN(num)) {
-                onChange(num);
-              }
-            } else {
-              onChange(newValue);
-            }
-          }}
+          onChange={(e) => onChange(e.target.value)}
           placeholder={t('nodes:placeholders.enterType', {
             type: typeof value,
           })}
         />
       )}
     </div>
+  );
+}
+
+const formatJson = (v: unknown) => JSON.stringify(v, null, 2);
+
+/** JSON text as a value, or `invalid` while it doesn't read. */
+const invalid = Symbol('invalid');
+function parseJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return invalid;
+  }
+}
+function parseNumber(text: string): unknown {
+  const n = Number(text);
+  return text.trim() === '' || Number.isNaN(n) ? invalid : n;
+}
+
+/**
+ * A field that keeps what is typed and saves it once it reads (`parse`
+ * gives `invalid` until then), and shows a value changed elsewhere. A
+ * controlled field undid every keystroke that left the text unreadable --
+ * the "," before a new JSON key, the "." of a decimal (bug #215).
+ */
+function DraftField({
+  value,
+  format,
+  parse,
+  onChange,
+  multiline,
+  rows,
+  placeholder,
+}: {
+  value: unknown;
+  format: (value: unknown) => string;
+  parse: (text: string) => unknown;
+  onChange: (value: unknown) => void;
+  multiline?: boolean;
+  rows?: number;
+  placeholder?: string;
+}) {
+  const [draft, setDraft] = useState(() => format(value));
+  // A value changed elsewhere (undo, another field) replaces the draft,
+  // unless the draft already reads as it.
+  useEffect(() => {
+    setDraft((current) => {
+      const read = parse(current);
+      return read !== invalid && JSON.stringify(read) === JSON.stringify(value)
+        ? current
+        : format(value);
+    });
+  }, [value, format, parse]);
+  const handle = (text: string) => {
+    setDraft(text);
+    const read = parse(text);
+    if (read !== invalid) onChange(read);
+  };
+  return multiline ? (
+    <Textarea
+      value={draft}
+      onChange={(e) => handle(e.target.value)}
+      className="font-mono"
+      rows={rows}
+      placeholder={placeholder}
+    />
+  ) : (
+    <Input
+      type="text"
+      value={draft}
+      onChange={(e) => handle(e.target.value)}
+      placeholder={placeholder}
+    />
   );
 }

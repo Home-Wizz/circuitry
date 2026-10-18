@@ -292,10 +292,7 @@ export function AutomationImportDialog({ isOpen, onClose }: AutomationImportDial
       for (const automation of selectedAutomations) {
         let config = configByAutomationId[automation.automation_id];
         if (!config) {
-          config = await api.getAutomationConfigWithFallback(
-            automation.automation_id,
-            automation.friendly_name
-          );
+          config = await api.getAutomationConfig(automation.automation_id);
         }
 
         if (!config) {
@@ -348,7 +345,11 @@ export function AutomationImportDialog({ isOpen, onClose }: AutomationImportDial
       onClose();
     } catch (error) {
       console.error('Circuitry: Failed to merge automations:', error);
-      showErrorToast(t('dialogs:import.mergeFailed', { message: (error as Error).message }));
+      showErrorToast(
+        t('dialogs:import.mergeFailed', {
+          message: error instanceof Error ? error.message : String(error),
+        })
+      );
     }
   };
 

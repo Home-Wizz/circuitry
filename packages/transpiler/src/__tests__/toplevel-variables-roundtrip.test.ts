@@ -89,8 +89,10 @@ mode: single
     expect(result.success).toBe(true);
 
     const automation = result.output?.automation as Record<string, unknown>;
-    const actions = automation.actions as unknown[];
-    const stopAction = actions[actions.length - 1] as Record<string, unknown>;
+    // The condition step stays in the run (#246): an if whose then is the stop.
+    const [step] = automation.actions as Record<string, unknown>[];
+    const then = (step?.then ?? []) as Record<string, unknown>[];
+    const stopAction = then[then.length - 1] as Record<string, unknown>;
     expect(stopAction.stop).toBe('Not enabled');
     expect(stopAction.service).toBeUndefined();
   });

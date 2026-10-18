@@ -9,6 +9,7 @@ import { useTranslation } from 'react-i18next';
 import { FormField } from '@/components/forms/FormField';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Segmented } from '@/components/ui/segmented';
 import {
   Select,
   SelectContent,
@@ -17,14 +18,15 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Separator } from '@/components/ui/separator';
-import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
-import { HaSelect, HaSelector, HaSwitch } from '@/ha';
+import { HaSelect, HaSelector } from '@/ha';
 import { useFlowStore } from '@/store/flow-store';
 
 const AUTOMATION_MODES: readonly AutomationMode[] = AutomationModeSchema.options;
 const MAX_EXCEEDED_OPTIONS: readonly MaxExceeded[] = MaxExceededSchema.options;
 const MODES_WITH_MAX = new Set<AutomationMode>(['queued', 'parallel']);
+const START_STATES = ['keep', 'on', 'off'] as const;
+type StartState = (typeof START_STATES)[number];
 
 /**
  * The automation's own settings: its name, description, initial state,
@@ -77,8 +79,12 @@ export function AutomationSettingsPanel({ inDialog = false }: { inDialog?: boole
     }
   };
 
-  const handleInitialStateChange = (checked: boolean) => {
-    setFlowMetadata({ initial_state: checked });
+  // Three ways, as HA has them (bug #225): none set brings the automation
+  // back as it was before a restart; true and false force it on or off.
+  const startState: StartState =
+    flowMetadata.initial_state === undefined ? 'keep' : flowMetadata.initial_state ? 'on' : 'off';
+  const handleStartStateChange = (value: StartState) => {
+    setFlowMetadata({ initial_state: value === 'keep' ? undefined : value === 'on' });
   };
 
   const handleStoredTracesChange = (value: string) => {
@@ -146,20 +152,19 @@ export function AutomationSettingsPanel({ inDialog = false }: { inDialog?: boole
         />
       </FormField>
 
-      <FormField
-        label={t('automationSettings.initialState')}
-        description={t('automationSettings.initialStateDescription')}
-      >
-        <HaSwitch
-          checked={flowMetadata.initial_state ?? true}
-          onChange={handleInitialStateChange}
-          fallback={
-            <Switch
-              checked={flowMetadata.initial_state ?? true}
-              onCheckedChange={handleInitialStateChange}
-            />
-          }
+      <FormField label={t('automationSettings.initialState')}>
+        <Segmented
+          className="self-start"
+          value={startState}
+          options={START_STATES.map((value) => ({
+            value,
+            label: t(`automationSettings.initialStates.${value}`),
+          }))}
+          onChange={handleStartStateChange}
         />
+        <p className="text-muted-foreground text-xs">
+          {t(`automationSettings.initialStateDescriptions.${startState}`)}
+        </p>
       </FormField>
 
       <Separator />

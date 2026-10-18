@@ -120,6 +120,36 @@ export abstract class BaseStrategy implements TranspilerStrategy {
   /**
    * Find the entry node(s) of a flow
    */
+  /**
+   * Adds the automation-level settings every strategy carries through, the
+   * same keys in the same order. Top-level `variables` is not added here:
+   * FlowTranspiler.generateAndSerialize merges flow.userVariables into
+   * every strategy's output. (Bug #20: the state machine once wrote only
+   * `mode`. Bug #196: `initial_state: true` was dropped, which is not the
+   * same as no `initial_state` -- HA then restores the state it had.)
+   */
+  protected withAutomationSettings(
+    flow: FlowGraph,
+    automation: Record<string, unknown>
+  ): Record<string, unknown> {
+    if (flow.metadata?.max) {
+      automation.max = flow.metadata.max;
+    }
+    if (flow.metadata?.max_exceeded) {
+      automation.max_exceeded = flow.metadata.max_exceeded;
+    }
+    if (typeof flow.metadata?.initial_state === 'boolean') {
+      automation.initial_state = flow.metadata.initial_state;
+    }
+    if (flow.metadata?.trace) {
+      automation.trace = flow.metadata.trace;
+    }
+    if (flow.userTriggerVariables && Object.keys(flow.userTriggerVariables).length > 0) {
+      automation.trigger_variables = flow.userTriggerVariables;
+    }
+    return automation;
+  }
+
   protected findEntryNodes(flow: FlowGraph): string[] {
     const targetNodes = new Set(flow.edges.map((e) => e.target));
     return flow.nodes.filter((n) => !targetNodes.has(n.id)).map((n) => n.id);

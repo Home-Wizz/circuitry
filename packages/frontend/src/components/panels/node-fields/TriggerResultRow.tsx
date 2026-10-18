@@ -1,8 +1,10 @@
+import { useContext } from 'react';
+import { ColumnTitleContext } from '@/components/canvas/PickerColumns';
+import { CurrentChip, useIsChosen, useIsCurrent } from '@/components/canvas/pickerCurrent';
+import { type PickerIcon, PickerIconBadge } from '@/components/nodes/StepIcon';
 import { TruncatedTooltip } from '@/components/ui/truncated-tooltip';
 import { DEFAULT_DOMAIN_COLOR, type DomainColor } from '@/lib/domain-colors';
 import { cn } from '@/lib/utils';
-import { type PickerIcon, PickerIconBadge } from '@/components/nodes/StepIcon';
-import { CurrentChip, useIsChosen, useIsCurrent } from '@/components/canvas/pickerCurrent';
 
 /** Covers both `lucide-react`'s own `LucideIcon` type and the narrower
  * `React.ComponentType<{ className?: string }>` PLATFORM_ICONS
@@ -61,6 +63,13 @@ export function TriggerResultRow({
   const { bg, fg } = color ?? DEFAULT_DOMAIN_COLOR;
   const isCurrent = useIsCurrent(pickKey);
   const isChosen = useIsChosen(choiceKey);
+  // The tag names what the row acts on. Left out where it only repeats the
+  // column's heading (every row in a device's column named the device),
+  // and put under the title, not beside it, where it does tell rows apart:
+  // beside it, in the narrow column Fill in leaves, the title wrapped a word
+  // a line and the tag ran into it (bug #229).
+  const columnTitle = useContext(ColumnTitleContext);
+  const tag = chip && chip.toLocaleLowerCase() !== columnTitle?.toLocaleLowerCase() ? chip : null;
   return (
     <button
       type="button"
@@ -88,6 +97,13 @@ export function TriggerResultRow({
           {label}
           {isCurrent && <CurrentChip />}
         </div>
+        {tag && (
+          <TruncatedTooltip content={tag}>
+            <span className="mt-1.5 inline-block max-w-full truncate rounded border px-2 py-0.5 align-top text-muted-foreground text-sm">
+              {tag}
+            </span>
+          </TruncatedTooltip>
+        )}
         {description && (
           // At most two lines; the rest in a tooltip when it's cut.
           <TruncatedTooltip content={description}>
@@ -97,13 +113,6 @@ export function TriggerResultRow({
           </TruncatedTooltip>
         )}
       </div>
-      {chip && (
-        <TruncatedTooltip content={chip}>
-          <span className="mt-0.5 shrink-0 truncate rounded border px-2 py-0.5 text-muted-foreground text-sm">
-            {chip}
-          </span>
-        </TruncatedTooltip>
-      )}
     </button>
   );
 }

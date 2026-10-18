@@ -7,6 +7,9 @@
     "noTrigger": "Automatisierung muss mindestens einen Auslöserknoten haben. Bitte fügen Sie einen Auslöser aus der Knotenpalette hinzu.",
     "noAction": "Automatisierung muss mindestens einen Aktionsknoten haben. Bitte fügen Sie eine Aktion aus der Knotenpalette hinzu.",
     "validationFailed": "Validierung fehlgeschlagen: {{errors}}",
+    "orphanedCards_one": "{{count}} Karte ist mit keinem Auslöser verbunden. Verbinden Sie sie mit dem Ablauf oder löschen Sie sie.",
+    "orphanedCards_other": "{{count}} Karten sind mit keinem Auslöser verbunden. Verbinden Sie sie mit dem Ablauf oder löschen Sie sie.",
+    "invalidAction": "„{{service}}“ ist kein Aktionsname, den Home Assistant annimmt. Verwenden Sie domain.aktion, z. B. light.turn_on, oder eine Vorlage.",
     "transpileFailed": "Flow konnte nicht in Automatisierungskonfiguration transpiliert werden",
     "noAutomationId": "Keine Automatisierungs-ID gesetzt. Verwenden Sie saveAutomation() für neue Automatisierungen.",
     "node": {
@@ -42,6 +45,8 @@
       "geoEventRequired": "Ereignis (Betreten/Verlassen) ist erforderlich",
       "commandRequired": "Mindestens ein Satz ist erforderlich",
       "timePatternRequired": "Stunden, Minuten oder Sekunden festlegen (Home Assistant braucht mindestens eines)",
+      "timePatternInvalid": "*, eine ganze Zahl oder /N für alle N verwenden (Stunden 0-23, Minuten und Sekunden 0-59)",
+      "sunOffsetInvalid": "Den Versatz als H:MM oder H:MM:SS mit ganzen Stunden und Minuten angeben",
       "calendarRequired": "Kalender ist erforderlich",
       "entityEmpty": "Keine Entitäten ausgewählt, daher löst dies nie aus",
       "boundRequired": "Über, Unter oder beides angeben (Home Assistant braucht mindestens eines)",
@@ -58,6 +63,7 @@
       "serviceFormat": "Dienst muss im Format domain.dienst angegeben werden (z.B. light.turn_on)",
       "fieldEmpty": "Ein Feld, das diese Aktion braucht, ist leer: Home Assistant speichert sie, aber der Schritt schlägt beim Ausführen fehl",
       "oneOfEmpty": "Diese Aktion braucht eines dieser Felder (oder ein Paar davon zusammen): Home Assistant speichert sie, aber der Schritt schlägt beim Ausführen fehl",
+      "responseNeeded": "Diese Aktion liefert eine Antwort: Geben Sie eine Antwortvariable an, sonst lehnt Home Assistant den Schritt beim Ausführen ab",
       "entityUnsupported": "Eine Entität hier kann diese Aktion nicht ausführen (ihr fehlt eine Funktion, die die Aktion braucht): Home Assistant speichert sie, aber der Schritt schlägt beim Ausführen fehl",
       "eventEmpty": "Der Ereignisname ist leer, daher wird ein Ereignis ohne Namen ausgelöst"
     },

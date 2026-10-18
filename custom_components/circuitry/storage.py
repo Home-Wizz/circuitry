@@ -21,6 +21,8 @@ import asyncio
 from typing import Any
 
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.json import json_bytes
 from homeassistant.helpers.storage import Store
 
 STORAGE_VERSION = 1
@@ -77,13 +79,26 @@ class GraphStore:
         source_hash: str,
         saved_at: str,
     ) -> None:
-        """Persist (overwrite) the graph entry for one automation."""
-        data = await self._async_load()
-        data[automation_id] = {
+        """Persist (overwrite) the graph entry for one automation.
+
+        An entry HA's JSON encoder can't write is refused before it joins
+        the stored data: HA's Store only logs a failed write, so it was
+        reported as saved, and, kept in memory, it failed every later
+        write of every graph too (bug #247).
+        """
+        entry = {
             "graph": graph,
             "source_hash": source_hash,
             "saved_at": saved_at,
         }
+        try:
+            json_bytes(entry)
+        except (TypeError, ValueError) as err:
+            raise HomeAssistantError(
+                f"The canvas of automation {automation_id} can't be stored: {err}"
+            ) from err
+        data = await self._async_load()
+        data[automation_id] = entry
         await self._store.async_save(data)
 
     async def async_delete(self, automation_id: str) -> None:
