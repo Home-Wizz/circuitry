@@ -5,6 +5,43 @@ rebrand below were written under this project's previous name — FLODE —
 and are kept exactly as originally written for historical accuracy rather
 than edited to say "Circuitry" throughout.
 
+## [2.5.0] — 2026-11-05
+
+Fewer drawings refused, and what Home Assistant would refuse is shown
+before you save.
+
+### Added
+- **Before you save, the editor shows what Home Assistant would refuse**:
+  an entity id it can't read, "most runs at once" below 2 for queued or
+  parallel runs, a step kept as written in a shape it won't take. The card
+  shows the reason, and Save lists each one with a button to show it.
+- **Branches that go back round on only some paths** are saved: each branch
+  records whether it went round, and the loop goes round when any did,
+  after every branch has finished.
+- **A path shared with another trigger** is saved as drawn: the trigger's
+  run gets its own copy of the steps.
+- **A Choose's "None matched" path** is shown on the canvas, and a Choose
+  whose options run nothing asks what you meant.
+
+### Fixed
+- **Reopening and saving again could change what an automation does** in
+  two rare shapes: a step after an if ran after a side that ends the
+  automation, or after a side that goes back round a loop. Such
+  automations are now saved the other way, as drawn.
+- **Several drawings with loops were refused** with an internal message
+  ("please report this flow"): a test going round on its "yes" side as
+  well, branches meeting inside a loop entered at two steps, a round on a
+  test's "no" side that also fans out, a loop entered at two steps. They
+  are saved now.
+- **A drawn test with nothing on either side** at the end of an
+  automation was dropped on reopening; it is kept.
+- **A Choose whose options lead straight on** was dropped on reopening;
+  it is kept.
+- **Refusals say why**, in terms of the drawing: two rounds of one loop
+  beside each other, branches going back to two different steps (with a
+  pointer to a Join), and branches that only sometimes go round.
+- **Saving long automations** is faster again.
+
 ## [2.4.0] — 2026-10-17
 
 What the canvas shows is what Home Assistant runs: a round of fixes to

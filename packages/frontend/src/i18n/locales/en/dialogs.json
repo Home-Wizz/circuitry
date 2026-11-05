@@ -16,7 +16,28 @@
     "inProgress": "This automation is already being saved; wait for that save to finish.",
     "keptElsewhere": "Kept in a YAML file; edit it there",
     "registryNotSet": "Saved, but its icon, area, labels or category couldn't be set. Set them in Home Assistant's automation settings.",
-    "readingDiffers": "Opened read-only: the canvas doesn't run the way this automation does; save it as a copy and compare"
+    "readingDiffers": "Opened read-only: the canvas doesn't run the way this automation does; save it as a copy and compare",
+    "chooseGatesNothing": {
+      "title": "This Choose doesn't stop anything",
+      "body": "Every option of {{choose}} leads straight on to {{next}}, and when none of them matches, the run carries on there too. So what comes after runs whatever the options say.",
+      "hint": "To stop when nothing matches, give the last option an “Otherwise” line to a Stop card.",
+      "theChoose": "the Choose",
+      "theNext": "the next card",
+      "saveAnyway": "Save anyway",
+      "addStop": "Add a Stop"
+    },
+    "blocked": {
+      "title_one": "Home Assistant would refuse 1 thing here, or needs it filled in. Fix it, then save.",
+      "title_other": "Home Assistant would refuse {{count}} things here, or needs them filled in. Fix them, then save.",
+      "settings": "Automation settings",
+      "whereSettings": "Automation tools › Settings…",
+      "showCard": "Show card",
+      "kind": {
+        "trigger": "When",
+        "condition": "And",
+        "action": "Then"
+      }
+    }
   },
   "import": {
     "title": "Open Automation",

@@ -19,6 +19,13 @@ export function isStateMachineVariableName(name: string): boolean {
 }
 const isName = isStateMachineVariableName;
 
+/** Whether `name` is a variable that says where a state machine is: the
+ * machine's `current_node`, or a branch machine's (#284) `branch_<8 hex>`.
+ * Setting one moves that machine on. */
+export function isStateMachinePositionName(name: string): boolean {
+  return name === 'current_node' || /^branch_[0-9a-f]{8}$/.test(name);
+}
+
 /** The machine's variable names `value` sets (as a `variables:` key) or
  * reads (in a template), anywhere in it. */
 function namesIn(value: unknown, found: Set<string>): void {

@@ -5,6 +5,7 @@ import {
   MaxExceededSchema,
 } from '@circuitry/shared';
 import { Plus, Trash2 } from 'lucide-react';
+import { automationSettingsIssues } from '@circuitry/shared';
 import { useTranslation } from 'react-i18next';
 import { FormField } from '@/components/forms/FormField';
 import { Button } from '@/components/ui/button';
@@ -61,6 +62,10 @@ export function AutomationSettingsPanel({ inDialog = false }: { inDialog?: boole
 
     setFlowMetadata(updates);
   };
+
+  // What Home Assistant would refuse (Phase 4): shown here, and Save is
+  // blocked until it's fixed.
+  const maxIssue = automationSettingsIssues({ max: flowMetadata.max })[0];
 
   const handleMaxChange = (value: string) => {
     const parsed = Number.parseInt(value, 10);
@@ -205,10 +210,12 @@ export function AutomationSettingsPanel({ inDialog = false }: { inDialog?: boole
           <FormField
             label={t('automationSettings.max')}
             description={t('automationSettings.maxDescription')}
+            error={maxIssue && t(maxIssue.message, { defaultValue: maxIssue.message })}
           >
             <Input
               type="number"
-              min={1}
+              min={2}
+              aria-invalid={maxIssue !== undefined}
               value={flowMetadata.max ?? ''}
               onChange={(e) => handleMaxChange(e.target.value)}
               placeholder="10"

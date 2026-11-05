@@ -588,6 +588,21 @@ export class NativeStrategy extends BaseStrategy {
     const unread = reading.unread ?? new Set<string>();
     const walked = reading.walked;
     const patterns = new Map<string, RepeatPattern>();
+    // Bug #294: two different kinds of loop coming back to one step (a
+    // list's "no" and its member's "yes", say): kept as whichever line came last,
+    // the other's round was lost -- and which one depended on the order the
+    // lines were drawn in. Native writes neither; the state machine follows
+    // the lines.
+    const setPattern = (key: string, pattern: RepeatPattern): void => {
+      const before = patterns.get(key);
+      // The same kind of loop recorded from two of its lines back (a while's
+      // body ending in an if whose sides both go back, say) is one loop.
+      if (before && before.type !== pattern.type)
+        throw new GraphClaimError(
+          `two loops come back to "${key}" (from "${before.backEdgeSourceId || before.entryNodeId}" and "${pattern.backEdgeSourceId || pattern.entryNodeId}"), which native doesn't write`
+        );
+      patterns.set(key, pattern);
+    };
 
     for (const edge of flow.edges) {
       if (!this.backEdgeIds.has(edge.id)) continue;
@@ -706,6 +721,41 @@ export class NativeStrategy extends BaseStrategy {
           new Set(conditionNodeIds),
           backEdgeSourceId
         );
+        // Bug #292: the line back comes from a step the test's "yes" side
+        // doesn't reach -- the round is on the "no" side (#263's shape,
+        // for a list too: a member's own "no" line is the list's "no").
+        // Read as a while on the yes side, the body was the yes side and
+        // the round the way out. Native writes no such loop; the state
+        // machine follows the lines.
+        const outsideThisWalk =
+          walked !== undefined && !(walked.has(edge.source) && walked.has(edge.target));
+        // Bug #294: the test's way out comes back round to the line back's
+        // source (an if/else meeting at a Join that goes back to the test):
+        // no side leaves the loop.
+        if (backEdgeSourceId !== '' && !outsideThisWalk) {
+          const fromExit = new Set<string>();
+          const queue = [...headExitIds];
+          while (queue.length > 0) {
+            const id = queue.shift()!;
+            if (fromExit.has(id)) continue;
+            fromExit.add(id);
+            for (const e of flow.edges)
+              if (e.source === id && !this.backEdgeIds.has(e.id)) queue.push(e.target);
+          }
+          if (fromExit.has(backEdgeSourceId))
+            throw new GraphClaimError(
+              `the test "${edge.target}" has no way out of its loop: both sides come back round, which native doesn't write`
+            );
+        }
+        if (
+          backEdgeSourceId !== '' &&
+          !bodyNodeIds.includes(backEdgeSourceId) &&
+          !outsideThisWalk
+        ) {
+          throw new GraphClaimError(
+            `the line from "${edge.source}" back to "${edge.target}" goes round on the test's "no" side, which native doesn't write`
+          );
+        }
         const bodyEntryNodeIds = flow.edges
           .filter(
             (e) =>
@@ -713,7 +763,7 @@ export class NativeStrategy extends BaseStrategy {
           )
           .map((e) => e.target);
 
-        patterns.set(firstCondId, {
+        setPattern(firstCondId, {
           type: 'while',
           entryNodeId: firstCondId,
           conditionNodeIds,
@@ -805,7 +855,7 @@ export class NativeStrategy extends BaseStrategy {
         // Body nodes: traverse forward from firstBodyId until we hit the condition
         const bodyNodeIds = this.collectNodesUntil(flow, firstBodyId, new Set(conditionNodeIds));
 
-        patterns.set(firstBodyId, {
+        setPattern(firstBodyId, {
           type: 'until',
           entryNodeId: firstBodyId,
           conditionNodeIds,
@@ -821,11 +871,48 @@ export class NativeStrategy extends BaseStrategy {
         // walker can't bound inside the body is the gate's to refuse.
         const firstBodyId = edge.target;
         const condId = edge.source;
-        patterns.set(firstBodyId, {
+        const doWhileBody = this.collectNodesUntil(flow, firstBodyId, new Set([condId]));
+        // Bug #293: a test on the way to the loop's test with a side that
+        // just ends (inside a fan-out's branch, where no stop is made of a
+        // path's end): the run stops going round there, which `repeat:
+        // until` can't say -- written, it was an empty `if` and the loop
+        // went round on the last test alone.
+        // On the way: body steps the test can be reached from (a test
+        // beside it ending is a branch of its own, #267).
+        const reachesTest = (from: string): boolean => {
+          const seen = new Set<string>();
+          const queue = [from];
+          while (queue.length > 0) {
+            const id = queue.shift()!;
+            if (id === condId) return true;
+            if (seen.has(id)) continue;
+            seen.add(id);
+            for (const e of flow.edges)
+              if (e.source === id && !this.backEdgeIds.has(e.id)) queue.push(e.target);
+          }
+          return false;
+        };
+        const endsInBody = doWhileBody.find((id) => {
+          if (this.getNode(flow, id)?.type !== 'condition' || !reachesTest(id)) return false;
+          const sides = new Set(
+            flow.edges
+              .filter((e) => e.source === id && e.type !== 'hint')
+              .map((e) => e.sourceHandle)
+          );
+          return !sides.has('true') || !sides.has('false');
+        });
+        const outsideWalk =
+          walked !== undefined && !(walked.has(edge.source) && walked.has(edge.target));
+        if (endsInBody !== undefined && !outsideWalk) {
+          throw new GraphClaimError(
+            `the test "${endsInBody}" on the way round the loop back to "${firstBodyId}" ends on one side, which native doesn't write`
+          );
+        }
+        setPattern(firstBodyId, {
           type: 'do-while',
           entryNodeId: firstBodyId,
           conditionNodeIds: [condId],
-          bodyNodeIds: this.collectNodesUntil(flow, firstBodyId, new Set([condId])),
+          bodyNodeIds: doWhileBody,
           bodyEntryNodeIds: [firstBodyId],
           backEdgeSourceId: condId,
         });
@@ -920,7 +1007,7 @@ export class NativeStrategy extends BaseStrategy {
         // Entry is the init node if it exists, otherwise the back-edge target
         const entryNodeId = initNodeId ?? backEdgeTargetId;
 
-        patterns.set(entryNodeId, {
+        setPattern(entryNodeId, {
           type: 'count',
           entryNodeId,
           conditionNodeIds,
@@ -931,6 +1018,50 @@ export class NativeStrategy extends BaseStrategy {
           incrementNodeId,
           count: countValue,
         });
+      }
+    }
+
+    // #302: two loops that overlap, neither inside the other -- one's test
+    // a step of the other's round, and its own start outside it ("c1? yes:
+    // c2? no: back to c1; yes: the light, c4? yes: back to c2": c2 the
+    // until's test round c1 and the start of the do-while round c4). The
+    // walk writes the first loop, using its test up, and the other's line
+    // back was lost. HA's repeat nests; native doesn't write these.
+    const stepsOf = (p: RepeatPattern) => new Set([p.entryNodeId, ...p.bodyNodeIds]);
+    // #303: one test checked by two loops ("c3? no: back to a; yes: c4?
+    // yes: back to c1", c4 the inner until's list member and the outer
+    // do-while's test): written, the outer loop checked it again after the
+    // inner one had -- a way out where the canvas, checking it once, has
+    // none.
+    // Only loops the walk writes (#305: the state machine reads a branch's
+    // or a state's steps through this walk; a loop elsewhere in the drawing
+    // is no business of that walk, and refusing it there made the whole
+    // drawing unsaveable).
+    const writtenHere = [...patterns.values()].filter(
+      (p) =>
+        walked === undefined ||
+        (walked.has(p.entryNodeId) && p.conditionNodeIds.every((id) => walked.has(id)))
+    );
+    const testedBy = new Map<string, RepeatPattern>();
+    for (const pattern of writtenHere) {
+      for (const id of pattern.conditionNodeIds) {
+        const other = testedBy.get(id);
+        if (other && other !== pattern)
+          throw new GraphClaimError(
+            `"${id}" is a test of two loops (round "${other.entryNodeId}" and "${pattern.entryNodeId}"), which native doesn't write`
+          );
+        testedBy.set(id, pattern);
+      }
+    }
+    for (const outer of writtenHere) {
+      const steps = stepsOf(outer);
+      for (const inner of writtenHere) {
+        if (inner === outer) continue;
+        const test = inner.conditionNodeIds.find((id) => steps.has(id));
+        if (test !== undefined && !steps.has(inner.entryNodeId))
+          throw new GraphClaimError(
+            `the loops round "${inner.entryNodeId}" and "${outer.entryNodeId}" overlap ("${test}" is in both, and neither is inside the other), which native doesn't write`
+          );
       }
     }
 
@@ -2084,6 +2215,7 @@ export class NativeStrategy extends BaseStrategy {
           true
         );
         const convergenceBoundSet = convergenceSet.length > 0 ? new Set(convergenceSet) : null;
+        this.refuseGoingRoundPast(flow, branchGroups, convergenceBoundSet);
 
         // Build choose options
         const chooseOptions: Record<string, unknown>[] = [];
@@ -2230,6 +2362,7 @@ export class NativeStrategy extends BaseStrategy {
               )
             : [];
         const convergenceBoundSet = convergenceSet.length > 0 ? new Set(convergenceSet) : null;
+        this.refuseGoingRoundPast(flow, [thenNodeIds, elseNodeIds], convergenceBoundSet);
 
         // buildFanOut(UntilNode), not a plain .flatMap, for both then/else --
         // found via empirical audit, 2026-09-06, as bug #12: a genuine multi-target then/else fan-out (an ordinary `parallel:` block as an if/then's or a choose case's own content) was being flattened via .flatMap into a plain sequential list instead of wrapped in `{ parallel: [...] }` -- silently turning concurrent branches into sequential ones, a real behavior change for any branch containing a delay/wait (same class of bug as #4/#9/#11, just on the DEFAULT/native if-then-else and choose-case builders instead of a loop/sequence-group body or StateMachineStrategy).
@@ -2738,6 +2871,60 @@ export class NativeStrategy extends BaseStrategy {
 
   /** Every node reachable from `starts` by forward edges without passing
    * through `avoidId` (`''`: avoiding nothing). */
+  /** #346: an if written with its meeting point after it runs that step
+   * after each side; a side that goes back round its loop before getting
+   * there doesn't, in the drawing. Native has no way to write that. */
+  private refuseGoingRoundPast(
+    flow: FlowGraph,
+    sides: string[][],
+    meeting: Set<string> | null
+  ): void {
+    if (meeting === null) return;
+    for (const side of sides) {
+      if (side.length > 0 && this.goesRoundBefore(flow, side, meeting))
+        throw new GraphClaimError(
+          `a side of an if goes back round its loop before "${[...meeting][0]}", where the sides meet, which native doesn't write`
+        );
+    }
+  }
+
+  /** Whether a line back round leaves the steps reached from `starts`
+   * before `bound` (going round past a meeting point, #346). */
+  private goesRoundBefore(flow: FlowGraph, starts: string[], bound: Set<string>): boolean {
+    const region = new Set<string>();
+    const queue = starts.filter((id) => !bound.has(id));
+    while (queue.length > 0) {
+      const id = queue.shift()!;
+      if (region.has(id)) continue;
+      region.add(id);
+      for (const e of this.getOutgoingEdges(flow, id)) {
+        if (!this.backEdgeIds.has(e.id) && !bound.has(e.target)) queue.push(e.target);
+      }
+    }
+    return [...region].some((id) =>
+      this.getOutgoingEdges(flow, id).some(
+        (e) => this.backEdgeIds.has(e.id) && !region.has(e.target) && !bound.has(e.target)
+      )
+    );
+  }
+
+  /** Whether a `stop` step is reached from `starts` before `bound`. */
+  private reachesStopBefore(flow: FlowGraph, starts: string[], bound: Set<string>): boolean {
+    const seen = new Set<string>();
+    const queue = starts.filter((id) => !bound.has(id));
+    while (queue.length > 0) {
+      const id = queue.shift()!;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const data = this.getNode(flow, id)?.data as Record<string, unknown> | undefined;
+      if (data !== undefined && 'stop' in data && data.enabled !== false) return true;
+      for (const e of this.getOutgoingEdges(flow, id)) {
+        if (!this.backEdgeIds.has(e.id) && !bound.has(e.target)) queue.push(e.target);
+      }
+    }
+    return false;
+  }
+
   private reachedAvoiding(flow: FlowGraph, starts: string[], avoidId: string): Set<string> {
     const seen = new Set<string>([avoidId]);
     const queue = starts.filter((id) => id !== avoidId);
@@ -2853,7 +3040,9 @@ export class NativeStrategy extends BaseStrategy {
       let result: { always: boolean; past: boolean };
       if (at.has(id)) result = { always: true, past: false };
       else if (after.has(id)) result = { always: false, past: true };
-      else if (boundary?.has(id)) result = { always: false, past: false };
+      // #323: a run that reaches the caller's boundary (an outer meeting)
+      // without the meeting point goes on past it there too.
+      else if (boundary?.has(id)) result = { always: false, past: true };
       else if (this.getNode(flow, id)?.type === 'condition') {
         const sides = ['true', 'false'].map((h) => ofAll(forward(id, h)));
         result = { always: sides.every((r) => r.always), past: sides.some((r) => r.past) };
@@ -2862,6 +3051,61 @@ export class NativeStrategy extends BaseStrategy {
       return result;
     };
     return groups.some((group) => ofAll(group).past);
+  }
+
+  /** #321: whether `members` can be where `groups` (an if's branches) meet:
+   * no run reaches one of them without the others (a condition's run takes
+   * either side, a step's runs every line out of it). A run that ends at
+   * none of them (a `stop` in a branch) doesn't count. */
+  private noRunSplitsTheMeeting(
+    flow: FlowGraph,
+    groups: string[][],
+    members: string[],
+    boundary?: Set<string>
+  ): boolean {
+    const forward = (id: string, handle?: string) =>
+      this.getOutgoingEdges(flow, id)
+        .filter(
+          (e) => !this.backEdgeIds.has(e.id) && (handle === undefined || e.sourceHandle === handle)
+        )
+        .map((e) => e.target);
+    const memberSet = new Set(members);
+    return members.every((target) => {
+      const memo = new Map<string, 'hit' | 'miss' | 'none'>();
+      const combine = (each: ('hit' | 'miss' | 'none')[], missWins: boolean) =>
+        missWins
+          ? each.includes('miss')
+            ? 'miss'
+            : each.includes('hit')
+              ? 'hit'
+              : 'none'
+          : each.includes('hit')
+            ? 'hit'
+            : each.includes('miss')
+              ? 'miss'
+              : 'none';
+      const visit = (id: string): 'hit' | 'miss' | 'none' => {
+        const known = memo.get(id);
+        if (known !== undefined) return known;
+        memo.set(id, 'none');
+        let result: 'hit' | 'miss' | 'none';
+        if (id === target) result = 'hit';
+        else if (memberSet.has(id)) result = 'miss';
+        else if (boundary?.has(id)) result = 'none';
+        else if (this.getNode(flow, id)?.type === 'condition')
+          result = combine(
+            [
+              combine(forward(id, 'true').map(visit), false),
+              combine(forward(id, 'false').map(visit), false),
+            ],
+            true
+          );
+        else result = combine(forward(id).map(visit), false);
+        memo.set(id, result);
+        return result;
+      };
+      return groups.every((group) => combine(group.map(visit), false) !== 'miss');
+    });
   }
 
   /**
@@ -2967,6 +3211,11 @@ export class NativeStrategy extends BaseStrategy {
     if (minimal.length === 0) return [];
 
     if (minimal.length <= 1) return minimal;
+    // #321: an if's branches meet at a set of steps only where no run goes
+    // to one of them and not the others (a fan-out to all of them). Where
+    // one run goes to a step and another to a path that ends, written as a
+    // parallel after the if, every run ran them all; they don't meet.
+    if (exclusive && !this.noRunSplitsTheMeeting(flow, groups, minimal, boundary)) return [];
 
     const withDistance = minimal.map((nodeId) => {
       const distances = groups.map((group) =>
@@ -3100,6 +3349,21 @@ export class NativeStrategy extends BaseStrategy {
           : [];
       const innerBoundSet: string | Set<string> =
         innerConvergenceSet.length > 0 ? new Set([...stopSet, ...innerConvergenceSet]) : stopNodeId;
+      this.refuseGoingRoundPast(
+        flow,
+        [thenNodeIds, elseNodeIds],
+        innerConvergenceSet.length > 0 ? new Set(innerConvergenceSet) : null
+      );
+      // A side's line to where the enclosing walk carries on runs there,
+      // after this if and what follows it up to there -- unless that ends
+      // the automation first (a `stop`): then it runs beside, which no
+      // reading after it gives (#342).
+      for (const left of [...thenNodeIds, ...elseNodeIds].filter((id) => stopSet.has(id))) {
+        if (this.reachesStopBefore(flow, innerConvergenceSet, new Set([left])))
+          throw new GraphClaimError(
+            `"${left}" runs beside a branch that ends the automation, which native doesn't write`
+          );
+      }
 
       // buildFanOutUntilNode, not a plain .flatMap -- found via empirical audit, 2026-09-06, as bug #12: a genuine multi-target then/else fan-out (an ordinary `parallel:` block as an if/then's or a choose case's own content) was being flattened via .flatMap into a plain sequential list instead of wrapped in `{ parallel: [...] }` -- silently turning concurrent branches into sequential ones, a real behavior change for any branch containing a delay/wait (same class of bug as #4/#9/#11, just on the DEFAULT/native if-then-else and choose-case builders instead of a loop/sequence-group body or StateMachineStrategy).
       if (thenNodeIds.length > 0) {

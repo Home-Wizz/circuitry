@@ -112,6 +112,14 @@
     "setVariables": {
       "atLeastOne": "At least one variable must be defined",
       "empty": "No variables are set, so this step does nothing"
+    },
+    "entityIdForm": "Home Assistant won't take this entity id: it needs a domain and a name, like binary_sensor.kitchen_motion. Pick the entity again to fix it.",
+    "settings": {
+      "maxBelowTwo": "Home Assistant needs at least 2 here: it's how many runs it keeps at once."
+    },
+    "keptStep": {
+      "variablesNotMapping": "Home Assistant won't take this step: \"variables\" needs names with values (brightness: 80), not a list or text.",
+      "chooseOption": "Home Assistant won't take this step: each Choose option needs its conditions and steps, and one here isn't written that way."
     }
   },
   "connection": {

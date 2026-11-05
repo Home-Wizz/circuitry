@@ -19,6 +19,10 @@ import { normalizeTrigger, parseActionSequence } from './extractFromYaml';
 export interface LoopSteps {
   head: unknown[];
   inThen: unknown[];
+  /** #339: limits opening the "no" side. */
+  inElse?: unknown[];
+  /** #292: limits put just before a move into a loop's body, by target. */
+  beforeMoves?: Record<string, unknown[]>;
 }
 
 /**
@@ -181,16 +185,69 @@ function splitLoopSteps(sequence: unknown[]): { rest: unknown[]; loopSteps: Loop
   const head = sequence.slice(0, i);
   const rest = sequence.slice(i);
   const inThen: unknown[] = [];
+  const inElse: unknown[] = [];
   const ifSteps = rest.filter((s) => isMapping(s) && Array.isArray(s.if) && Array.isArray(s.then));
+  const leading = (side: unknown[]) => {
+    let k = 0;
+    while (k < side.length && isLoopStep(side[k])) k++;
+    return k;
+  };
   const out = rest.map((step) => {
     if (ifSteps.length !== 1 || step !== ifSteps[0] || !isMapping(step)) return step;
     const then = step.then as unknown[];
-    let k = 0;
-    while (k < then.length && isLoopStep(then[k])) k++;
+    const k = leading(then);
     inThen.push(...then.slice(0, k));
-    return k === 0 ? step : { ...step, then: then.slice(k) };
+    // #339: a `Loop limit` opening the "no" side (one that fans out into
+    // a loop's body).
+    const otherwise = Array.isArray(step.else) ? (step.else as unknown[]) : [];
+    const m = leading(otherwise);
+    inElse.push(...otherwise.slice(0, m));
+    return k === 0 && m === 0
+      ? step
+      : { ...step, then: then.slice(k), ...(m > 0 ? { else: otherwise.slice(m) } : {}) };
   });
-  return { rest: out, loopSteps: { head, inThen } };
+  // #292: a `Loop limit` just before a move (`current_node: <target>`), at
+  // any depth -- where a while whose round is on its test's "no" side
+  // checks it.
+  const beforeMoves: Record<string, unknown[]> = {};
+  const strip = (value: unknown): unknown => {
+    if (Array.isArray(value)) {
+      const kept: unknown[] = [];
+      for (let j = 0; j < value.length; j++) {
+        const next = value[j + 1];
+        if (
+          isMapping(value[j]) &&
+          (value[j] as Record<string, unknown>).alias === 'Loop limit' &&
+          isPlainTransition(next) &&
+          isMapping(next) &&
+          isMapping(next.variables)
+        ) {
+          const target = String(next.variables.current_node);
+          beforeMoves[target] = [...(beforeMoves[target] ?? []), value[j]];
+          continue;
+        }
+        kept.push(strip(value[j]));
+      }
+      return kept;
+    }
+    if (!isMapping(value)) return value;
+    return Object.fromEntries(Object.entries(value).map(([key, inner]) => [key, strip(inner)]));
+  };
+  const stripped = strip(out) as unknown[];
+  const sortedMoves = Object.fromEntries(
+    Object.keys(beforeMoves)
+      .sort()
+      .map((key) => [key, beforeMoves[key]])
+  );
+  return {
+    rest: stripped,
+    loopSteps: {
+      head,
+      inThen,
+      ...(inElse.length > 0 ? { inElse } : {}),
+      ...(Object.keys(beforeMoves).length > 0 ? { beforeMoves: sortedMoves } : {}),
+    },
+  };
 }
 
 /** A step that only sets `current_node` to a name: a state's transition. */
@@ -220,7 +277,28 @@ function parseStateSteps(sequence: unknown[]): YamlStateSpec {
 
   if (program.length === 1 && program[0].k === 'if') {
     const ifStep = program[0] as Extract<BStep, { k: 'if' }>;
-    const { content: trueContent, transition: trueTransition } = stripTrailingTransition(
+    // The one `if:` step that runs, as written: each side read as the
+    // leaf state's steps are, its transition off first (#336: a side whose
+    // steps end in an `if` -- a fan-out branch that does nothing, written
+    // inline -- had the transition folded into that if's sides).
+    const ifRawSteps = sequence.filter(
+      (s) =>
+        s &&
+        typeof s === 'object' &&
+        Array.isArray((s as Record<string, unknown>).if) &&
+        (s as Record<string, unknown>).enabled !== false
+    ) as Record<string, unknown>[];
+    const side = (raw: unknown, parsed: BProgram) => {
+      const steps = Array.isArray(raw) ? raw : [];
+      const last = steps.at(-1);
+      if (ifRawSteps.length === 1 && steps.length > 1 && isPlainTransition(last)) {
+        const { transition } = stripTrailingTransition(parseActionSequence([last]));
+        return { content: parseActionSequence(steps.slice(0, -1)), transition };
+      }
+      return stripTrailingTransition(parsed);
+    };
+    const { content: trueContent, transition: trueTransition } = side(
+      ifRawSteps[0]?.then,
       ifStep.then
     );
     // Bug #63: an until test's else may be an error guard -- only an `if:`
@@ -228,9 +306,9 @@ function parseStateSteps(sequence: unknown[]): YamlStateSpec {
     // be evaluated). Recognized by its meaning: the guard's condition must
     // be equivalent to NOT the state's own.
     const guard = errorGuard(ifStep);
-    const { content: falseContent, transition: falseTransition } = stripTrailingTransition(
-      guard ? guard.then : ifStep.else
-    );
+    const { content: falseContent, transition: falseTransition } = guard
+      ? stripTrailingTransition(guard.then)
+      : side(ifRawSteps[0]?.else, ifStep.else);
     // Re-derive the BoolExpr directly from the raw `if:` array here (rather
     // than trusting ifStep.cond, which parseActionSequence already computed
     // via the exact same parseConditionExpr this line calls) -- both are

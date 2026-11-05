@@ -276,10 +276,27 @@ function parallelBranchContainer(branch: unknown): unknown {
  * empty branch, and every block reads it the way it reads an empty one.
  * Needs the lists normalizeActionLists makes.
  */
-export function withoutNoOpSteps(actions: unknown[], nested = false): unknown[] {
-  const out = actions
-    .map(stepWithoutNoOps)
-    .filter((step) => step !== NO_OP_STEP && !isNoOpIf(step));
+export function withoutNoOpSteps(
+  actions: unknown[],
+  nested = false,
+  /** Saved from a canvas (Circuitry's metadata is there): a Choose that
+   * runs nothing is cards someone drew, kept so reopening shows them (bug
+   * #329: a Choose gating nothing vanished, five cards and their places
+   * with it). Its options' "yes" lines and its fall-through go on to what
+   * follows, as the reader builds any Choose. (An if that runs nothing is
+   * still dropped: the reader gives its empty sides no line on yet.) */
+  drawn = false
+): unknown[] {
+  const steps = actions.map((step) => stepWithoutNoOps(step, drawn));
+  const out = steps.flatMap((step, i) => {
+    if (step === NO_OP_STEP) return [];
+    if (!isNoOpIf(step)) return [step];
+    // #338: a drawn test the automation ends with, nothing on either side,
+    // is a card someone drew: kept (nothing follows it, so its sides need
+    // no line on, and a round trip writes it the same). Dropped, reopening
+    // lost the card. Anywhere else it is still dropped.
+    return drawn && !nested && i === steps.length - 1 ? [{ ...step, [KEPT_DRAWN_TEST]: true }] : [];
+  });
   while (nested && out.length > 0 && isConditionStepAction(out[out.length - 1])) out.pop();
   return out;
 }
@@ -290,8 +307,24 @@ function isConditionStepAction(action: unknown): boolean {
   );
 }
 
+/** Marks an `if` that does nothing kept as a drawn card (#338): the step
+ * parser reads it as a condition with no lines on. */
+export const KEPT_DRAWN_TEST = Symbol('kept drawn test');
+
+/** Whether a step is an `if` kept as a drawn card (#338). */
+export function isKeptDrawnTest(step: object): boolean {
+  return KEPT_DRAWN_TEST in step;
+}
+
 /** What stepWithoutNoOps returns for a step that does nothing at all. */
 const NO_OP_STEP = Symbol('no-op step');
+
+/** Whether a Choose's last case is a single condition with no steps. */
+function lastCaseIsOneEmptyTest(cases: unknown[]): boolean {
+  const last = cases[cases.length - 1];
+  if (!isEmptyCase(last)) return false;
+  return toList((last as Record<string, unknown>).conditions).length === 1;
+}
 
 /** A Choose case that runs nothing when it's the one that passes. */
 function isEmptyCase(option: unknown): boolean {
@@ -303,29 +336,30 @@ function isEmptyCase(option: unknown): boolean {
   );
 }
 
-function isNoOpIf(step: unknown): boolean {
+export function isNoOpIf(step: unknown): step is Record<string, unknown> {
   if (!isIfThenAction(step) || typeof step.enabled === 'string') return false;
   // A `condition: trigger` if does nothing either (bug #105: kept, a
   // routed one ended the run it passed for).
   return toList(step.then).length === 0 && toList(step.else).length === 0;
 }
 
-function stepWithoutNoOps(step: unknown): unknown {
+function stepWithoutNoOps(step: unknown, drawn: boolean): unknown {
   if (!step || typeof step !== 'object' || Array.isArray(step)) return step;
   const out: Record<string, unknown> = { ...step };
   for (const key of ['then', 'else', 'default', 'sequence'] as const) {
-    if (Array.isArray(out[key])) out[key] = withoutNoOpSteps(out[key] as unknown[], true);
+    if (Array.isArray(out[key])) out[key] = withoutNoOpSteps(out[key] as unknown[], true, drawn);
   }
   if (out.repeat && typeof out.repeat === 'object' && !Array.isArray(out.repeat)) {
     const repeat: Record<string, unknown> = { ...out.repeat };
-    if (Array.isArray(repeat.sequence)) repeat.sequence = withoutNoOpSteps(repeat.sequence, true);
+    if (Array.isArray(repeat.sequence))
+      repeat.sequence = withoutNoOpSteps(repeat.sequence, true, drawn);
     out.repeat = repeat;
   }
   if (Array.isArray(out.choose)) {
     out.choose = out.choose.map((choice) => {
       if (!choice || typeof choice !== 'object' || Array.isArray(choice)) return choice;
       const c: Record<string, unknown> = { ...choice };
-      if (Array.isArray(c.sequence)) c.sequence = withoutNoOpSteps(c.sequence, true);
+      if (Array.isArray(c.sequence)) c.sequence = withoutNoOpSteps(c.sequence, true, drawn);
       return c;
     });
     // With no default, a last case that runs nothing does nothing either
@@ -334,7 +368,14 @@ function stepWithoutNoOps(step: unknown): unknown {
     // the automation stopped there. Dropped from the end, and a Choose
     // left with no case at all is dropped too. (A template `enabled:`
     // keeps the block as written.)
-    if (toList(out.default).length === 0 && typeof out.enabled !== 'string') {
+    // Drawn (bug #329), it is kept -- unless its last case is one test
+    // with no steps: that test goes on by its "yes" and by its "no" alike,
+    // which the reader can't draw yet (it would give it two "no" lines).
+    if (
+      (!drawn || lastCaseIsOneEmptyTest(out.choose as unknown[])) &&
+      toList(out.default).length === 0 &&
+      typeof out.enabled !== 'string'
+    ) {
       const cases = [...(out.choose as unknown[])];
       const hadCases = cases.length > 0;
       while (cases.length > 0 && isEmptyCase(cases[cases.length - 1])) cases.pop();
@@ -344,8 +385,8 @@ function stepWithoutNoOps(step: unknown): unknown {
   }
   if (Array.isArray(out.parallel)) {
     out.parallel = out.parallel.map((branch) => {
-      if (Array.isArray(branch)) return withoutNoOpSteps(branch, true);
-      const kept = stepWithoutNoOps(branch);
+      if (Array.isArray(branch)) return withoutNoOpSteps(branch, true, drawn);
+      const kept = stepWithoutNoOps(branch, drawn);
       return kept === NO_OP_STEP ? [] : kept;
     });
     // A parallel whose branches all run nothing (`parallel: []` included,

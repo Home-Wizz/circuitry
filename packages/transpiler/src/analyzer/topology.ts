@@ -6,70 +6,124 @@ const { Graph, alg } = graphlib;
 type GraphInstance = InstanceType<typeof Graph>;
 
 /**
- * Find back-edges in the flow graph using DFS.
- * A back-edge is an edge that goes from a node to one of its ancestors
- * in the DFS tree, creating a cycle. Removing all back-edges makes the
- * graph acyclic.
+ * The lines back of the flow graph: removing them leaves it without a
+ * cycle. They are what the readers take as a loop going round.
  *
- * This is used to identify repeat/loop patterns structurally without
- * requiring any edge metadata.
+ * #283's last step (the maintainer, 2026-10-18): which lines these are
+ * depends on the drawing alone, never on the order its lines were drawn
+ * in. Found with the loops themselves -- regions of steps that can all
+ * reach each other (strongly connected), nested -- rather than by a
+ * depth-first search, which took whichever line it met last (the every
+ * small drawing test found drawings saved one way with their lines in one
+ * order and another way in the other). A loop's heads are its steps that
+ * lines from outside it lead into; its lines back are the lines from
+ * inside it to a head, and the loops inside it are read the same way
+ * once its heads are taken out. A loop with one way in has one head -- the
+ * same lines back as any depth-first search finds. A loop entered at
+ * several steps takes as heads those its run reaches first: the fewest
+ * lines from where the run starts (`firstEntries`, then the steps nothing
+ * leads into); equally near, all of them.
  *
- * Which edge of a loop is its back edge depends on where the walk first
- * reaches the loop. `firstEntries` are walked from first (bug #282): the
- * steps one trigger runs read a loop from where THAT trigger's run joins
- * it, not from where another trigger's does.
+ * `firstEntries` (bug #282): the steps one trigger runs read a loop from
+ * where THAT trigger's run joins it, not from where another trigger's does.
  */
 export function findBackEdges(flow: FlowGraph, firstEntries: string[] = []): Set<string> {
-  // Ignore hint edges — they are visual-only and must not affect loop detection
-  flow = {
-    ...flow,
-    edges: flow.edges.filter((e) => e.type !== 'hint' && e.type !== 'choose-hint'),
+  // Hint edges are visual only and must not affect loop detection.
+  const edges = flow.edges.filter((e) => e.type !== 'hint' && e.type !== 'choose-hint');
+  const out = new Map<string, FlowEdge[]>();
+  for (const edge of edges) out.set(edge.source, [...(out.get(edge.source) ?? []), edge]);
+  const targets = new Set(edges.map((e) => e.target));
+  const starts = flow.nodes.filter((n) => !targets.has(n.id)).map((n) => n.id);
+  /** How many lines from `from` each step is (breadth first: the same in
+   * any order). */
+  const distances = (from: string[]): Map<string, number> => {
+    const dist = new Map<string, number>();
+    let layer = [...new Set(from)];
+    for (const id of layer) dist.set(id, 0);
+    for (let d = 1; layer.length > 0; d++) {
+      const next: string[] = [];
+      for (const id of layer)
+        for (const e of out.get(id) ?? [])
+          if (!dist.has(e.target)) {
+            dist.set(e.target, d);
+            next.push(e.target);
+          }
+      layer = next;
+    }
+    return dist;
   };
+  const fromFirst = distances(firstEntries);
+  const fromAny = distances([...firstEntries, ...starts]);
+  const far = Number.POSITIVE_INFINITY;
+  const nearness = (id: string): [number, number] => [
+    fromFirst.get(id) ?? far,
+    fromAny.get(id) ?? far,
+  ];
 
   const backEdgeIds = new Set<string>();
-  const visited = new Set<string>();
-  const inStack = new Set<string>();
-
-  // Build adjacency map
-  const outgoing = new Map<string, FlowEdge[]>();
-  for (const edge of flow.edges) {
-    const existing = outgoing.get(edge.source) || [];
-    existing.push(edge);
-    outgoing.set(edge.source, existing);
-  }
-
-  // Find entry nodes (no incoming edges)
-  const incomingTargets = new Set(flow.edges.map((e) => e.target));
-  const entryNodes = flow.nodes.filter((n) => !incomingTargets.has(n.id)).map((n) => n.id);
-
-  function dfs(nodeId: string): void {
-    if (visited.has(nodeId)) return;
-    visited.add(nodeId);
-    inStack.add(nodeId);
-
-    for (const edge of outgoing.get(nodeId) || []) {
-      if (inStack.has(edge.target)) {
-        backEdgeIds.add(edge.id);
-      } else if (!visited.has(edge.target)) {
-        dfs(edge.target);
-      }
+  const readLoops = (within: Set<string>): void => {
+    for (const region of stronglyConnectedRegions(within, edges)) {
+      const entered = edges.filter((e) => region.has(e.target) && !region.has(e.source));
+      let heads = [...new Set(entered.map((e) => e.target))];
+      if (heads.length === 0) heads = [...region];
+      const best = heads
+        .map(nearness)
+        .reduce((a, b) => (b[0] < a[0] || (b[0] === a[0] && b[1] < a[1]) ? b : a));
+      heads = heads.filter((h) => {
+        const [x, y] = nearness(h);
+        return x === best[0] && y === best[1];
+      });
+      const headSet = new Set(heads);
+      for (const e of edges)
+        if (region.has(e.source) && headSet.has(e.target)) backEdgeIds.add(e.id);
+      const inner = new Set(region);
+      for (const h of heads) inner.delete(h);
+      readLoops(inner);
     }
-
-    inStack.delete(nodeId);
-  }
-
-  for (const entry of [...firstEntries, ...entryNodes]) {
-    dfs(entry);
-  }
-
-  // Handle disconnected components
-  for (const node of flow.nodes) {
-    if (!visited.has(node.id)) {
-      dfs(node.id);
-    }
-  }
-
+  };
+  readLoops(new Set(flow.nodes.map((n) => n.id)));
   return backEdgeIds;
+}
+
+/** The regions of the steps in `within` that can all reach each other along
+ * `edges` (two or more steps, or one with a line to itself), Tarjan's way.
+ * Which regions these are doesn't depend on any order. */
+function stronglyConnectedRegions(within: Set<string>, edges: FlowEdge[]): Set<string>[] {
+  const out = new Map<string, string[]>();
+  for (const e of edges)
+    if (within.has(e.source) && within.has(e.target))
+      out.set(e.source, [...(out.get(e.source) ?? []), e.target]);
+  const index = new Map<string, number>();
+  const low = new Map<string, number>();
+  const onStack = new Set<string>();
+  const stack: string[] = [];
+  const regions: Set<string>[] = [];
+  let counter = 0;
+  const visit = (v: string): void => {
+    index.set(v, counter);
+    low.set(v, counter);
+    counter++;
+    stack.push(v);
+    onStack.add(v);
+    for (const w of out.get(v) ?? []) {
+      if (!index.has(w)) {
+        visit(w);
+        low.set(v, Math.min(low.get(v)!, low.get(w)!));
+      } else if (onStack.has(w)) low.set(v, Math.min(low.get(v)!, index.get(w)!));
+    }
+    if (low.get(v) === index.get(v)) {
+      const region = new Set<string>();
+      let w: string;
+      do {
+        w = stack.pop()!;
+        onStack.delete(w);
+        region.add(w);
+      } while (w !== v);
+      if (region.size > 1 || (out.get(v) ?? []).includes(v)) regions.push(region);
+    }
+  };
+  for (const v of within) if (!index.has(v)) visit(v);
+  return regions;
 }
 
 /**

@@ -1,7 +1,13 @@
 import type { FlowGraph } from '@circuitry/shared';
 import { dump as yamlDump, load as yamlLoad } from 'js-yaml';
-import { runGraph } from '../simulation/graph-interpreter';
-import { type Inputs, type RunResult, runAutomation } from '../simulation/sm-interpreter';
+import { prepareGraphRun, runGraph } from '../simulation/graph-interpreter';
+import {
+  ENTITIES_MISSING,
+  type Inputs,
+  OPAQUE_SEED,
+  type RunResult,
+  runAutomation,
+} from '../simulation/sm-interpreter';
 
 /**
  * The import check: does the graph the parser
@@ -35,17 +41,45 @@ export interface ImportCheck {
   runs: number;
 }
 
-export function checkImport(sourceYaml: string, graph: FlowGraph, seeds = [1, 2, 3]): ImportCheck {
+export function checkImport(
+  sourceYaml: string,
+  graph: FlowGraph,
+  seeds = [1, 2, 3],
+  /** `seeded`: also with a fresh value each time a test is checked (a loop's
+   * test changes as it goes round; fixed states leave most loops running
+   * for ever, which can't be compared). Only for YAML Circuitry wrote --
+   * the save's run check -- which checks each test as often as the canvas
+   * does; YAML written elsewhere may not, and would differ for nothing. */
+  options: {
+    seeded?: boolean;
+    /** Steps a YAML run may take before it counts as not finishing (the
+     * graph's own budgets follow from it). The save's run check passes a
+     * smaller one than opening an automation: a run that doesn't finish on
+     * either side isn't compared, so a smaller budget only compares fewer
+     * long runs, never finds a difference that isn't there. */
+    steps?: number;
+  } = {}
+): ImportCheck {
+  const steps = options.steps ?? 20000;
+  // The graph's own readings, made once for every run below (#297).
+  const prepared = prepareGraphRun(graph);
   const source = firstAutomation(sourceYaml);
   const triggers = Math.max(1, countTriggers(source));
   let runs = 0;
+  const modes = options.seeded
+    ? (['fixed', 'missing', 'seeded'] as const)
+    : (['fixed', 'missing'] as const);
   for (let triggerIdx = 0; triggerIdx < triggers; triggerIdx++) {
-    for (const missing of [false, true]) {
+    for (const mode of modes) {
+      const missing = mode === 'missing';
       for (const seed of seeds) {
-        const inputs: Inputs = { ...fixedStatesFor(source, seed, missing), triggerIdx };
+        const inputs: Inputs =
+          mode === 'seeded'
+            ? { seed, triggerIdx }
+            : { ...fixedStatesFor(source, seed, missing), triggerIdx };
         let expected: RunResult;
         try {
-          expected = runAutomation(source, inputs, 20000);
+          expected = runAutomation(source, inputs, steps);
         } catch (e) {
           return { verdict: 'unchecked', detail: `the YAML: ${String(e).slice(0, 200)}`, runs };
         }
@@ -57,7 +91,12 @@ export function checkImport(sourceYaml: string, graph: FlowGraph, seeds = [1, 2,
           // ten times as long for nothing).
           // A YAML that didn't finish: a short graph run tells whether the
           // canvas finishes (a long loop on both sides isn't compared).
-          actual = runGraph(graph, inputs, expected.finished ? 40000 : 1000);
+          actual = runGraph(
+            graph,
+            inputs,
+            expected.finished ? 2 * steps : Math.min(1000, steps),
+            prepared
+          );
         } catch (e) {
           return { verdict: 'unchecked', detail: `the graph: ${String(e).slice(0, 200)}`, runs };
         }
@@ -67,14 +106,14 @@ export function checkImport(sourceYaml: string, graph: FlowGraph, seeds = [1, 2,
         if (!expected.finished) {
           if (!actual.finished) continue;
           try {
-            expected = runAutomation(source, inputs, 400000);
+            expected = runAutomation(source, inputs, 20 * steps);
           } catch (e) {
             return { verdict: 'unchecked', detail: `the YAML: ${String(e).slice(0, 200)}`, runs };
           }
           if (!expected.finished) {
             return {
               verdict: 'different',
-              detail: `trigger ${triggerIdx + 1}, states ${seed}${missing ? ' with entities missing' : ''}: the automation never finished, the canvas ran ${actual.trace.length} step(s)`,
+              detail: `trigger ${triggerIdx + 1}, ${mode === 'seeded' ? 'changing states' : 'states'} ${seed}${missing ? ' with entities missing' : ''}: the automation never finished, the canvas ran ${actual.trace.length} step(s)`,
               runs,
             };
           }
@@ -84,7 +123,7 @@ export function checkImport(sourceYaml: string, graph: FlowGraph, seeds = [1, 2,
         if (!actual.finished || a !== b) {
           return {
             verdict: 'different',
-            detail: `trigger ${triggerIdx + 1}, states ${seed}${missing ? ' with entities missing' : ''}: the automation ran ${expected.trace.length} step(s), the canvas ${actual.finished ? actual.trace.length : 'never finished'}`,
+            detail: `trigger ${triggerIdx + 1}, ${mode === 'seeded' ? 'changing states' : 'states'} ${seed}${missing ? ' with entities missing' : ''}: the automation ran ${expected.trace.length} step(s), the canvas ${actual.finished ? actual.trace.length : 'never finished'}`,
             runs,
           };
         }
@@ -124,6 +163,10 @@ export function fixedStatesFor(
         : 'off';
     if (missing && next() < 1 / 3) delete states[entity];
   }
+  // Conditions these states don't model read a value of their own, fixed
+  // for the run (sm-interpreter.ts, opaqueLeaf).
+  states[OPAQUE_SEED] = String(seed);
+  if (missing) states[ENTITIES_MISSING] = '1';
   return states;
 }
 

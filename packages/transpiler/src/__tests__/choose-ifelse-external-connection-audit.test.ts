@@ -129,6 +129,7 @@ mode: restart
 
     expect(result.success).toBe(true);
     expect(result.errors ?? []).toEqual([]);
+    expect(result.yaml).toBeDefined();
     const yamlOut = result.yaml ?? '';
 
     // The exact corruption this guard was built around: a stubbed
@@ -232,13 +233,13 @@ mode: single
     const after = transpiler.analyzeTopology(graph);
     expect(after.isTree).toBe(false); // now a real converging shape
 
-    // #262 (option 2, 2026-10-11): the second trigger's line goes straight
-    // to the else step and through the if, whose path doesn't always get
-    // there and is also the first trigger's: whether the else step should
-    // run either way can't be told from the drawing, so it is refused with
-    // the reason rather than saved one way or the other.
+    // The second trigger runs both the if and the else step, which meet
+    // at the else step (#262), and the if is also the first trigger's.
+    // Refused until #341; now the second trigger's run gets its own copy
+    // of the if, whose ends lead to the else step (the save's own check runs
+    // it against the canvas).
     const result = transpiler.transpile(graph);
-    expect(result.success).toBe(false);
-    expect(result.errors?.[0]).toMatch(/line straight to/);
+    expect(result.errors ?? []).toEqual([]);
+    expect(result.yaml).toBeDefined();
   });
 });

@@ -1,5 +1,6 @@
 import type { FlowGraph } from '@circuitry/shared';
 import type { PathEnd } from '../verification/extractFromGraph';
+import { type ChooseFallThrough, chooseFallThroughs } from './choose-fall-through';
 import { listHeads } from './list-members';
 import { normalizeGraph } from './normalize';
 import { pathEndStopId } from './path-endings';
@@ -18,6 +19,11 @@ export interface ConventionMarkers {
    * would otherwise have run after it (decision D1): where normalizeGraph
    * adds a `stop`. */
   pathEnds: PathEnd[];
+  /** Where a Choose card carries on when none of its options passes and no
+   * "Otherwise" line is drawn (decision D1, rule 1), and whether it then
+   * gates nothing: the canvas draws that path, saving warns about the
+   * latter. */
+  fallThroughs: ChooseFallThrough[];
 }
 
 export function conventionMarkers(flow: FlowGraph): ConventionMarkers {
@@ -37,5 +43,5 @@ export function conventionMarkers(flow: FlowGraph): ConventionMarkers {
     if (e.target !== pathEndStopId(e.source, handle)) continue;
     pathEnds.push(handle ? { nodeId: e.source, handle } : { nodeId: e.source });
   }
-  return { listMembers, pathEnds };
+  return { listMembers, pathEnds, fallThroughs: chooseFallThroughs(flow, normalized) };
 }

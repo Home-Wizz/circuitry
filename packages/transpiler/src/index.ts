@@ -1,6 +1,7 @@
 // Main transpiler
 
 export type { ConventionMarkers } from './analyzer/convention-markers';
+export { type ChooseFallThrough, chooseFallThroughs } from './analyzer/choose-fall-through';
 export { conventionMarkers } from './analyzer/convention-markers';
 export { isStateMachineVariableName } from './analyzer/state-machine-variables';
 export type { TopologyAnalysis } from './analyzer/topology';

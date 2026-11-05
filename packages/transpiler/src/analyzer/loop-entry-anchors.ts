@@ -69,14 +69,27 @@ function isUntilBackEdge(edge: FlowEdge, nodesById: Map<string, FlowNode>): bool
 
 /** Could this back-edge into `target` belong to a loop other than an until
  * whose test is somewhere else? (See the doc comment above.) */
-function isOtherLoopBackEdge(edge: FlowEdge, nodesById: Map<string, FlowNode>): boolean {
+function isOtherLoopBackEdge(
+  edge: FlowEdge,
+  nodesById: Map<string, FlowNode>,
+  /** Whether `id` is on `head`'s "yes" side, going forward. */
+  onYesSide: (head: string, id: string) => boolean
+): boolean {
   const source = nodesById.get(edge.source);
   const target = nodesById.get(edge.target);
   if (!source || !target) return false;
   if (isUntilBackEdge(edge, nodesById)) return true;
   if (target.type === 'condition' && blockKey(target) === 'repeat_while') return true;
   if (source.type !== 'condition') return target.type === 'condition'; // while body end
-  if (typeof blockKey(source) === 'string') return target.type === 'condition'; // body exit into a while head
+  // A block's way out into a while head: from the head's body, its "yes"
+  // side. #308 (#292's class): an If/Else card on the head's "no" side
+  // going back is no while body's end; counted as one, an until round the
+  // two met it here, its entry was moved, and the head read as that
+  // inner loop's until test -- an error left the loop where the
+  // automation goes round (the every-small-drawing test, reopened without
+  // hints).
+  if (typeof blockKey(source) === 'string')
+    return target.type === 'condition' && onYesSide(target.id, source.id);
   return edge.sourceHandle === 'true'; // a count test, or a do-while's (bug #259)
 }
 
@@ -132,7 +145,15 @@ function anchorOne(flow: FlowGraph): FlowGraph | null {
       (e) => isUntilBackEdge(e, nodesById) || isDoWhileAroundWhile(e)
     );
     if (untilEdges.length === 0) continue;
-    const loopEdges = backEdges.filter((e) => isOtherLoopBackEdge(e, nodesById));
+    const onYesSide = (head: string, id: string) =>
+      edges.some(
+        (e) =>
+          e.source === head &&
+          e.sourceHandle === 'true' &&
+          !backEdgeIds.has(e.id) &&
+          forwardReach(e.target, id)
+      );
+    const loopEdges = backEdges.filter((e) => isOtherLoopBackEdge(e, nodesById, onYesSide));
     const sources = new Set(loopEdges.map((e) => e.source));
     if (sources.size < 2) continue;
 

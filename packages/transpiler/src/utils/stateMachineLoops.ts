@@ -68,6 +68,27 @@ export function loopLimitStep(index: number): Record<string, unknown> {
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
+/** `steps` with `check` put before each move to one of `targets`
+ * (`variables: { current_node: <target> }`), at any depth (#292: a while
+ * loop whose round is on its test's "no" side checks its limit where a
+ * round goes into the body, not on the side that leaves -- which also
+ * takes a test that can't be checked out of the loop, as HA does). */
+export function beforeMovesInto(steps: unknown[], targets: string[], check: unknown): unknown[] {
+  const into = (value: unknown): unknown => {
+    if (Array.isArray(value)) return beforeMovesInto(value, targets, check);
+    if (!isRecord(value)) return value;
+    return Object.fromEntries(Object.entries(value).map(([key, inner]) => [key, into(inner)]));
+  };
+  return steps.flatMap((step) => {
+    const moves =
+      isRecord(step) &&
+      isRecord(step.variables) &&
+      typeof step.variables.current_node === 'string' &&
+      targets.includes(step.variables.current_node);
+    return moves ? [check, step] : [into(step)];
+  });
+}
+
 /** Whether a step is loop bookkeeping (by its alias and shape). */
 export function isLoopBookkeeping(step: unknown): boolean {
   return (
@@ -83,12 +104,50 @@ function afterBookkeeping(steps: unknown[]): unknown[] {
   return first === -1 ? [] : steps.slice(first);
 }
 
+/** Whether a step only moves to a state (`variables: { current_node }`). */
+function isMove(step: unknown): boolean {
+  return (
+    isRecord(step) &&
+    Object.keys(step).length === 1 &&
+    isRecord(step.variables) &&
+    Object.keys(step.variables).length === 1 &&
+    typeof step.variables.current_node === 'string'
+  );
+}
+
+/** `value` without a loop limit just before a move, at any depth (#292). */
+function withoutLimitsBeforeMoves(value: unknown): unknown {
+  if (Array.isArray(value))
+    return value
+      .filter(
+        (step, i) =>
+          !(
+            isLoopBookkeeping(step) &&
+            isRecord(step) &&
+            step.alias === LOOP_LIMIT_ALIAS &&
+            isMove(value[i + 1])
+          )
+      )
+      .map(withoutLimitsBeforeMoves);
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, inner]) => [key, withoutLimitsBeforeMoves(inner)])
+  );
+}
+
 /** A state's steps without its loop bookkeeping: the steps at its start,
- * and those at the start of its condition's yes side. */
+ * those at the start of its condition's yes side and "no" side (#339), and
+ * (#292) a limit just before a move into a loop's body. */
 export function withoutLoopBookkeeping(sequence: unknown[]): unknown[] {
-  return afterBookkeeping(sequence).map((step) =>
+  const steps = afterBookkeeping(sequence).map((step) =>
     isRecord(step) && 'if' in step && Array.isArray(step.then)
-      ? { ...step, then: afterBookkeeping(step.then) }
+      ? {
+          ...step,
+          then: afterBookkeeping(step.then),
+          // #344: a limit opening the "no" side (#339's round that fans out).
+          ...(Array.isArray(step.else) ? { else: afterBookkeeping(step.else) } : {}),
+        }
       : step
   );
+  return withoutLimitsBeforeMoves(steps) as unknown[];
 }

@@ -318,6 +318,7 @@
     "orRoleLabel": "Or",
     "notRoleLabel": "Not",
     "defaultLabel": "Otherwise",
+    "fallThroughLabel": "None matched → carries on",
     "conditionLabel": "Condition Type",
     "types": {
       "state": "State",

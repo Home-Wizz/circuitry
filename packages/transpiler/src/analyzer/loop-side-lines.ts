@@ -121,3 +121,33 @@ export function loopOnNoSide(flow: FlowGraph): { step: string; test: string } | 
   }
   return null;
 }
+
+/**
+ * Whether `id` is on a branch of a fan-out: a step two or more lines go
+ * on from (a test's on the same side). Asked before naming a loop in a
+ * parallel as the reason a save was refused: a loop with no fan-out
+ * before it isn't in one, and the reason would be wrong.
+ */
+export function onAFanOutBranch(flow: FlowGraph, id: string): boolean {
+  const edges = flow.edges.filter((e) => e.type !== 'hint' && e.type !== 'choose-hint');
+  const backEdges = findBackEdges(flow);
+  const forward = edges.filter((e) => !backEdges.has(e.id));
+  const sides = new Map<string, string[]>();
+  for (const e of forward) {
+    const key = `${e.source}\u0000${e.sourceHandle ?? ''}`;
+    sides.set(key, [...(sides.get(key) ?? []), e.target]);
+  }
+  for (const targets of sides.values()) {
+    if (targets.length < 2) continue;
+    const seen = new Set<string>();
+    const queue = [...targets];
+    while (queue.length > 0) {
+      const at = queue.shift()!;
+      if (at === id) return true;
+      if (seen.has(at)) continue;
+      seen.add(at);
+      for (const e of forward) if (e.source === at) queue.push(e.target);
+    }
+  }
+  return false;
+}

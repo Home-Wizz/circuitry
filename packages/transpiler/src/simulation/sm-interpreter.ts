@@ -1,5 +1,7 @@
 import { haBoolean as cvBoolean, haCoerceAutomation } from '@circuitry/shared';
+import { stripDottedOnlyConditionFields } from '../utils/conditionFields';
 import { load as yamlLoad } from 'js-yaml';
+import { isStateMachinePositionName } from '../analyzer/state-machine-variables';
 
 const CONTAINER_KEYS = new Set([
   'sequence',
@@ -37,14 +39,24 @@ const CONTAINER_KEYS = new Set([
  *   a condition list stops at the first error; and/or/not raise it after
  *   checking the rest; `if`/choose/while/a condition step/the top-level
  *   `conditions:` treat it as false, but `repeat: until` stops the loop.
- * - `{ seed }`: each evaluation of a given condition returns the next value
- *   of a pseudo-random sequence keyed by (seed, that condition's canonical
- *   content, how many times it has been evaluated so far). Two programs
- *   that evaluate the same conditions in the same order see the same
- *   values, and a `while`/`until` loop on a sensor terminates. A template
+ * - `{ seed }`: a condition reads a value of a pseudo-random sequence keyed
+ *   by (seed, that condition's canonical content, which reading it is). A
+ *   reading moves on to the next value only when the run has done something
+ *   (a service call, a delay, a wait, ...) since that condition was last
+ *   read: one read again at once reads the same, however the logic is
+ *   written, and the order parallel branches run in doesn't change what a
+ *   condition reads. A `while`/`until` loop on a sensor whose rounds do
+ *   something terminates; one whose rounds do nothing reads the same each
+ *   round, as in HA. A template
  *   over variables only (the state machine's `current_node`, a count
  *   loop's counter) is always computed, never randomized.
  */
+
+/** Keys fixedStatesFor adds to fixed states (no dot: never an entity):
+ * the seed for conditions they don't model, and whether entities are
+ * missing (see opaqueLeaf). */
+export const OPAQUE_SEED = '__opaque_seed';
+export const ENTITIES_MISSING = '__entities_missing';
 
 export interface RunResult {
   /** One entry per executed service call / delay, e.g. `light.turn_on light.a`. */
@@ -95,6 +107,62 @@ function canonical(value: unknown): unknown {
   return value;
 }
 
+/** What a condition tests, as a seeded leaf's key: the fields Home
+ * Assistant reads, lists as sets and numbers as text -- so the canvas and
+ * the YAML written from it draw the same values even where one writes a
+ * condition otherwise (a legacy condition's stray `options: {}` or
+ * `target:`, dropped in the YAML: the save's run check, the hard-case
+ * corpus's bug120). */
+const LEAF_FIELDS = [
+  'condition',
+  'entity_id',
+  'device_id',
+  'state',
+  'attribute',
+  'above',
+  'below',
+  'value_template',
+  'after',
+  'before',
+  'after_offset',
+  'before_offset',
+  'weekday',
+  'zone',
+  'event',
+  'id',
+  'for',
+  'match',
+  'type',
+  'domain',
+];
+function leafKey(c: Record<string, unknown>): string {
+  const norm = (v: unknown): unknown =>
+    Array.isArray(v)
+      ? v.map((x) => (typeof x === 'object' ? JSON.stringify(canonical(x)) : String(x))).sort()
+      : typeof v === 'object' && v !== null
+        ? JSON.stringify(canonical(v))
+        : String(v);
+  const out: Record<string, unknown> = {};
+  for (const field of LEAF_FIELDS) {
+    if (!(field in c)) continue;
+    const v = c[field];
+    // One entity or state is a list of one, as HA reads it.
+    out[field] =
+      (field === 'entity_id' || field === 'state') && !Array.isArray(v) ? norm([v]) : norm(v);
+  }
+  // A condition of an integration's own (`illuminance.is_value`,
+  // `occupancy.is_not_detected`) says what it reads in `target:` and
+  // `options:`: two of them on other sensors or thresholds are other tests.
+  // Read as Home Assistant reads it, the writer and the gate too
+  // (stripDottedOnlyConditionFields): a legacy condition's stray
+  // `target:`/`options:`, and a sun condition's stray `target:`, don't
+  // count (#120's: the canvas kept a stray target the YAML drops).
+  const read = stripDottedOnlyConditionFields(c.condition, c);
+  for (const field of ['target', 'options'] as const)
+    if (read[field] !== undefined) out[field] = norm(read[field]);
+  return JSON.stringify(out);
+}
+
 /** FNV-1a over a string, mapped to [0, 1). */
 function hashUnit(text: string): number {
   let h = 0x811c9dc5;
@@ -102,6 +170,15 @@ function hashUnit(text: string): number {
     h ^= text.charCodeAt(i);
     h = Math.imul(h, 0x01000193) >>> 0;
   }
+  // FNV-1a alone barely moves its top bits for a change in the last
+  // character, which is where a test's reading number goes: without this
+  // mix (murmur3's finalizer) one test's readings came out nearly all
+  // alike, so a loop on a "random" sensor read the same each round.
+  h = (h ^ (h >>> 16)) >>> 0;
+  h = Math.imul(h, 0x85ebca6b) >>> 0;
+  h = (h ^ (h >>> 13)) >>> 0;
+  h = Math.imul(h, 0xc2b2ae35) >>> 0;
+  h = (h ^ (h >>> 16)) >>> 0;
   return h / 4294967296;
 }
 
@@ -134,6 +211,20 @@ export interface Runtime {
   run: () => RunResult;
 }
 
+/** Whether a list of steps ends by moving a state machine on: its last step
+ * sets the machine's position (`current_node`, or a branch machine's). */
+function endsByMoving(steps: unknown): boolean {
+  if (!Array.isArray(steps) || steps.length === 0) return false;
+  const last = steps[steps.length - 1] as Record<string, unknown> | null;
+  const vars = last?.variables;
+  return (
+    vars !== null &&
+    typeof vars === 'object' &&
+    !Array.isArray(vars) &&
+    Object.keys(vars).some(isStateMachinePositionName)
+  );
+}
+
 export function createRuntime(
   config: Record<string, unknown>,
   inputs: Inputs = {},
@@ -147,8 +238,9 @@ export function createRuntime(
   const triggerIdx = String((inputs as { triggerIdx?: number }).triggerIdx ?? 0);
   const states = (seed === null ? { ...inputs } : {}) as Record<string, string | number>;
   delete states.triggerIdx;
-  const readCounts = new Map<string, number>();
   const trace: string[] = [];
+  /** Per test: which reading it is at, and the trace's length then. */
+  const readings = new Map<string, { n: number; at: number }>();
   const topVars = { ...((config.variables as Record<string, unknown>) ?? {}) };
   delete topVars._circuitry_metadata;
   // `trigger.idx` is the index of the trigger that fired, as a string (HA),
@@ -366,11 +458,46 @@ export function createRuntime(
     return value;
   }
 
+  /**
+   * Fixed states with an opaque seed (fixedStatesFor's): a condition they
+   * don't model -- sun, time, zone, a device's, an integration's own
+   * (`illuminance.is_value`, `occupancy.is_detected`), a template or a
+   * `for:` they can't evaluate -- reads one value for the whole run, picked
+   * by the seed and what it tests, as a real one holds still while a run
+   * takes its moments. With entities missing, one that names entities
+   * can't be checked a third of the time (an error, as HA raises for an
+   * unknown entity). The canvas and the YAML written from it read the same
+   * value, so an automation using them is checked instead of skipped (the
+   * maintainer's automations use them throughout, 2026-10-25).
+   */
+  function opaqueLeaf(c: Record<string, unknown>): boolean {
+    const key = `${states[OPAQUE_SEED]}|${leafKey(c)}`;
+    // As Home Assistant reads it: a sun condition's stray `target:` names
+    // nothing (#120).
+    const read = stripDottedOnlyConditionFields(c.condition, c);
+    const namesEntities =
+      read.entity_id !== undefined || read.target !== undefined || read.device_id !== undefined;
+    if (
+      states[ENTITIES_MISSING] !== undefined &&
+      namesEntities &&
+      hashUnit(`missing|${key}`) < 1 / 3
+    )
+      throw new CondError();
+    return hashUnit(key) < 0.5;
+  }
+
   /** A seeded leaf's next value -- see the file doc comment. */
   function randomLeaf(c: Record<string, unknown>): boolean {
-    const key = JSON.stringify(canonical(c));
-    const n = readCounts.get(key) ?? 0;
-    readCounts.set(key, n + 1);
+    // The n-th reading of this test: a reading moves on to the next value
+    // only when the run has done something since this test was last read
+    // (states change only as the run goes on). Counted per test, so the
+    // order parallel branches run in doesn't change what a test reads, and
+    // a test read again at once (one written twice, or a Choose and the
+    // same if/else) reads the same.
+    const key = leafKey(c);
+    const last = readings.get(key);
+    const n = last === undefined ? 0 : last.at === trace.length ? last.n : last.n + 1;
+    readings.set(key, { n, at: trace.length });
     return hashUnit(`${seed}|${key}|${n}`) < 0.5;
   }
 
@@ -418,7 +545,16 @@ export function createRuntime(
         ) {
           return randomLeaf(c);
         }
-        if (seed === null) return templateIsTrue(renderValue(c.value_template));
+        if (seed === null) {
+          try {
+            return templateIsTrue(renderValue(c.value_template));
+          } catch (e) {
+            // A template reading what fixed states don't hold: an opaque
+            // reading, when the run has one (see opaqueLeaf).
+            if (states[OPAQUE_SEED] === undefined) throw e;
+            return opaqueLeaf(c);
+          }
+        }
         try {
           return templateIsTrue(renderValue(c.value_template));
         } catch {
@@ -436,6 +572,7 @@ export function createRuntime(
     // value template) throws, so a check never passes on a reading HA
     // wouldn't make.
     const unmodelled = ['attribute', 'for', 'match', 'value_template'].filter((k) => k in c);
+    if (unmodelled.length > 0 && states[OPAQUE_SEED] !== undefined) return opaqueLeaf(c);
     if (unmodelled.length > 0) {
       throw new Error(`condition not supported with fixed states: ${JSON.stringify(c)}`);
     }
@@ -469,6 +606,7 @@ export function createRuntime(
         });
       }
       default:
+        if (states[OPAQUE_SEED] !== undefined) return opaqueLeaf(c);
         throw new Error(`condition not supported without a seed: ${JSON.stringify(c)}`);
     }
   }
@@ -492,11 +630,18 @@ export function createRuntime(
    * holding only `if: [{condition: not, conditions: <the same test>}]`,
    * then (false) / else (error). It re-reads the test right away, which HA
    * does within the same step; modelled as the same reading, not a new one
-   * (a seeded leaf would otherwise draw its next value). */
+   * (a seeded leaf would otherwise draw its next value). Only the guard the
+   * state machine writes, whose "yes" side and error side each end by
+   * setting its position (`current_node`, or a branch machine's): the same
+   * shape with steps of its own -- native writing a Choose whose second
+   * option is only `not: <the first's test>`, in a native automation or a
+   * native stretch of a state machine -- checks the test twice, as the
+   * Choose and the drawing do (bug #324). */
   function errorGuardOf(step: Record<string, unknown>): Record<string, unknown> | null {
     const branch = step.else;
     if (!Array.isArray(branch) || branch.length !== 1) return null;
     const guard = branch[0] as Record<string, unknown>;
+    if (!endsByMoving(step.then) || !endsByMoving(guard?.else)) return null;
     const test = Array.isArray(guard?.if) ? guard.if : null;
     if (!test || test.length !== 1) return null;
     const inner = test[0] as Record<string, unknown>;

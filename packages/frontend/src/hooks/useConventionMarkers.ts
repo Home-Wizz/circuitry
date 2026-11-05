@@ -15,7 +15,7 @@ let cached: {
   value: ConventionMarkers;
 } | null = null;
 
-const EMPTY: ConventionMarkers = { listMembers: {}, pathEnds: [] };
+const EMPTY: ConventionMarkers = { listMembers: {}, pathEnds: [], fallThroughs: [] };
 
 function markersFor(state: ReturnType<typeof useFlowStore.getState>): ConventionMarkers {
   const { nodes, edges, toFlowGraph } = state;
@@ -64,4 +64,16 @@ export function useConventionMarkers(nodeId: string): NodeConventionMarkers {
       .split(',')
       .filter((h): h is 'true' | 'false' | 'out' => h === 'true' || h === 'false' || h === 'out'),
   };
+}
+
+/** Every Choose's "None matched" path, for the canvas to draw, and whether
+ * the Choose gates nothing (saving warns). The same array while the
+ * reading doesn't change. */
+export function useChooseFallThroughs(): ConventionMarkers['fallThroughs'] {
+  return useFlowStore((s) => markersFor(s).fallThroughs);
+}
+
+/** The same, read once from the store's current graph (outside React). */
+export function currentChooseFallThroughs(): ConventionMarkers['fallThroughs'] {
+  return markersFor(useFlowStore.getState()).fallThroughs;
 }

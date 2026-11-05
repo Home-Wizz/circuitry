@@ -18,15 +18,23 @@ import { findBackEdges } from './topology';
 export function listHeads(flow: FlowGraph): Map<string, string> {
   const backEdges = findBackEdges(flow);
   const nodes = new Map(flow.nodes.map((n) => [n.id, n]));
+  // `out`/`into`: forward lines (the list's way in, and where its else
+  // leads going on); `lines`: every line out, back round ones included (a
+  // test's "yes" and "no" lines are all of them, as the walk, the state
+  // machine and its gate read them: a "yes" that also goes back round fans
+  // out, and a "no" going back round is the list's else).
   const out = new Map<string, FlowEdge[]>();
   const into = new Map<string, FlowEdge[]>();
+  const lines = new Map<string, FlowEdge[]>();
   for (const e of flow.edges) {
-    if (e.type === 'hint' || e.type === 'choose-hint' || backEdges.has(e.id)) continue;
+    if (e.type === 'hint' || e.type === 'choose-hint') continue;
+    lines.set(e.source, [...(lines.get(e.source) ?? []), e]);
+    if (backEdges.has(e.id)) continue;
     out.set(e.source, [...(out.get(e.source) ?? []), e]);
     into.set(e.target, [...(into.get(e.target) ?? []), e]);
   }
   const targets = (id: string, handle: string) =>
-    (out.get(id) ?? []).filter((e) => e.sourceHandle === handle).map((e) => e.target);
+    (lines.get(id) ?? []).filter((e) => e.sourceHandle === handle).map((e) => e.target);
   const sameIds = (a: string[], b: string[]) =>
     a.length === b.length && a.every((x) => b.includes(x)) && b.every((x) => a.includes(x));
   /** Where the list up to `id` goes when it fails: the nearest "no" edges
@@ -44,7 +52,11 @@ export function listHeads(flow: FlowGraph): Map<string, string> {
     const node = nodes.get(id);
     if (node?.type !== 'condition') return null;
     if (typeof (node.data as Record<string, unknown>)._blockKey === 'string') return null;
-    const ways = into.get(id) ?? [];
+    // Lines back round count: a test a line comes back into is a loop's
+    // test, never a list member (the maintainer, 2026-10-24).
+    const ways = flow.edges.filter(
+      (e) => e.target === id && e.type !== 'hint' && e.type !== 'choose-hint'
+    );
     if (ways.length !== 1 || ways[0].sourceHandle !== 'true') return null;
     const parent = ways[0].source;
     if (nodes.get(parent)?.type !== 'condition' || targets(parent, 'true').length !== 1) {
@@ -53,6 +65,19 @@ export function listHeads(flow: FlowGraph): Map<string, string> {
     const listElse = elseOf(parent, new Set(seen));
     const own = targets(id, 'false');
     if (own.length > 0 && !sameIds(own, listElse)) return null;
+    // The list's else leading round into it -- by forward lines, the last
+    // one possibly a line back into it -- makes it where the branches meet
+    // (#26), not a member (the every-small-drawing test, tier single4).
+    const backInto = flow.edges.filter((e) => e.target === id && backEdges.has(e.id));
+    const fromElse = new Set<string>();
+    const queue = [...listElse];
+    while (queue.length > 0) {
+      const at = queue.shift()!;
+      if (at === parent || fromElse.has(at)) continue;
+      fromElse.add(at);
+      for (const e of out.get(at) ?? []) queue.push(e.target);
+    }
+    if (fromElse.has(id) || backInto.some((e) => fromElse.has(e.source))) return null;
     return parent;
   };
   const heads = new Map<string, string>();

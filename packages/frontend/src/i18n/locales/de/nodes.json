@@ -318,6 +318,7 @@
     "orRoleLabel": "Oder",
     "notRoleLabel": "Nicht",
     "defaultLabel": "Sonst",
+    "fallThroughLabel": "Keine passt → geht weiter",
     "conditionLabel": "Bedingungstyp",
     "types": {
       "state": "Zustand",

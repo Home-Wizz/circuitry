@@ -1,3 +1,4 @@
+import { FALL_THROUGH_EDGE_PREFIX } from '@/lib/fall-through-edges';
 import type {
   FlowEdge,
   FlowGraph,
@@ -7,7 +8,7 @@ import type {
   HAScriptField,
   NodeValidationError,
 } from '@circuitry/shared';
-import { type ValidationEnv, validateNodeData } from '@circuitry/shared';
+import { automationSettingsIssues, type ValidationEnv, validateNodeData } from '@circuitry/shared';
 import {
   addEdge,
   applyEdgeChanges,
@@ -911,6 +912,51 @@ export function tabHasUnsavedChanges(tab: FlowTabState): boolean {
   return tab.originalSnapshot === null || buildOriginalSnapshot(tab) !== tab.originalSnapshot;
 }
 
+/**
+ * One thing that keeps a save from going ahead: a card with an error (what
+ * Home Assistant would refuse, or a field it needs left out) or the
+ * automation's own settings. `messages` are i18n keys.
+ */
+export interface SaveBlocker {
+  /** The card; none for the automation's settings. */
+  nodeId?: string;
+  nodeType?: string;
+  /** The card's own name, when it has one. */
+  alias?: string;
+  messages: string[];
+}
+
+/** A save refused before anything was sent, with each thing to fix. */
+export class SaveBlockedError extends Error {
+  constructor(readonly blockers: SaveBlocker[]) {
+    super(
+      `Cannot save: ${blockers.length} thing(s) Home Assistant would refuse or needs filled in. Fix the highlighted cards and settings before saving.`
+    );
+    this.name = 'SaveBlockedError';
+  }
+}
+
+/** What keeps the open automation from being saved, cards first in canvas order. */
+export function saveBlockers(
+  state: Pick<FlowState, 'nodes' | 'nodeErrors' | 'flowMetadata'>
+): SaveBlocker[] {
+  const blockers: SaveBlocker[] = [];
+  for (const node of state.nodes) {
+    const errors = state.nodeErrors.get(node.id);
+    if (!errors || errors.length === 0) continue;
+    const alias = (node.data as Record<string, unknown>).alias;
+    blockers.push({
+      nodeId: node.id,
+      nodeType: node.type,
+      alias: typeof alias === 'string' && alias.trim() !== '' ? alias : undefined,
+      messages: [...new Set(errors.map((e) => e.message))],
+    });
+  }
+  const settings = automationSettingsIssues({ max: state.flowMetadata.max });
+  if (settings.length > 0) blockers.push({ messages: settings.map((i) => i.message) });
+  return blockers;
+}
+
 /** What a save sends, and which tab it came from. */
 interface PreparedSave {
   tabId: string;
@@ -931,12 +977,8 @@ async function prepareSave(get: () => FlowState): Promise<PreparedSave> {
   // Validate all nodes first
   get().validateAllNodes();
   const state = get();
-  if (state.nodeErrors.size > 0) {
-    const errorCount = state.nodeErrors.size;
-    throw new Error(
-      `Cannot save: ${errorCount} node(s) have validation errors. Fix the highlighted nodes before saving.`
-    );
-  }
+  const blockers = saveBlockers(state);
+  if (blockers.length > 0) throw new SaveBlockedError(blockers);
 
   const graph = state.toFlowGraph();
   const sentSnapshot = buildOriginalSnapshot(state);
@@ -1753,6 +1795,7 @@ export const useFlowStore = create<FlowState>()(
           // Visual-only and structural edges are not deletable by the user
           if (
             edgeId.startsWith('hint-') ||
+            edgeId.startsWith(FALL_THROUGH_EDGE_PREFIX) ||
             edgeId.startsWith('choose-chain-') ||
             edgeId.startsWith('choose-hint-')
           )

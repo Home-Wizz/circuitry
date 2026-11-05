@@ -9,7 +9,19 @@ const LABEL_BG = 'hsl(var(--muted))';
 const LABEL_TEXT = 'hsl(var(--muted-foreground))';
 const LABEL_BORDER = 'hsl(var(--border))';
 
-export function ChooseDefaultEdge({ sourceX, sourceY, targetX, targetY }: EdgeProps) {
+/** A Choose card's labelled edge: its "Otherwise" line, or the "None
+ * matched" path Circuitry draws when there is none (dashed). */
+function ChooseLabelledEdge({
+  sourceX,
+  sourceY,
+  targetX,
+  targetY,
+  labelKey,
+  dashed,
+}: Pick<EdgeProps, 'sourceX' | 'sourceY' | 'targetX' | 'targetY'> & {
+  labelKey: 'conditions.defaultLabel' | 'conditions.fallThroughLabel';
+  dashed: boolean;
+}) {
   const { t } = useTranslation('nodes');
 
   // Pronounced "S" curve, same helper every other edge type uses now — see
@@ -24,9 +36,16 @@ export function ChooseDefaultEdge({ sourceX, sourceY, targetX, targetY }: EdgePr
         style={{
           stroke: EDGE_COLOR,
           strokeWidth: 2,
+          ...(dashed ? { strokeDasharray: '7 6' } : {}),
         }}
       />
-      <EdgeEndpointDots sourceX={sourceX} sourceY={sourceY} targetX={targetX} targetY={targetY} color={EDGE_COLOR} />
+      <EdgeEndpointDots
+        sourceX={sourceX}
+        sourceY={sourceY}
+        targetX={targetX}
+        targetY={targetY}
+        color={EDGE_COLOR}
+      />
       <EdgeLabelRenderer>
         <div
           style={{
@@ -45,16 +64,28 @@ export function ChooseDefaultEdge({ sourceX, sourceY, targetX, targetY }: EdgePr
               lineHeight: '16px',
               color: LABEL_TEXT,
               background: LABEL_BG,
-              border: `1px solid ${LABEL_BORDER}`,
+              border: `1px ${dashed ? 'dashed' : 'solid'} ${LABEL_BORDER}`,
               borderRadius: '10px',
               letterSpacing: '0.01em',
               whiteSpace: 'nowrap',
             }}
           >
-            {t('conditions.defaultLabel')}
+            {t(labelKey)}
           </span>
         </div>
       </EdgeLabelRenderer>
     </>
   );
+}
+
+export function ChooseDefaultEdge(props: EdgeProps) {
+  return <ChooseLabelledEdge {...props} labelKey="conditions.defaultLabel" dashed={false} />;
+}
+
+/** Where a Choose carries on when none of its options passes and no
+ * "Otherwise" line is drawn (decision D1, rule 1): drawn by the canvas from
+ * the transpiler's reading, not an edge of the graph (the maintainer,
+ * 2026-10-25). */
+export function ChooseFallThroughEdge(props: EdgeProps) {
+  return <ChooseLabelledEdge {...props} labelKey="conditions.fallThroughLabel" dashed />;
 }

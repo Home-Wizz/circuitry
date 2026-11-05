@@ -5,6 +5,7 @@ import { anchorParallelUntilBodies, anchorSharedLoopEntries } from './loop-entry
 import { writeOutLoopRounds } from './loop-rounds';
 import { writeOutMeetingLines } from './meeting-lines';
 import { normalizePathEndings } from './path-endings';
+import { writeOutRoundFlags } from './round-flags';
 
 /**
  * The graph as every strategy and both verifiers read it: a disabled step
@@ -35,14 +36,27 @@ export function normalizeGraph(
     copies = true,
     lines = true,
     stops = true,
-  }: { meetings?: boolean; copies?: boolean; lines?: boolean; stops?: boolean } = {}
+    flags = false,
+  }: {
+    meetings?: boolean;
+    copies?: boolean;
+    lines?: boolean;
+    stops?: boolean;
+    /** #134's round flags (round-flags.ts): only for a graph the writers
+     * refuse without them (FlowTranspiler), so nothing they write already
+     * changes. */
+    flags?: boolean;
+  } = {}
 ): FlowGraph {
   // A do-while's yes side going round and on to steps beside it, written
   // as a first round and a while (#265, loop-rounds.ts): a rewrite into
   // a graph a tree writes, like D5's copies, so not for the graph walk.
-  const anchored = copies
+  // Branches that go back round on only some paths, recorded in flags
+  // (#134, round-flags.ts): a rewrite too, so not for the graph walk.
+  const rounds = copies
     ? writeOutLoopRounds(anchoredGraph(flow, lines))
     : anchoredGraph(flow, lines);
+  const anchored = copies && flags ? writeOutRoundFlags(rounds) : rounds;
   return normalizePathEndings(meetings ? gateConditionMeetings(anchored) : anchored, {
     copies,
     stops,

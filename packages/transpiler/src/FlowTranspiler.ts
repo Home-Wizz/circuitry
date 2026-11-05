@@ -3,13 +3,22 @@ import { dump as yamlDump } from 'js-yaml';
 import { unwritableMeeting } from './analyzer/condition-meetings';
 import { untilLoopingBackToSeveral } from './analyzer/loop-entry-anchors';
 import { loopTestSharingItsListNo } from './analyzer/loop-reading';
-import { besideLoopJoinedElsewhere, loopOnNoSide } from './analyzer/loop-side-lines';
+import {
+  besideLoopJoinedElsewhere,
+  loopOnNoSide,
+  onAFanOutBranch,
+} from './analyzer/loop-side-lines';
 import { nodesReadingLoopVariable } from './analyzer/loop-variable';
+import {
+  branchesIntoALoopApart,
+  branchesRoundALoopEnteredTwice,
+  stepFreeLoop,
+} from './analyzer/loops';
 import { unwrittenMeetings } from './analyzer/meeting-lines';
 import { anchoredGraph, normalizeGraph } from './analyzer/normalize';
 import { unwritablePathEnd } from './analyzer/path-endings';
 import { stateMachineVariablesUsed } from './analyzer/state-machine-variables';
-import { analyzeTopology, type TopologyAnalysis } from './analyzer/topology';
+import { analyzeTopology, findBackEdges, type TopologyAnalysis } from './analyzer/topology';
 import { type ValidationResult, validateFlowGraph } from './analyzer/validator';
 import { type ParseResult, YamlParser } from './parser/YamlParser';
 import type { HAYamlOutput, TranspilerStrategy } from './strategies/base';
@@ -17,6 +26,7 @@ import { NativeStrategy } from './strategies/native';
 import { StateMachineStrategy } from './strategies/state-machine';
 import { nodeKey } from './utils/nodeKey';
 import { GraphClaimError } from './utils/theOnly';
+import { checkImport } from './verification/importCheck';
 import { verifyNativeOutput } from './verification/verifyNativeOutput';
 import { verifyStateMachineOutput } from './verification/verifyStateMachineOutput';
 
@@ -81,6 +91,37 @@ export interface TranspileResult {
 /**
  * Main transpiler class for converting React Flow graphs to Home Assistant YAML
  */
+/**
+ * The save's run check (2026-10-18, the every-small-drawing test): the
+ * gates read the output's shape, and a gate reading a shape the same wrong
+ * way as its writer agrees with it (#292-#294: native and its gate both).
+ * So each output that passes its gate is also run against the canvas, as
+ * opening an automation does (verification/importCheck.ts): the saved
+ * automation and the drawn graph, run on the same states for each trigger,
+ * must do the same. A native output that doesn't falls back to the state
+ * machine; a state-machine output that doesn't is refused, never saved --
+ * it would open read-only anyway. 'unchecked' (a step the interpreters
+ * don't model) passes, as it does on opening.
+ */
+function withRunCheck<T extends { valid: boolean; reason?: string }>(
+  verification: T,
+  yaml: string,
+  graph: FlowGraph
+): T | { valid: false; reason: string } {
+  if (!verification.valid) return verification;
+  // A smaller step budget than opening an automation: this runs on every
+  // save and preview (#297).
+  // Fixed states and entities missing only, as on opening. Not with a
+  // fresh value each time a test is checked: values are drawn per check of
+  // a test, so a reading that checks a test once more than the YAML (the
+  // canvas reads a list member by member) draws differently from then on
+  // and seems to differ where it doesn't -- a refusal when the state
+  // machine can't write the drawing either (#300).
+  const check = checkImport(yaml, graph, [1, 2, 3], { steps: 2000 });
+  if (check.verdict !== 'different') return verification;
+  return { valid: false, reason: `it runs differently from the canvas: ${check.detail}` };
+}
+
 export class FlowTranspiler {
   private strategies: TranspilerStrategy[] = [new NativeStrategy(), new StateMachineStrategy()];
 
@@ -102,6 +143,21 @@ export class FlowTranspiler {
    * Transpile a flow graph to Home Assistant YAML
    */
   transpile(input: unknown, options: YamlOptions = {}): TranspileResult {
+    const result = this.transpileWith(input, options, false);
+    if (result.success) return result;
+    // #134: branches going back round on only some paths, refused as
+    // drawn, are written with a flag per branch (round-flags.ts) -- only
+    // then, so an automation saved without flags is saved the same way.
+    const validation = this.validate(input);
+    if (!validation.success || !validation.graph) return result;
+    const plain = normalizeGraph(validation.graph);
+    if (normalizeGraph(validation.graph, { flags: true }).nodes.length === plain.nodes.length)
+      return result;
+    const flagged = this.transpileWith(input, options, true);
+    return flagged.success ? flagged : result;
+  }
+
+  private transpileWith(input: unknown, options: YamlOptions, flags: boolean): TranspileResult {
     const warnings: string[] = [];
 
     // Step 1: Validate the input
@@ -114,12 +170,45 @@ export class FlowTranspiler {
       };
     }
 
+    // A loop with no step in it: only tests or Joins going round. Home
+    // Assistant would check its tests about 20,000 times a second and stop
+    // the automation after 10,000 rounds; it is refused with how to fix it
+    // (analyzer/loops.ts, stepFreeLoop).
+    const emptyLoop = stepFreeLoop(validation.graph);
+    if (emptyLoop !== null) {
+      return {
+        success: false,
+        errors: [
+          `"${emptyLoop}" is on a loop with no step in it (only tests or Joins, or steps ` +
+            'that are turned off), so Home Assistant would check its tests about 20,000 times ' +
+            'a second and stop the automation after half a second. Put a step in the loop, ' +
+            'such as a delay or a wait, or end the loop.',
+        ],
+        warnings,
+      };
+    }
+
     // Step 1b: normalize (analyzer/normalize.ts). An until loop whose body
     // opens with another loop gets its own entry node, the way YamlParser
     // does for the same shape (bug #28, loop-entry-anchors.ts), and every
     // path that just ends gets one meaning (decision D1, path-endings.ts).
     // Generation AND verification both use the normalized graph.
-    const flow = normalizeGraph(validation.graph);
+    const flow = normalizeGraph(validation.graph, { flags });
+    // #285 / 773: branches of a fan-out going back round a loop entered at
+    // several places -- its meaning is still to be decided (analyzer/loops.ts).
+    const twiceEntered = branchesRoundALoopEnteredTwice(flow, findBackEdges(flow));
+    if (twiceEntered !== null) {
+      return {
+        success: false,
+        errors: [
+          `The branches after "${twiceEntered}" go back round a loop that is entered at more ` +
+            "than one step, so it can't be told where each goes round, which Home Assistant " +
+            "can't run as drawn. Lead the branches back to one step (through a Join, so the " +
+            'next round starts once both have finished), or move one of them out of the loop',
+        ],
+        warnings,
+      };
+    }
     // #109: an until test that loops back to several places normalizing
     // couldn't make into one (not clearly a parallel body): which of its
     // edges closes the loop can't be told, so nothing is guessed.
@@ -181,6 +270,22 @@ export class FlowTranspiler {
     const joined = besideLoopJoinedElsewhere(flow);
     if (joined) {
       return { success: false, errors: [besideJoinedMessage(joined)], warnings };
+    }
+    // #307, #314: branches of a fan-out going into a loop entered at several
+    // places at different steps (analyzer/loops.ts). After the refusals that
+    // name a more specific shape.
+    const apart = branchesIntoALoopApart(flow);
+    if (apart !== null) {
+      return {
+        success: false,
+        errors: [
+          `The branches after "${apart.step}" go into a loop at different steps ` +
+            `(${apart.entries.map((e) => `"${e}"`).join(', ')}), so it can't be told where ` +
+            "they meet, which Home Assistant can't run as drawn. Lead the branches into the " +
+            'loop at one step, or move one of them out of it',
+        ],
+        warnings,
+      };
     }
     // Step 2: Analyze topology
     const analysis = this.analyzeTopology(flow);
@@ -269,7 +374,9 @@ export class FlowTranspiler {
     // output is no longer given a free pass; Step 8 verifies it too.
     if (strategy.name === 'native') {
       const verification =
-        claim !== undefined ? { valid: false, reason: claim } : verifyNativeOutput(flow, yaml);
+        claim !== undefined
+          ? { valid: false, reason: claim }
+          : withRunCheck(verifyNativeOutput(flow, yaml), yaml, validation.graph);
       if (!verification.valid) {
         if (options.forceStrategy === 'native') {
           // The caller explicitly asked for native output -- per this
@@ -389,7 +496,11 @@ export class FlowTranspiler {
     }
 
     if (strategy.name === 'state-machine') {
-      const smVerification = verifyStateMachineOutput(flow, yaml);
+      const smVerification = withRunCheck(
+        verifyStateMachineOutput(flow, yaml),
+        yaml,
+        validation.graph
+      );
       if (!smVerification.valid) {
         // #134: two loops going back to the same step, neither inside the
         // other, where the state machine needs to know which encloses which
@@ -427,7 +538,7 @@ export class FlowTranspiler {
         // while whose test can't be evaluated; the canvas takes the no
         // side). The reason, not the gate's words for a bug.
         const noSide = loopOnNoSide(flow);
-        if (noSide !== null) {
+        if (noSide !== null && onAFanOutBranch(flow, noSide.test)) {
           return {
             success: false,
             errors: [
@@ -443,7 +554,7 @@ export class FlowTranspiler {
         // line of its own, one of the list of the condition before it,
         // inside a parallel branch. The reason, not the gate's words.
         const sharing = loopTestSharingItsListNo(flow);
-        if (sharing !== null) {
+        if (sharing !== null && onAFanOutBranch(flow, sharing.test)) {
           return {
             success: false,
             errors: [

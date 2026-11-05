@@ -1,3 +1,4 @@
+import type { ChooseFallThrough } from '@circuitry/transpiler';
 import { AlertTriangle, Check, Copy, Loader2, Save } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -22,6 +23,7 @@ import {
   HaIconPicker,
   HaLabelsPicker,
 } from '@/ha';
+import { currentChooseFallThroughs } from '@/hooks/useConventionMarkers';
 import { useHassConnection } from '@/hooks/useHassConnection';
 import { ChangedElsewhereError } from '@/lib/changed-elsewhere';
 import { getHomeAssistantAPI } from '@/lib/ha-api';
@@ -31,7 +33,14 @@ import {
   type RegistryMetadata,
   applyRegistryMetadata as setRegistryMetadata,
 } from '@/lib/registryMetadata';
-import { selectIsSaving, useFlowStore } from '@/store/flow-store';
+import {
+  type SaveBlocker,
+  SaveBlockedError,
+  selectIsSaving,
+  useFlowStore,
+} from '@/store/flow-store';
+import { ChooseGatesNothingDialog } from './ChooseGatesNothingDialog';
+import { SaveBlockersList } from './SaveBlockersList';
 
 const EMPTY_METADATA: RegistryMetadata = { icon: '', category: '', labels: [], area: '' };
 
@@ -61,6 +70,9 @@ export function AutomationSaveDialog({ isOpen, onClose, onSaved }: AutomationSav
 
   const [localDescription, setLocalDescription] = useState(flowDescription);
   const [error, setError] = useState<string | null>(null);
+  // What Home Assistant would refuse, card by card (Phase 4): shown as a
+  // list in place of the one-line error.
+  const [blockers, setBlockers] = useState<SaveBlocker[] | null>(null);
   const [suggestedName, setSuggestedName] = useState<string | null>(null);
   const [metadata, setMetadata] = useState<RegistryMetadata>(EMPTY_METADATA);
   const touchedFields = useRef<Set<keyof RegistryMetadata>>(new Set());
@@ -92,6 +104,7 @@ export function AutomationSaveDialog({ isOpen, onClose, onSaved }: AutomationSav
     if (isOpen) {
       setLocalDescription(flowDescription);
       setError(null);
+      setBlockers(null);
       setSuggestedName(null);
       touchedFields.current = new Set();
       loadedFromHa.current = false;
@@ -187,6 +200,7 @@ export function AutomationSaveDialog({ isOpen, onClose, onSaved }: AutomationSav
     }
 
     setError(null);
+    setBlockers(null);
 
     try {
       // Update the flow store with the description
@@ -208,9 +222,31 @@ export function AutomationSaveDialog({ isOpen, onClose, onSaved }: AutomationSav
       onClose();
     } catch (err) {
       if (err instanceof ChangedElsewhereError) replaceOutsideChanges.current = true;
-      const errorMessage = err instanceof Error ? err.message : t('errors:api.unknownError');
-      setError(errorMessage);
+      showSaveError(err);
     }
+  };
+
+  // A Choose that gates nothing is asked about first (the maintainer,
+  // 2026-10-25): the save waits for "Save anyway".
+  const [gatesNothing, setGatesNothing] = useState<{
+    fallThrough: ChooseFallThrough;
+    save: () => Promise<void>;
+  } | null>(null);
+  const checkedFirst = (save: () => Promise<void>) => () => {
+    const fallThrough = currentChooseFallThroughs().find((f) => f.gatesNothing);
+    if (fallThrough) setGatesNothing({ fallThrough, save });
+    else void save();
+  };
+  const saveChecked = checkedFirst(handleSave);
+
+  const showSaveError = (err: unknown) => {
+    if (err instanceof SaveBlockedError) {
+      setBlockers(err.blockers);
+      setError(null);
+      return;
+    }
+    setBlockers(null);
+    setError(err instanceof Error ? err.message : t('errors:api.unknownError'));
   };
 
   const handleClose = () => {
@@ -219,6 +255,7 @@ export function AutomationSaveDialog({ isOpen, onClose, onSaved }: AutomationSav
     if (isSaving) return;
     replaceOutsideChanges.current = false;
     setError(null);
+    setBlockers(null);
     setSuggestedName(null);
     onClose();
   };
@@ -242,6 +279,7 @@ export function AutomationSaveDialog({ isOpen, onClose, onSaved }: AutomationSav
     }
 
     setError(null);
+    setBlockers(null);
 
     try {
       // Get a unique name for the copy
@@ -258,8 +296,7 @@ export function AutomationSaveDialog({ isOpen, onClose, onSaved }: AutomationSav
       onSaved?.(resultId);
       onClose();
     } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : t('errors:api.unknownError');
-      setError(errorMessage);
+      showSaveError(err);
     }
   };
 
@@ -349,11 +386,15 @@ export function AutomationSaveDialog({ isOpen, onClose, onSaved }: AutomationSav
             disabled={isSaving}
           />
 
-          {error && (
-            <Alert variant="destructive">
-              <AlertTriangle className="h-4 w-4" />
-              <AlertDescription className="whitespace-pre-line">{error}</AlertDescription>
-            </Alert>
+          {blockers ? (
+            <SaveBlockersList blockers={blockers} onShowCard={handleClose} />
+          ) : (
+            error && (
+              <Alert variant="destructive">
+                <AlertTriangle className="h-4 w-4" />
+                <AlertDescription className="whitespace-pre-line">{error}</AlertDescription>
+              </Alert>
+            )
           )}
 
           <div className="flex flex-wrap justify-end gap-2">
@@ -363,7 +404,7 @@ export function AutomationSaveDialog({ isOpen, onClose, onSaved }: AutomationSav
             {(isUpdate || keptElsewhere) && (
               <Button
                 variant="outline"
-                onClick={handleSaveAsCopy}
+                onClick={checkedFirst(handleSaveAsCopy)}
                 disabled={isSaving || !flowName.trim()}
               >
                 {isSaving ? (
@@ -382,7 +423,7 @@ export function AutomationSaveDialog({ isOpen, onClose, onSaved }: AutomationSav
                   {/* biome-ignore lint/a11y/noNoninteractiveTabindex: a disabled button takes no focus or hover, so its tooltip hangs on this wrapper (Radix's own advice) */}
                   <span tabIndex={0}>
                     <Button
-                      onClick={handleSave}
+                      onClick={saveChecked}
                       disabled={isSaving || !flowName.trim() || Boolean(keptElsewhere)}
                     >
                       {isSaving ? (
@@ -406,7 +447,7 @@ export function AutomationSaveDialog({ isOpen, onClose, onSaved }: AutomationSav
                 </TooltipContent>
               </Tooltip>
             ) : (
-              <Button onClick={handleSave} disabled={isSaving || !flowName.trim()}>
+              <Button onClick={saveChecked} disabled={isSaving || !flowName.trim()}>
                 {isSaving ? (
                   <>
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -423,6 +464,15 @@ export function AutomationSaveDialog({ isOpen, onClose, onSaved }: AutomationSav
           </div>
         </div>
       </DialogContent>
+      <ChooseGatesNothingDialog
+        fallThrough={gatesNothing?.fallThrough ?? null}
+        onSaveAnyway={() => {
+          const save = gatesNothing?.save;
+          setGatesNothing(null);
+          if (save) void save();
+        }}
+        onClose={() => setGatesNothing(null)}
+      />
     </Dialog>
   );
 }

@@ -113,7 +113,9 @@ export function parseAutomationStructure(
   }
   // Every nested action list in list form, as HA reads it (bugs #62, #67),
   // without the steps that do nothing (bug #78).
-  const actions = withoutNoOpSteps(normalizeActionLists(toList(actionData)));
+  const variables = content.variables as Record<string, unknown> | undefined;
+  const drawn = !!variables && typeof variables === 'object' && '_circuitry_metadata' in variables;
+  const actions = withoutNoOpSteps(normalizeActionLists(toList(actionData)), false, drawn);
   const actionResults = parseActions(actions, {
     warnings,
     previousNodeIds: firstActionNodeIds,

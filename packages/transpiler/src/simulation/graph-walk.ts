@@ -1,5 +1,5 @@
 import type { FlowEdge, FlowGraph, FlowNode } from '@circuitry/shared';
-import { untilExit } from '../analyzer/loops';
+import { loopStructure, untilExit } from '../analyzer/loops';
 import { anchoredGraph, normalizeGraph } from '../analyzer/normalize';
 import { findBackEdges } from '../analyzer/topology';
 
@@ -84,7 +84,16 @@ export interface GraphWalkHooks {
  * itself, each test on its own (#128: an OR of them is the strategies'
  * way to write it, and is checked against this reading).
  */
-export function walkGraph(graph: FlowGraph, triggerIdx: number, hooks: GraphWalkHooks): void {
+/** What a walk reads from the graph alone, before any run: made once and
+ * passed to each of several runs of the same graph (the save's run check
+ * runs it six times or more, #297). */
+export interface PreparedWalk {
+  flow: FlowGraph;
+  loopView: FlowGraph;
+  backEdges: Set<string>;
+}
+
+export function prepareGraphWalk(graph: FlowGraph): PreparedWalk {
   const flow = normalizeGraph(graph, {
     meetings: false,
     copies: false,
@@ -98,17 +107,32 @@ export function walkGraph(graph: FlowGraph, triggerIdx: number, hooks: GraphWalk
   // such a test ended its loop on an error where the writers' if took
   // "no"). The steps are the same; only the guard question is asked here.
   const loopView = anchoredGraph(graph);
+  return { flow, loopView, backEdges: findBackEdges(flow) };
+}
+
+/**
+ * The walk's lookups over a prepared graph, and its reading of a list: for
+ * a condition with no line on its "no" side, `inheritedElse` gives its
+ * list's "no" lines, or null when it is no list member (the path ends).
+ * Exported so the list rule can be checked against every other reader of
+ * it on every small drawing (each reader keeps its own implementation).
+ */
+export function walkReader(prepared: Pick<PreparedWalk, 'flow' | 'backEdges'>) {
+  const { flow, backEdges } = prepared;
   const nodes = new Map(flow.nodes.map((n) => [n.id, n]));
   const edges = flow.edges.filter((e) => e.type !== 'hint' && e.type !== 'choose-hint');
-  const backEdges = findBackEdges(flow);
-  const out = (id: string) => edges.filter((e) => e.source === id);
-  const forwardIn = (id: string) => edges.filter((e) => e.target === id && !backEdges.has(e.id));
+  // Each node's lines out and in, in the order they're drawn: looked up on
+  // every step, so indexed once rather than searched for (#297).
+  const outOf = new Map<string, FlowEdge[]>();
+  const inTo = new Map<string, FlowEdge[]>();
+  for (const e of edges) {
+    outOf.set(e.source, [...(outOf.get(e.source) ?? []), e]);
+    inTo.set(e.target, [...(inTo.get(e.target) ?? []), e]);
+  }
+  const out = (id: string) => [...(outOf.get(id) ?? [])];
+  const forwardIn = (id: string) => (inTo.get(id) ?? []).filter((e) => !backEdges.has(e.id));
   const blockKey = (n: FlowNode | undefined) =>
     (n?.data as Record<string, unknown> | undefined)?._blockKey;
-
-  const triggers = flow.nodes.filter((n) => n.type === 'trigger');
-  const start = triggers[triggerIdx] ?? flow.nodes.find((n) => n.type === 'start');
-  if (!start) return;
 
   /** Whether `from` reaches `to` going forward (not through `avoid`). */
   const reaches = (from: string, to: string, avoid?: string): boolean => {
@@ -125,26 +149,67 @@ export function walkGraph(graph: FlowGraph, triggerIdx: number, hooks: GraphWalk
   };
 
   /** A condition with no edge on the side it took: a list member's
-   * inherited else (2.2), or null (the path ends). */
-  const inheritedElse = (id: string, seen = new Set<string>()): string[] | null => {
+   * inherited else (2.2) -- the "no" lines of the list's head, taken as
+   * they are, so one going back round a loop goes round as a drawn one
+   * does and waits for the rest of the pass -- or null (the path ends). */
+  const inheritedElseMemo = new Map<string, FlowEdge[] | null>();
+  const inheritedElse = (id: string): FlowEdge[] | null => {
+    // The graph's alone: the same answer every step (#297).
+    if (!inheritedElseMemo.has(id)) inheritedElseMemo.set(id, inheritedElseOf(id));
+    return inheritedElseMemo.get(id)!;
+  };
+  const inheritedElseOf = (id: string, seen = new Set<string>()): FlowEdge[] | null => {
     if (seen.has(id)) return null;
     seen.add(id);
     const node = nodes.get(id);
     if (node?.type !== 'condition' || typeof blockKey(node) === 'string') return null;
-    const ways = forwardIn(id);
+    // Its one way in, counting lines back round: a test a line comes back
+    // into is a loop's test, never a list member (the maintainer,
+    // 2026-10-24).
+    const ways = inTo.get(id) ?? [];
     if (ways.length !== 1 || ways[0].sourceHandle !== 'true') return null;
     const parent = nodes.get(ways[0].source);
     if (parent?.type !== 'condition') return null;
     if (out(parent.id).filter((e) => e.sourceHandle === 'true').length !== 1) return null;
     const own = out(parent.id).filter((e) => e.sourceHandle === 'false');
-    const parentElse = own.length > 0 ? own.map((e) => e.target) : inheritedElse(parent.id, seen);
+    const parentElse = own.length > 0 ? own : inheritedElseOf(parent.id, seen);
     if (parentElse === null) return null;
     // Reached from the parent's else too: where its branches meet (#26).
     // Not through the parent: an else going back to an enclosing loop's
-    // head reaches it only around the loop.
-    if (parentElse.some((t) => t === id || reaches(t, id, parent.id))) return null;
+    // head reaches it only around the loop. A line back into this
+    // condition itself counts (the every-small-drawing test, tier single4:
+    // the else going round into it, read as a member only once that line
+    // became a line back without a walk, #283).
+    const backInto = (inTo.get(id) ?? []).filter((e) => backEdges.has(e.id));
+    if (
+      parentElse.some(
+        ({ target: t }) =>
+          t === id ||
+          reaches(t, id, parent.id) ||
+          backInto.some((e) => e.source === t || reaches(t, e.source, parent.id))
+      )
+    )
+      return null;
     return parentElse;
   };
+  return { nodes, edges, inTo, out, forwardIn, blockKey, reaches, inheritedElse };
+}
+
+export function walkGraph(
+  graph: FlowGraph,
+  triggerIdx: number,
+  hooks: GraphWalkHooks,
+  /** prepareGraphWalk(graph), made once for several runs. */
+  prepared: PreparedWalk = prepareGraphWalk(graph)
+): void {
+  const { flow, loopView, backEdges } = prepared;
+  const untilExits = new Map<string, ReturnType<typeof untilExit>>();
+  const triggers = flow.nodes.filter((n) => n.type === 'trigger');
+  const start = triggers[triggerIdx] ?? flow.nodes.find((n) => n.type === 'start');
+  if (!start) return;
+
+  const { nodes, edges, inTo, out, forwardIn, blockKey, reaches, inheritedElse } =
+    walkReader(prepared);
 
   /** Where a token goes down `edge`: `loop` is set for a back edge (the
    * node it goes back to). A count loop's test going back to its init
@@ -185,7 +250,8 @@ export function walkGraph(graph: FlowGraph, triggerIdx: number, hooks: GraphWalk
       // member of its list; anywhere else an error reads as false, as
       // HA's if/else reads it (#128).
       if (result === null) {
-        const exit = untilExit(loopView, id);
+        if (!untilExits.has(id)) untilExits.set(id, untilExit(loopView, id));
+        const exit = untilExits.get(id)!;
         // (The exit lines as this walk has them: the same lines, a drawn
         // one written out in the view aside.)
         if (exit !== null)
@@ -195,7 +261,7 @@ export function walkGraph(graph: FlowGraph, triggerIdx: number, hooks: GraphWalk
       const side = out(id).filter((e) => e.sourceHandle === (passed ? 'true' : 'false'));
       if (side.length > 0) return side.flatMap(target);
       if (passed) return [];
-      return (inheritedElse(id) ?? []).map((at) => ({ at }));
+      return (inheritedElse(id) ?? []).flatMap(target);
     }
     if (['action', 'delay', 'wait', 'set_variables'].includes(node.type)) {
       hooks.run?.(node);
@@ -337,6 +403,11 @@ export function walkGraph(graph: FlowGraph, triggerIdx: number, hooks: GraphWalk
   };
   push(out(start.id).flatMap(target), [], [], start.id);
   let stopped = false;
+  /** The steps a `stop` ran at. */
+  const stoppedAt: string[] = [];
+  /** For each stop, the steps that fanned out into the parallels it is in
+   * (none: it was in no parallel). */
+  const stoppedIn: string[][] = [];
   const advance = (at: string, owes: string[], fans: string[]) => {
     const left = owes.filter((j) => j !== at);
     try {
@@ -359,7 +430,53 @@ export function walkGraph(graph: FlowGraph, triggerIdx: number, hooks: GraphWalk
       if (!hooks.isStop?.(e)) throw e;
       // The other branches finish; nothing after them runs.
       stopped = true;
+      stoppedAt.push(at);
+      stoppedIn.push(
+        fans.map((f) => fanFrom.get(f)).filter((id): id is string => id !== undefined)
+      );
     }
+  };
+  /** Whether `at` comes after a `stop` that ran at `s`: the stop reaches it
+   * going on, or it is past the way out of a loop the stop is in (#330: a
+   * stop in a loop in one branch of a parallel; the steps after the
+   * parallel are reached from the loop's way out, which the stop reaches
+   * only by going round, so they ran where HA raises the stop). A step
+   * inside such a loop is not: a loop around the parallel lets its other
+   * branches finish (#301). */
+  const afterStopMemo = new Map<string, Set<string>>();
+  const afterStop = (s: string, at: string): boolean => {
+    if (reaches(s, at)) return true;
+    let after = afterStopMemo.get(s);
+    if (after === undefined) {
+      after = new Set<string>();
+      const { loops, innermost } = loopStructure(flow);
+      const around: number[] = [];
+      for (
+        let i = innermost.get(s);
+        i !== undefined && i !== null;
+        i = loops[i].parent ?? undefined
+      )
+        around.push(i);
+      // Going on from a loop's way out, but never into the next pass of a
+      // loop the stop is in: that never starts after a stop (#260).
+      const heads = new Set(around.flatMap((i) => [...loops[i].heads]));
+      for (const i of around) {
+        const inLoop = loops[i].nodes;
+        const seen = new Set<string>();
+        const queue: string[] = [];
+        for (const id of inLoop)
+          for (const e of out(id)) if (!inLoop.has(e.target)) queue.push(e.target);
+        while (queue.length > 0) {
+          const id = queue.shift()!;
+          if (seen.has(id) || heads.has(id)) continue;
+          seen.add(id);
+          if (!inLoop.has(id)) after.add(id);
+          for (const e of out(id)) if (!backEdges.has(e.id)) queue.push(e.target);
+        }
+      }
+      afterStopMemo.set(s, after);
+    }
+    return after.has(at);
   };
   const live = (t: Token, except: string) => t.at !== except && t.waiting !== 'loop';
   /** Whether every way on from `id` ends without reaching a meeting point,
@@ -400,7 +517,7 @@ export function walkGraph(graph: FlowGraph, triggerIdx: number, hooks: GraphWalk
   };
   /** The nodes a loop's back edges leave from: its body's ends. */
   const loopEnds = (head: string) =>
-    edges.filter((e) => e.target === head && backEdges.has(e.id)).map((e) => e.source);
+    (inTo.get(head) ?? []).filter((e) => backEdges.has(e.id)).map((e) => e.source);
   /** #267: a branch beside the way to `t` is still running -- one that came
    * out of a fan-out `t`'s own path came out of, since its paths diverged
    * (see the rules above). */
@@ -486,9 +603,23 @@ export function walkGraph(graph: FlowGraph, triggerIdx: number, hooks: GraphWalk
    * that opens with a parallel) become that pass's branches. */
   const release = (token: Token) => {
     const at = token.at;
+    // #299: nothing after a `stop` runs, a step another branch beside it
+    // reaches included (where the branches meet after their parallel): HA
+    // lets every branch finish, then raises the stop.
+    if (stoppedAt.some((s) => s !== at && afterStop(s, at))) {
+      tokens = tokens.filter((t) => t !== token && !(t.at === at && t.waiting));
+      return;
+    }
     // After a `stop`, a loop's next pass is after it: it never starts (a
-    // stop in a parallel in a loop body ran the loop on; bug #260).
-    if (stopped && token.waiting === 'loop') {
+    // stop in a parallel in a loop body ran the loop on; bug #260). Only a
+    // loop around a parallel the stop is in, though (#301): one in another
+    // branch of it runs on, as HA finishes every branch before it raises the
+    // stop.
+    const aroundTheStop = (head: string) =>
+      stoppedIn.some((fanOuts) =>
+        fanOuts.length === 0 ? true : fanOuts.some((f) => f === head || reaches(head, f))
+      );
+    if (stopped && token.waiting === 'loop' && aroundTheStop(token.loop!)) {
       tokens = tokens.filter((t) => !(t.waiting === 'loop' && t.loop === token.loop));
       return;
     }
@@ -546,10 +677,15 @@ export function walkGraph(graph: FlowGraph, triggerIdx: number, hooks: GraphWalk
       if (!token.waiting || isReady(token)) release(token);
       continue;
     }
-    if (stopped) break;
     // Every token waits: release a node whose paths have all arrived
-    // (or never will); the tokens there go on as one.
-    const ready = tokens.find(isReady);
+    // (or never will); the tokens there go on as one. After a stop too: a
+    // branch beside it waiting at a meeting point of its own still
+    // finishes, as HA finishes every branch before it raises the stop
+    // (release leaves out what comes after the stop). Not one held back
+    // for a branch beside it (#267): it comes after that branch, and so
+    // after its stop.
+    const ready = tokens.find((t) => isReady(t) && !(stopped && t.beside));
+    if (!ready && stopped) break;
     if (!ready) throw new Error('graph walk: branches wait on each other');
     release(ready);
   }

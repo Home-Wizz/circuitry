@@ -304,10 +304,83 @@ function filterIndependentTargets(ctx: Ctx, targetIds: string[], source?: string
     }
     return false;
   };
-  return targetIds.filter(
-    (id) =>
-      !targetIds.some((otherId) => otherId !== id && reaches(otherId, id) && !reaches(id, otherId))
+  return targetIds.filter((id) => {
+    const by = targetIds.find(
+      (otherId) => otherId !== id && reaches(otherId, id) && !reaches(id, otherId)
+    );
+    if (by !== undefined && goesInWithout(ctx, by, id, source))
+      throw new Error(
+        `"${by}" can go into the loop round "${id}" at another step, so the line to "${id}" is not a shortcut (#307)`
+      );
+    return by === undefined;
+  });
+}
+
+/**
+ * Bug #307: whether a run from `from` can go into the loop `to` is in --
+ * one with a way out -- at another step, without getting to `to` first.
+ * The branch beside then meets it inside the loop, so the line to `to` is
+ * a branch of its own, not a shortcut. A test's sides are each a run; the
+ * lines of one side all run. Read as fixpoints over every line.
+ */
+function goesInWithout(ctx: Ctx, from: string, to: string, source?: string): boolean {
+  const all = (id: string) => outgoingEdges(ctx, id);
+  const reach = (start: string): Set<string> => {
+    const seen = new Set<string>();
+    const queue = [start];
+    while (queue.length > 0) {
+      const id = queue.shift()!;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      for (const e of all(id)) queue.push(e.target);
+    }
+    return seen;
+  };
+  const fromTo = reach(to);
+  const loop = new Set([...fromTo].filter((id) => reach(id).has(to)));
+  if (!all(to).some((e) => loop.has(e.target))) return false;
+  const isCondition = (id: string) => ctx.flow.nodes.find((n) => n.id === id)?.type === 'condition';
+  const sides = (id: string): FlowEdge[][] => {
+    const by = new Map<string, FlowEdge[]>();
+    for (const e of all(id))
+      by.set(e.sourceHandle ?? '', [...(by.get(e.sourceHandle ?? '') ?? []), e]);
+    return [...by.values()];
+  };
+  const leaves = [...loop].some(
+    (id) => all(id).some((e) => !loop.has(e.target)) || (isCondition(id) && sides(id).length < 2)
   );
+  // A loop with no way out runs until HA's limit on any reading.
+  if (!leaves || loop.has(from)) return false;
+  const outside = [...reach(from)].filter((id) => !loop.has(id) && id !== source);
+  const hitsFirst = new Set<string>();
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const id of outside) {
+      if (hitsFirst.has(id)) continue;
+      const s = sides(id);
+      if (
+        s.length > 0 &&
+        s.every((side) => side.some((e) => e.target === to || hitsFirst.has(e.target)))
+      ) {
+        hitsFirst.add(id);
+        grew = true;
+      }
+    }
+  }
+  const slips = new Set<string>();
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const id of outside) {
+      if (slips.has(id)) continue;
+      const slipsBy = (e: FlowEdge) => (loop.has(e.target) ? e.target !== to : slips.has(e.target));
+      const firstBy = (e: FlowEdge) => e.target === to || hitsFirst.has(e.target);
+      if (sides(id).some((side) => !side.some(firstBy) && side.some(slipsBy))) {
+        slips.add(id);
+        grew = true;
+      }
+    }
+  }
+  return slips.has(from);
 }
 
 /**
@@ -573,6 +646,13 @@ function resolveTransition(
   const inside = (ids: string[]) => (ctx.region ? ids.filter((id) => ctx.region!.has(id)) : ids);
   rawTargetIds = inside(rawTargetIds);
   const goesRound = inside(goesRoundAll);
+  // #306: lines of one fan-out going back round to two different steps:
+  // each round would go on on its own (#285); the shortcut filter took one
+  // for a step the other reaches, and agreed with a save that lost it.
+  if (new Set(goesRound).size >= 2)
+    throw new Error(
+      `the lines from "${source}" go back round two loops (${[...new Set(goesRound)].join(', ')})`
+    );
   // #265: a line back round a loop beside steps of their own: they run
   // first, as steps of this state, then the loop goes round. (Read before
   // the shortcut filter, which took them for steps the loop reaches.)
@@ -743,6 +823,13 @@ function countLoopRepeatTargets(ctx: Ctx, node: ConditionNode, targetId: string)
  * and the parent's false targets don't lead back to it (then it's where the
  * parent's branches meet again -- bug #26). Otherwise [] (END).
  */
+/** This gate's reading of a list, on its own: where `conditionId`'s "no"
+ * goes when it has no "no" line of its own ([]: nowhere). For the check
+ * that holds every reader of the list rule to the same answers. */
+export function gateListNoOf(flow: FlowGraph, conditionId: string): string[] {
+  return andMemberFalseTargets(buildCtx(flow), conditionId, new Set());
+}
+
 function andMemberFalseTargets(ctx: Ctx, conditionId: string, seen: Set<string>): string[] {
   if (seen.has(conditionId)) return [];
   seen.add(conditionId);
@@ -752,7 +839,9 @@ function andMemberFalseTargets(ctx: Ctx, conditionId: string, seen: Set<string>)
   if (own.length > 0) return own.map((e) => e.target);
   if (typeof (node.data as Record<string, unknown>)._blockKey === 'string') return [];
   const incoming = ctx.flow.edges.filter(
-    (e) => e.target === conditionId && !ctx.backEdgeIds.has(e.id)
+    // Lines back round count: a test a line comes back into is a loop's
+    // test, never a list member (the maintainer, 2026-10-24).
+    (e) => e.target === conditionId
   );
   if (incoming.length !== 1 || incoming[0].sourceHandle !== 'true') return [];
   const parent = ctx.flow.nodes.find((n) => n.id === incoming[0].source);
@@ -771,6 +860,10 @@ function andMemberFalseTargets(ctx: Ctx, conditionId: string, seen: Set<string>)
       if (visited.has(id) || id === parent.id) continue;
       visited.add(id);
       for (const e of forwardOutgoing(ctx, id)) queue.push(e.target);
+      // A line back into the member itself: the else goes round into it,
+      // where the branches meet (the every-small-drawing test, single4).
+      if (outgoingEdges(ctx, id).some((e) => ctx.backEdgeIds.has(e.id) && e.target === conditionId))
+        return true;
     }
     return false;
   };
@@ -925,7 +1018,7 @@ export function extractStateMachineFromGraph(flow: FlowGraph): StateMachineGraph
  * yes side -- has none), derived here on its own.
  */
 export function expectedLoopBookkeeping(flow: FlowGraph): {
-  states: Map<string, { head: unknown[]; inThen: unknown[] }>;
+  states: Map<string, LoopBookkeeping>;
   loops: number;
 } {
   const ctx = buildCtx(flow);
@@ -933,9 +1026,9 @@ export function expectedLoopBookkeeping(flow: FlowGraph): {
   const back = ctx.flow.edges.filter((e) => ctx.backEdgeIds.has(e.id));
   const blockKey = (n: FlowNode | undefined) =>
     (n?.data as Record<string, unknown> | undefined)?._blockKey;
-  const states = new Map<string, { head: unknown[]; inThen: unknown[] }>();
+  const states = new Map<string, LoopBookkeeping>();
   const at = (id: string) => {
-    const entry = states.get(id) ?? { head: [], inThen: [] };
+    const entry: LoopBookkeeping = states.get(id) ?? { head: [], inThen: [] };
     states.set(id, entry);
     return entry;
   };
@@ -994,7 +1087,45 @@ export function expectedLoopBookkeeping(flow: FlowGraph): {
       }
     }
     at(head).head.push(loopRoundsStep(loops, [...region].sort()));
-    if (isWhile) at(whileListEnd(ctx, head)).inThen.push(loopLimitStep(loops));
+    const list = isWhile ? whileList(ctx, head) : [head];
+    const listEnd = list[list.length - 1];
+    // #292: a while whose round is on its test's "no" side (no line back
+    // is reached from the list's "yes" side): the limit goes before each
+    // move into the body from the list's tests -- the yes side leaves.
+    const yesReach = new Set<string>();
+    // The yes side's own lines count even when they are lines back: a
+    // "yes" line straight back round is the round on that side.
+    const yesQueue = outgoingEdges(ctx, listEnd)
+      .filter((e) => e.sourceHandle === 'true')
+      .map((e) => e.target);
+    while (yesQueue.length > 0) {
+      const id = yesQueue.shift()!;
+      if (yesReach.has(id)) continue;
+      yesReach.add(id);
+      for (const e of forwardOutgoing(ctx, id)) yesQueue.push(e.target);
+    }
+    const roundOnNoSide =
+      isWhile &&
+      into.every((e) => nodes.get(e.source)?.type !== 'condition' && !yesReach.has(e.source));
+    // Lines back count (#345): a loop entered at two steps has its "no"
+    // side's line into the other entry as a line back.
+    const noLines = outgoingEdges(ctx, head).filter((e) => e.sourceHandle === 'false');
+    if (roundOnNoSide && noLines.length > 0) {
+      const bodyEntries = noLines.map((e) => e.target).sort();
+      for (const test of list) {
+        const entry = at(test);
+        // #339: a "no" side that fans out into the body is written inline
+        // (its branches, then the move): the check opens that side.
+        if (bodyEntries.length > 1) {
+          entry.inElse = [...(entry.inElse ?? []), loopLimitStep(loops)];
+          continue;
+        }
+        const moves = entry.beforeMoves ?? {};
+        for (const target of bodyEntries)
+          moves[target] = [...(moves[target] ?? []), loopLimitStep(loops)];
+        entry.beforeMoves = moves;
+      }
+    } else if (isWhile) at(listEnd).inThen.push(loopLimitStep(loops));
     else at(head).head.push(loopLimitStep(loops));
   }
   return { states, loops };
@@ -1002,7 +1133,24 @@ export function expectedLoopBookkeeping(flow: FlowGraph): {
 
 /** A while loop's condition list's last member (see extractFromGraph.ts's
  * loopConditionChain, the while rule). */
-function whileListEnd(ctx: Ctx, head: string): string {
+/** #157's bookkeeping in one state: at its start, at the start of its yes
+ * side, and (#292) before its moves into a loop's body, by target. */
+export interface LoopBookkeeping {
+  head: unknown[];
+  inThen: unknown[];
+  /** #339: at the start of its "no" side, where that side fans out into a
+   * loop's body whose round is there. */
+  inElse?: unknown[];
+  beforeMoves?: Record<string, unknown[]>;
+}
+
+/** A while loop's condition list, head first. */
+/** whileList on its own (for the list-rule agreement test). */
+export function gateWhileList(flow: FlowGraph, head: string): string[] {
+  return whileList(buildCtx(flow), head);
+}
+
+function whileList(ctx: Ctx, head: string): string[] {
   const exitKey = (targets: string[]) => [...new Set(targets)].sort().join('\u0000');
   const headExits = exitKey(
     forwardOutgoing(ctx, head)
@@ -1012,12 +1160,16 @@ function whileListEnd(ctx: Ctx, head: string): string {
   const seen = [head];
   let current = head;
   while (true) {
-    const yes = forwardOutgoing(ctx, current).filter((e) => e.sourceHandle === 'true');
+    // Every "yes" line counts: one that also goes back round fans out, so
+    // the test after it is no member (the list rule, #336).
+    const yes = outgoingEdges(ctx, current).filter((e) => e.sourceHandle === 'true');
     if (yes.length !== 1) break;
     const next = ctx.flow.nodes.find((n) => n.id === yes[0].target);
     if (next?.type !== 'condition' || seen.includes(next.id)) break;
     if (typeof (next.data as Record<string, unknown>)._blockKey === 'string') break;
-    const waysIn = ctx.flow.edges.filter((e) => e.target === next.id && !ctx.backEdgeIds.has(e.id));
+    // Lines back round count: a test a line comes back into is a loop's
+    // test, never a list member (the maintainer, 2026-10-24).
+    const waysIn = ctx.flow.edges.filter((e) => e.target === next.id);
     if (waysIn.length !== 1) break;
     const no = outgoingEdges(ctx, next.id).filter((e) => e.sourceHandle === 'false');
     const noForward = no.filter((e) => !ctx.backEdgeIds.has(e.id));
@@ -1030,5 +1182,5 @@ function whileListEnd(ctx: Ctx, head: string): string {
     seen.push(next.id);
     current = next.id;
   }
-  return current;
+  return seen;
 }

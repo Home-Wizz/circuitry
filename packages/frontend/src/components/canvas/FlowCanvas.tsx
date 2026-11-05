@@ -33,6 +33,7 @@ import { QuickAddMenu, type QuickAddPosition } from '@/components/canvas/QuickAd
 import {
   ChooseChainEdge,
   ChooseDefaultEdge,
+  ChooseFallThroughEdge,
   DeletableEdge,
   HintEdge,
   LoopBackEdge,
@@ -42,8 +43,10 @@ import { NODE_COMPONENTS } from '@/components/nodes/nodeComponents';
 import { stepTone } from '@/config/nodeTypeCatalog';
 import type { NodeTypeConfig } from '@/components/panels/NodePalette';
 import { NodeToolbar } from '@/components/toolbar/NodeToolbar';
+import { useChooseFallThroughs } from '@/hooks/useConventionMarkers';
 import { useDarkMode } from '@/hooks/useDarkMode';
 import { type CompoundBlockKey, createCompoundBlock } from '@/lib/block-factories';
+import { fallThroughEdges } from '@/lib/fall-through-edges';
 import { buildQuickAddConnections, type QuickAddDirection } from '@/lib/quick-add';
 import { cn, generateNodeId } from '@/lib/utils';
 import { useFlowStore } from '@/store/flow-store';
@@ -65,6 +68,7 @@ const edgeTypes: EdgeTypes = {
   hint: HintEdge,
   'choose-chain': ChooseChainEdge,
   'choose-default': ChooseDefaultEdge,
+  'choose-fallthrough': ChooseFallThroughEdge,
   'loop-back': LoopBackEdge,
 };
 
@@ -444,10 +448,14 @@ export function FlowCanvas() {
     [screenToFlowPosition, addNode, addCompound]
   );
 
+  // Each Choose's "None matched" path (decision D1, rule 1), drawn from the
+  // transpiler's reading after the graph's own edges.
+  const fallThroughs = useChooseFallThroughs();
+
   // Style edges based on simulation state, trace state, and selected node
   const styledEdges = useMemo(() => {
     const typeById = new Map(nodes.map((node) => [node.id, node.type]));
-    return edges.map((edge) => {
+    const styled = edges.map((edge) => {
       // Check if this edge is part of the execution path during simulation
       const targetIdx = executionPath.indexOf(edge.target);
 
@@ -542,8 +550,10 @@ export function FlowCanvas() {
         markerEnd,
       };
     });
+    return [...styled, ...fallThroughEdges(fallThroughs)];
   }, [
     edges,
+    fallThroughs,
     nodes,
     isSimulating,
     executionPath,

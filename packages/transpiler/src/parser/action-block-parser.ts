@@ -21,16 +21,20 @@ import type {
   WaitNode,
 } from '@circuitry/shared';
 import { isDeviceAction } from '@circuitry/shared';
+import { mentionsLoopVariable } from '../analyzer/loop-variable';
+import { opensWithParallel } from '../utils/parallelBranch';
 import {
-  isChooseAction,
   conditionList,
   expandConditionShorthand,
+  isAlwaysTrueOption,
+  isChooseAction,
   isConditionAction,
   isConditionListAction,
   isConditionShorthandAction,
   isDelayAction,
   isEventAction,
   isIfThenAction,
+  isKeptDrawnTest,
   isParallelAction,
   isRepeatAction,
   isSequenceAction,
@@ -39,7 +43,6 @@ import {
   isStepKeptAsWritten,
   isStopAction,
   isTemplateEnabledBlock,
-  isAlwaysTrueOption,
   isUnexpandableCountRepeat,
   isVariablesAction,
   isWaitAction,
@@ -49,8 +52,6 @@ import {
   toList,
   transformConditions,
 } from './action-type-guards';
-import { mentionsLoopVariable } from '../analyzer/loop-variable';
-import { opensWithParallel } from '../utils/parallelBranch';
 import {
   conditionAliases,
   conditionEnabledAsWritten,
@@ -286,7 +287,11 @@ export function parseActions(
     // each round trip through NativeStrategy re-rendered it as a larger
     // no-op. A trigger-id if too (bug #105: routed, the run it passed for
     // ended there).
-    if (thenArr.length === 0 && (elseArr === undefined || elseArr.length === 0)) {
+    if (
+      thenArr.length === 0 &&
+      (elseArr === undefined || elseArr.length === 0) &&
+      !isKeptDrawnTest(act)
+    ) {
       return;
     }
     const ifAction = {

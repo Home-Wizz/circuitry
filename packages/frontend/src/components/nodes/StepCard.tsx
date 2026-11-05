@@ -7,11 +7,7 @@ import {
   type ReactNode,
   useContext,
 } from 'react';
-import { BlockRoleBadge } from './BlockRoleBadge';
-import { StepStopsHere } from './ConventionMarkers';
-import { NodeStatusBadge } from './NodeStatusBadge';
-import { getPickerIcon, StepIcon } from './StepIcon';
-import { StepSettingsPill } from './StepSettingsPill';
+import { useHaRefusal } from '@/hooks/useHaRefusal';
 import {
   NODE_COLORS,
   NODE_STATE_CLASSES,
@@ -20,6 +16,11 @@ import {
   toneStyle,
 } from '@/lib/node-colors';
 import { cn } from '@/lib/utils';
+import { BlockRoleBadge } from './BlockRoleBadge';
+import { StepStopsHere } from './ConventionMarkers';
+import { NodeStatusBadge } from './NodeStatusBadge';
+import { getPickerIcon, StepIcon } from './StepIcon';
+import { StepSettingsPill } from './StepSettingsPill';
 
 export interface StepCardProps {
   /** The step's colour: its round icon and its kind word. */
@@ -95,6 +96,7 @@ export function StepCard({
 }: StepCardProps) {
   const colors = NODE_COLORS[tone];
   const preview = useContext(StepCardPreview);
+  const refusal = useHaRefusal(settingsFor);
   const leadInline = lead !== undefined && !isUnconfigured;
   const kind = kindWord ?? (leadInline ? undefined : lead);
   return (
@@ -155,6 +157,11 @@ export function StepCard({
           </div>
           {children && (
             <div className="mt-0.5 space-y-0.5 text-muted-foreground text-xs">{children}</div>
+          )}
+          {refusal && (
+            <p data-testid="step-refusal" className="mt-1 text-destructive text-xs leading-snug">
+              {refusal}
+            </p>
           )}
         </div>
         {stepNumber ? (

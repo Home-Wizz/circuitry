@@ -45,9 +45,16 @@ export const ActionNodeValidationSchema = z
   })
   .passthrough()
   .superRefine((data, ctx) => {
-    // A step Circuitry doesn't know, kept exactly as written (bug #57):
-    // nothing here to check; Home Assistant checks it.
-    if (isOpaqueStepData(data)) return;
+    // A step Circuitry doesn't know, or one kept exactly as written (bugs
+    // #57, #139, #146): Circuitry never rewrites it. What Home Assistant
+    // refuses by its shape alone is said here (Phase 4); anything else,
+    // a step type this editor doesn't know included (a newer HA may), HA
+    // checks.
+    if (isOpaqueStepData(data)) {
+      const refusal = keptStepRefusal(data);
+      if (refusal !== null) ctx.addIssue({ code: 'custom', message: refusal, path: [] });
+      return;
+    }
     // Opaque repeat nodes (repeat.count / repeat.while / repeat.until) are valid without service/event
     if (data.repeat !== null && typeof data.repeat === 'object') return;
 
@@ -177,15 +184,18 @@ function checkTrigger(data: Record<string, unknown>, ctx: IssueContext): void {
     if (isMissing(data[field])) error(message, field);
     else if (blankValue(data[field])) warn(emptyMessage, field);
   };
-  const entities = (message: string) =>
-    checkEntities(data.entity_id, report, message, 'errors:validation.trigger.entityEmpty');
+  const entities = (message: string, form?: string) =>
+    checkEntities(data.entity_id, report, message, 'errors:validation.trigger.entityEmpty', form);
 
   switch (type) {
     case 'state':
-      entities('errors:validation.trigger.entityRequired.state');
+      entities('errors:validation.trigger.entityRequired.state', 'errors:validation.entityIdForm');
       break;
     case 'numeric_state':
-      entities('errors:validation.trigger.entityRequired.numericState');
+      entities(
+        'errors:validation.trigger.entityRequired.numericState',
+        'errors:validation.entityIdForm'
+      );
       checkBounds(data, report, 'trigger');
       break;
     case 'event':
@@ -376,9 +386,44 @@ const blankValue = (v: unknown): boolean => blankIn(v) || isEmptyList(v);
  * `entity_id` of a trigger or condition: HA refuses none or a blank one; it
  * accepts an empty list (which then matches nothing), so that's a warning.
  */
-function checkEntities(value: unknown, report: Report, message: string, emptyMessage: string) {
+function checkEntities(
+  value: unknown,
+  report: Report,
+  message: string,
+  emptyMessage: string,
+  formMessage?: string
+) {
   if (entityRefused(value)) report.error(message, 'entity_id');
   else if (isEmptyList(value)) report.warn(emptyMessage, 'entity_id');
+  else if (formMessage !== undefined && entityFormRefused(value)) {
+    report.error(formMessage, 'entity_id');
+  }
+}
+
+// Home Assistant's entity id: a domain and an object id, both lower-case
+// letters, digits and `_`, neither starting or ending with `_`, no `__`
+// (homeassistant/core.py VALID_ENTITY_ID, the same in HA 2026.9 and
+// 2026.10). It reads one lower-cased; an entity registry id (32 lower-case
+// hex digits) stands for one too.
+const VALID_ENTITY_ID = /^(?!.+__)(?!_)[\da-z_]+(?<!_)\.(?!_)[\da-z_]+(?<!_)$/;
+const ENTITY_REGISTRY_ID = /^[0-9a-f]{32}$/;
+
+/**
+ * Whether Home Assistant refuses an `entity_id` of a state or numeric_state
+ * trigger or condition for its form (cv.entity_ids_or_uuids): a string is
+ * split at commas, each part trimmed; every one must be an entity id or an
+ * entity registry id. Only strings and lists of strings are read here
+ * (anything else is left to the other checks), and a blank one is the blank
+ * check's.
+ */
+export function entityFormRefused(value: unknown): boolean {
+  const parts =
+    typeof value === 'string'
+      ? value.split(',').map((p) => p.trim())
+      : Array.isArray(value) && value.every((v) => typeof v === 'string')
+        ? (value as string[])
+        : [];
+  return parts.some((p) => !VALID_ENTITY_ID.test(p.toLowerCase()) && !ENTITY_REGISTRY_ID.test(p));
 }
 
 /**
@@ -478,8 +523,8 @@ function checkCondition(
   const c = data as Record<string, unknown>;
   const report = reporter(ctx, at, c);
   const { error, warn } = report;
-  const entities = (message: string) =>
-    checkEntities(c.entity_id, report, message, 'errors:validation.condition.entityEmpty');
+  const entities = (message: string, form?: string) =>
+    checkEntities(c.entity_id, report, message, 'errors:validation.condition.entityEmpty', form);
 
   if (typeof c.condition !== 'string' || c.condition.trim() === '') {
     if (at.length === 0) error('errors:validation.condition.typeRequired', 'condition');
@@ -487,14 +532,20 @@ function checkCondition(
   }
   switch (c.condition) {
     case 'state':
-      entities('errors:validation.condition.entityRequired.state');
+      entities(
+        'errors:validation.condition.entityRequired.state',
+        'errors:validation.entityIdForm'
+      );
       if (c.state === undefined) error('errors:validation.condition.stateRequired', 'state');
       else if (isBlank(c.state)) warn('errors:validation.condition.stateEmpty', 'state');
       checkStateFor(c, report, env);
       break;
 
     case 'numeric_state':
-      entities('errors:validation.condition.entityRequired.numericState');
+      entities(
+        'errors:validation.condition.entityRequired.numericState',
+        'errors:validation.entityIdForm'
+      );
       checkBounds(c, report, 'condition');
       break;
 
@@ -647,4 +698,53 @@ export function validateNodeData(
       ? { severity: 'warning' as const }
       : {}),
   }));
+}
+
+/**
+ * An automation's own settings as Home Assistant reads them (Phase 4; the
+ * maintainer chose to block it, 2026-10-30): `max` must be a whole number
+ * of at least 2 (HA's make_script_schema: Coerce(int), Range(min=2), the
+ * same in 2026.9 and 2026.10, whatever the mode). Returns the message key
+ * for each field HA refuses; none when it takes them.
+ */
+export function automationSettingsIssues(settings: {
+  max?: unknown;
+}): { field: 'max'; message: string }[] {
+  const { max } = settings;
+  if (max === undefined || max === null) return [];
+  const asNumber =
+    typeof max === 'number'
+      ? Math.trunc(max)
+      : typeof max === 'string' && /^\s*[+-]?\d+\s*$/.test(max)
+        ? Number.parseInt(max, 10)
+        : Number.NaN;
+  return Number.isNaN(asNumber) || asNumber < 2
+    ? [{ field: 'max', message: 'errors:validation.settings.maxBelowTwo' }]
+    : [];
+}
+
+const isMapping = (v: unknown): boolean => v !== null && typeof v === 'object' && !Array.isArray(v);
+
+/**
+ * The reason Home Assistant refuses a step kept exactly as written, by its
+ * shape alone, or null when it doesn't: `variables:` that isn't names with
+ * values, a `choose:` option that isn't a mapping. Each was refused by a
+ * real HA 2026.9.3 and 2026.10.0 loading the automation. An action's
+ * `target`/`data` that isn't a mapping is not refused here: HA's loader
+ * takes a template there, though cv.script_action alone refuses it (a
+ * first version that blocked it was caught loading automations in a real
+ * HA). A step type this editor doesn't know is never refused here: a
+ * newer Home Assistant may take it (decision D3).
+ */
+export function keptStepRefusal(data: Record<string, unknown>): string | null {
+  if ('variables' in data && !isMapping(data.variables)) {
+    return 'errors:validation.keptStep.variablesNotMapping';
+  }
+  if ('choose' in data) {
+    // HA reads `choose: null` as no options, and one option as a list of one.
+    const options =
+      data.choose === null ? [] : Array.isArray(data.choose) ? data.choose : [data.choose];
+    if (options.some((o) => !isMapping(o))) return 'errors:validation.keptStep.chooseOption';
+  }
+  return null;
 }

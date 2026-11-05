@@ -14,6 +14,7 @@ import {
 import { fanOutHash } from '../utils/fanOutHash';
 import { noStepsStop } from '../utils/stateMachineEntry';
 import {
+  beforeMovesInto,
   loopLimitStep,
   loopRoundsStep,
   loopRoundsVar,
@@ -64,6 +65,11 @@ interface LoopBudget {
   /** Where the check goes: the head, or a while loop's list end. */
   checkAt: string;
   whileTest: boolean;
+  /** #292: a while loop whose round is on its test's "no" side (#263's
+   * shape, `while: [not C]`): the check goes before each move into the
+   * loop's body from these tests (its list), not on their "yes" side --
+   * the way out. */
+  noSide?: { tests: string[]; bodyEntries: string[] };
 }
 
 export class StateMachineStrategy extends BaseStrategy {
@@ -680,6 +686,17 @@ export class StateMachineStrategy extends BaseStrategy {
    * ways out are dead ends or back-edges to one and the same node; with
    * back-edges to two, the graph is refused (#285).
    */
+  /** #285: branches of one fan-out going back round two different loops. */
+  private twoLoopsReason(flow: FlowGraph, source?: string): string {
+    return (
+      `the branches of a parallel${source ? ` after "${this.stepName(flow, source)}"` : ''} ` +
+      'go back round two different loops, so each would go round on its own, which ' +
+      "Home Assistant can't run. Lead the branches back to one step (through a Join, so " +
+      'the next round starts once both have finished), or move one of ' +
+      'them out of the loop'
+    );
+  }
+
   private findLoopBackConvergence(
     flow: FlowGraph,
     targetIds: string[],
@@ -718,17 +735,20 @@ export class StateMachineStrategy extends BaseStrategy {
           (e) => backEdgeIds.has(e.id) && !reachable.has(e.target)
         )
       );
+      // A list member with no "no" line of its own goes where its list's
+      // head does (andMemberFalseTargets, as this strategy writes it): the
+      // head is in the branch too, so its lines are counted already. Read
+      // as a path end, an AND-list in a parallel branch inside a loop was
+      // refused (#325).
       const ends = [...reachable].some((nodeId) => {
         const out = this.getOutgoingEdges(flow, nodeId);
         if (out.length === 0) return true;
         const node = flow.nodes.find((n) => n.id === nodeId);
-        return (
-          node?.type === 'condition' &&
-          !(
-            out.some((e) => e.sourceHandle === 'true') &&
-            out.some((e) => e.sourceHandle === 'false')
-          )
-        );
+        if (node?.type !== 'condition') return false;
+        const hasNo =
+          out.some((e) => e.sourceHandle === 'false') ||
+          this.andMemberFalseTargets(flow, nodeId).length > 0;
+        return !(out.some((e) => e.sourceHandle === 'true') && hasNo);
       });
       if (goesRoundFrom !== undefined) {
         if (ends) roundsSometimes ??= goesRoundFrom;
@@ -742,12 +762,7 @@ export class StateMachineStrategy extends BaseStrategy {
             // separately, each round of one starting the other again (the
             // canvas's graph walk): no automation runs that. Written as a
             // parallel ending the run, it stopped where the canvas goes round.
-            throw new GraphClaimError(
-              `the branches of a parallel${source ? ` after "${this.stepName(flow, source)}"` : ''} ` +
-                'go back round two different loops, so each would go round on its own, which ' +
-                "Home Assistant can't run. Lead the branches back to one step, or move one of " +
-                'them out of the loop'
-            );
+            throw new GraphClaimError(this.twoLoopsReason(flow, source));
           }
           loopTarget = e.target;
         }
@@ -763,7 +778,8 @@ export class StateMachineStrategy extends BaseStrategy {
       throw new GraphClaimError(
         `a branch of a parallel${source ? ` after "${this.stepName(flow, source)}"` : ''} goes ` +
           `back round its loop only on some paths (from "${this.stepName(flow, roundsSometimes)}"), ` +
-          "and no branch always does: Home Assistant can't let the branches decide that together"
+          "and no branch always does, in a way the flags for that (one per branch) can't be written for: " +
+          'its branches meet, another path leads into them, or one goes round on a test\'s "no"'
       );
     }
     return loopTarget;
@@ -950,6 +966,44 @@ export class StateMachineStrategy extends BaseStrategy {
   }
 
   /**
+   * #340: one target gone back to round a loop, and a step beside it (on
+   * its forward lines) that goes back round to another step of that loop.
+   */
+  private besideGoesRoundElsewhere(
+    flow: FlowGraph,
+    targetIds: string[],
+    goesRound: string[]
+  ): boolean {
+    const round = [...new Set(goesRound.filter((t) => targetIds.includes(t)))];
+    if (round.length !== 1) return false;
+    const sides = targetIds.filter((t) => t !== round[0]);
+    if (sides.length === 0) return false;
+    const backEdgeIds = findBackEdges(flow);
+    const lines = flow.edges.filter((e) => e.type !== 'hint' && e.type !== 'choose-hint');
+    const reach = (starts: string[]) => {
+      const seen = new Set<string>();
+      const queue = [...starts];
+      while (queue.length > 0) {
+        const id = queue.pop()!;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        for (const e of lines) if (e.source === id && !backEdgeIds.has(e.id)) queue.push(e.target);
+      }
+      return seen;
+    };
+    const beside = reach(sides);
+    const loop = reach([round[0]]);
+    return lines.some(
+      (e) =>
+        backEdgeIds.has(e.id) &&
+        beside.has(e.source) &&
+        e.target !== round[0] &&
+        loop.has(e.target) &&
+        !beside.has(e.target)
+    );
+  }
+
+  /**
    * #265: one target gone back to round a loop, the others steps beside it
    * that lead nowhere the loop does (their own region); null otherwise.
    * extractStateMachineFromGraph.ts reads it the same way.
@@ -998,10 +1052,20 @@ export class StateMachineStrategy extends BaseStrategy {
     // ends, not a branch of this fan-out.
     rawTargetIds = this.inMachine(rawTargetIds);
     goesRound = this.inMachine(goesRound);
+    // #306: lines of one fan-out going back round to two different steps
+    // (an outer loop's start and an inner one's, or the step itself): each
+    // round would go on on its own (#285). The shortcut filter below took
+    // one for a step the other reaches, and the line was lost.
+    if (new Set(goesRound).size >= 2) throw new GraphClaimError(this.twoLoopsReason(flow, source));
     // #265: a line back round a loop beside steps of their own: they run
     // first, as steps of this state, then the loop goes round (the next
     // round waits for them). The shortcut filter below took them for steps
     // the loop reaches, and dropped them.
+    // #340: a step beside the way round whose own line goes back round to
+    // another step of the loop starts a second round beside the first:
+    // each would go on on its own (#285, #306), as with two lines back.
+    if (this.besideGoesRoundElsewhere(flow, rawTargetIds, goesRound))
+      throw new GraphClaimError(this.twoLoopsReason(flow, source));
     const besideRound = this.stepsBesideGoingRound(flow, rawTargetIds, goesRound);
     if (besideRound !== null) {
       const groups = this.branchGroups(flow, besideRound.sides, null, source);
@@ -1232,9 +1296,16 @@ export class StateMachineStrategy extends BaseStrategy {
     if (edges.length === 0) result = false;
     else if (ahead.length === 0) result = true;
     else if (node?.type === 'condition') {
-      const side = (handle: string) => edges.filter((e) => e.sourceHandle === handle);
+      // A list member's "no" is its list head's (#325): its own lines, or
+      // the head's when it has none.
+      const yes = edges.filter((e) => e.sourceHandle === 'true');
+      const no = edges.some((e) => e.sourceHandle === 'false')
+        ? []
+        : this.andMemberFalseEdges(flow, from);
       result =
-        side('true').length > 0 && side('false').length > 0 && edges.every((e) => reaches(e));
+        yes.length > 0 &&
+        (no.length > 0 || edges.some((e) => e.sourceHandle === 'false')) &&
+        [...edges, ...no].every((e) => reaches(e));
     } else result = ahead.some((e) => reaches(e));
     memo.set(from, result);
     return result;
@@ -1289,26 +1360,67 @@ export class StateMachineStrategy extends BaseStrategy {
         }
       }
       const isWhile = kinds.some((k) => k === 'while' || k === 'while-body-exit');
+      const list = isWhile ? this.whileListOf(flow, head) : [head];
+      const listEnd = list[list.length - 1];
+      // #292: no line back is reached from the list's "yes" side: the round
+      // is on its "no" side.
+      const yesReach = new Set<string>();
+      // The yes side's own lines count even when they are lines back: a
+      // "yes" line straight back round is the round on that side.
+      const yesQueue = edges
+        .filter((e) => e.source === listEnd && e.sourceHandle === 'true')
+        .map((e) => e.target);
+      while (yesQueue.length > 0) {
+        const id = yesQueue.shift()!;
+        if (yesReach.has(id)) continue;
+        yesReach.add(id);
+        yesQueue.push(...forwardOut(id).map((e) => e.target));
+      }
+      const roundOnNoSide =
+        isWhile &&
+        into.every((e) => byId.get(e.source)?.type !== 'condition' && !yesReach.has(e.source));
       budgets.push({
         index: budgets.length + 1,
         head,
         region: [...region].sort(),
-        checkAt: isWhile ? this.whileListEnd(flow, head, forwardOut, backEdgeIds) : head,
+        checkAt: listEnd,
         whileTest: isWhile,
+        // Lines back count (#345): a loop entered at two steps has its
+        // "no" side's line into the other entry as a line back.
+        ...(roundOnNoSide && edges.some((e) => e.source === head && e.sourceHandle === 'false')
+          ? {
+              noSide: {
+                tests: list,
+                bodyEntries: edges
+                  .filter((e) => e.source === head && e.sourceHandle === 'false')
+                  .map((e) => e.target),
+              },
+            }
+          : {}),
       });
     }
     return budgets;
   }
 
-  /** The last member of a while loop's condition list (its yes side enters
-   * the body): conditions chained on yes edges with no `_blockKey`, one
-   * way in, and no "no" edge or the head's own exits. */
-  private whileListEnd(
+  /** A while loop's condition list, head first (its last member's yes side
+   * enters the body): conditions chained on yes edges with no `_blockKey`,
+   * one way in, and no "no" edge or the head's own exits. */
+  /** A while's condition list from its head, as loopBudgets reads it
+   * (public for the list-rule agreement test). */
+  whileListOf(flow: FlowGraph, head: string): string[] {
+    const backEdgeIds = findBackEdges(flow);
+    const edges = flow.edges.filter((e) => e.type !== 'hint' && e.type !== 'choose-hint');
+    const forwardOut = (id: string) =>
+      edges.filter((e) => e.source === id && !backEdgeIds.has(e.id));
+    return this.whileList(flow, head, forwardOut, backEdgeIds);
+  }
+
+  private whileList(
     flow: FlowGraph,
     head: string,
     forwardOut: (id: string) => FlowEdge[],
     backEdgeIds: Set<string>
-  ): string {
+  ): string[] {
     const exitKey = (targets: string[]) => [...new Set(targets)].sort().join('\u0000');
     const headExits = exitKey(
       forwardOut(head)
@@ -1318,17 +1430,23 @@ export class StateMachineStrategy extends BaseStrategy {
     const chain = [head];
     let current = head;
     while (true) {
-      const yes = forwardOut(current).filter((e) => e.sourceHandle === 'true');
+      // Every "yes" line counts: one that also goes back round fans out,
+      // so the test after it is no member (the list rule, #336).
+      const yes = flow.edges.filter(
+        (e) =>
+          e.source === current &&
+          e.sourceHandle === 'true' &&
+          e.type !== 'hint' &&
+          e.type !== 'choose-hint'
+      );
       if (yes.length !== 1) break;
       const next = flow.nodes.find((n) => n.id === yes[0].target);
       if (next?.type !== 'condition' || chain.includes(next.id)) break;
       if (typeof (next.data as Record<string, unknown>)._blockKey === 'string') break;
+      // Lines back round count: a test a line comes back into is a loop's
+      // test, never a list member (the one list rule, list-members.ts).
       const waysIn = flow.edges.filter(
-        (e) =>
-          e.target === next.id &&
-          !backEdgeIds.has(e.id) &&
-          e.type !== 'hint' &&
-          e.type !== 'choose-hint'
+        (e) => e.target === next.id && e.type !== 'hint' && e.type !== 'choose-hint'
       );
       if (waysIn.length !== 1) break;
       const no = flow.edges.filter(
@@ -1348,7 +1466,7 @@ export class StateMachineStrategy extends BaseStrategy {
       chain.push(next.id);
       current = next.id;
     }
-    return current;
+    return chain;
   }
 
   /** A state's block with its loop bookkeeping (#157): a loop head counts
@@ -1361,6 +1479,25 @@ export class StateMachineStrategy extends BaseStrategy {
   ): Record<string, unknown> {
     let sequence = Array.isArray(block.sequence) ? [...block.sequence] : [];
     for (const budget of budgets) {
+      if (budget.noSide?.tests.includes(node.id)) {
+        // #339: a "no" side fanning out into the body is written inline,
+        // its branches then the move: the check opens that side.
+        if (budget.noSide.bodyEntries.length > 1) {
+          sequence = sequence.map((step) => {
+            const record = step as Record<string, unknown>;
+            return 'if' in record && Array.isArray(record.else)
+              ? { ...record, else: [loopLimitStep(budget.index), ...record.else] }
+              : step;
+          });
+          continue;
+        }
+        sequence = beforeMovesInto(
+          sequence,
+          budget.noSide.bodyEntries,
+          loopLimitStep(budget.index)
+        );
+        continue;
+      }
       if (budget.checkAt === node.id && budget.whileTest) {
         sequence = sequence.map((step) => {
           const record = step as Record<string, unknown>;
@@ -1528,20 +1665,37 @@ export class StateMachineStrategy extends BaseStrategy {
    * Otherwise a missing false edge really does mean nothing happens: [].
    * extractStateMachineFromGraph.ts applies the same rule independently.
    */
-  private andMemberFalseTargets(
+  /** This strategy's reading of a list, on its own: where `conditionId`'s
+   * "no" goes when it has no "no" line of its own ([]: nowhere). For the
+   * check that holds every reader of the list rule to the same answers. */
+  listNoOf(flow: FlowGraph, conditionId: string): string[] {
+    return this.andMemberFalseTargets(flow, conditionId);
+  }
+
+  private andMemberFalseTargets(flow: FlowGraph, conditionId: string): string[] {
+    return this.andMemberFalseEdges(flow, conditionId).map((e) => e.target);
+  }
+
+  /** andMemberFalseTargets as the lines themselves: the nearest "no" lines
+   * up the list (one may be a line back round). */
+  private andMemberFalseEdges(
     flow: FlowGraph,
     conditionId: string,
     seen = new Set<string>()
-  ): string[] {
+  ): FlowEdge[] {
     if (seen.has(conditionId)) return [];
     seen.add(conditionId);
     const backEdgeIds = findBackEdges(flow);
     const node = this.getNode(flow, conditionId);
     if (node?.type !== 'condition') return [];
     const own = flow.edges.filter((e) => e.source === conditionId && e.sourceHandle === 'false');
-    if (own.length > 0) return own.map((e) => e.target);
+    if (own.length > 0) return own;
     if (typeof (node.data as Record<string, unknown>)._blockKey === 'string') return [];
-    const incoming = flow.edges.filter((e) => e.target === conditionId && !backEdgeIds.has(e.id));
+    // Lines back round count: a test a line comes back into is a loop's
+    // test, never a list member (the maintainer, 2026-10-24).
+    const incoming = flow.edges.filter(
+      (e) => e.target === conditionId && e.type !== 'hint' && e.type !== 'choose-hint'
+    );
     if (incoming.length !== 1 || incoming[0].sourceHandle !== 'true') return [];
     const parent = this.getNode(flow, incoming[0].source);
     if (parent?.type !== 'condition') return [];
@@ -1549,7 +1703,7 @@ export class StateMachineStrategy extends BaseStrategy {
       (e) => e.source === parent.id && e.sourceHandle === 'true'
     );
     if (parentTrue.length !== 1) return [];
-    const parentElse = this.andMemberFalseTargets(flow, parent.id, seen);
+    const parentElse = this.andMemberFalseEdges(flow, parent.id, seen);
     const reaches = (from: string): boolean => {
       const visited = new Set<string>();
       const queue = [from];
@@ -1561,12 +1715,18 @@ export class StateMachineStrategy extends BaseStrategy {
         // through A, which doesn't make B a meeting point.
         if (visited.has(id) || id === parent.id) continue;
         visited.add(id);
-        for (const e of flow.edges)
-          if (e.source === id && !backEdgeIds.has(e.id)) queue.push(e.target);
+        for (const e of flow.edges) {
+          if (e.source !== id) continue;
+          if (!backEdgeIds.has(e.id)) queue.push(e.target);
+          // A line back into B itself: the else goes round into B, which
+          // makes B where A's branches meet too (the every-small-drawing
+          // test, tier single4; a line back since #283's last step).
+          else if (e.target === conditionId) return true;
+        }
       }
       return false;
     };
-    return parentElse.some(reaches) ? [] : parentElse;
+    return parentElse.some((e) => reaches(e.target)) ? [] : parentElse;
   }
 
   /**

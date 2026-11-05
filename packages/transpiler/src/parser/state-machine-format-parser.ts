@@ -14,6 +14,7 @@ import type {
   FlowNode,
   WaitNode,
 } from '@circuitry/shared';
+import { untilExit } from '../analyzer/loops';
 import { findBackEdges } from '../analyzer/topology';
 import { branchMachineIn } from '../utils/branchMachine';
 import { fanOutHash } from '../utils/fanOutHash';
@@ -21,7 +22,13 @@ import { generateNodeId } from '../utils/generateIds';
 import { isNoStepsStop } from '../utils/stateMachineEntry';
 import { withoutLoopBookkeeping } from '../utils/stateMachineLoops';
 import { parseActions } from './action-block-parser';
-import { expandConditionShorthand, isMapping, normalizeActionLists } from './action-type-guards';
+import {
+  expandConditionShorthand,
+  isMapping,
+  isNoOpIf,
+  normalizeActionLists,
+  withoutNoOpSteps,
+} from './action-type-guards';
 import { createEdge, importCondition, importWaitTriggers, parseTriggers } from './parser-shared';
 
 /** The mappings in a list (none when it isn't one): what can be a step.
@@ -233,6 +240,20 @@ export function parseStateMachineStructure(
   // machine can render the same branches inline in several states (an
   // AND-list member repeats its head's else, for one). Rebuilding each copy
   // separately would duplicate those branches in the graph.
+  const conditionStatesByTest = new Map<string, string[]>();
+  for (const [id, info] of nodeInfoMap) {
+    if (info.nodeType !== 'condition' || info.test === undefined) continue;
+    const key = JSON.stringify(info.test);
+    conditionStatesByTest.set(key, [...(conditionStatesByTest.get(key) ?? []), id]);
+  }
+  /** The condition states the do-nothing ifs among `written` render (a
+   * test only one condition state has; anything else is left out). */
+  const noOpBranchStates = (written: unknown[]): string[] =>
+    written.flatMap((step) => {
+      if (!isNoOpIf(step)) return [];
+      const ids = conditionStatesByTest.get(JSON.stringify(step.if)) ?? [];
+      return ids.length === 1 ? ids : [];
+    });
   const rebuiltNodes: FlowNode[] = [];
   const rebuiltEdges: FlowEdge[] = [];
   const rebuiltByContent = new Map<string, { to: string; type?: FlowEdge['type'] }[]>();
@@ -241,10 +262,22 @@ export function parseStateMachineStructure(
   let machineCount = 0;
   const wireThrough = (
     fromIds: string[],
-    steps: unknown[],
+    written: unknown[],
     target: string | null,
     handle?: 'true' | 'false'
   ): { nodes: FlowNode[]; edges: FlowEdge[] } => {
+    // #310: without the steps that do nothing, as the standard parser
+    // reads every list (bugs #104, #138): a Choose's empty last case with
+    // no default, read as written, left that case's way on when it passed
+    // given as its "no" -- twice -- and none as its "yes", so the reopened
+    // canvas ended there where the automation goes on.
+    const steps = withoutNoOpSteps(written);
+    // #320: a branch that does nothing is written as its first condition
+    // with both sides empty. Dropped, that condition lost a way in, and the
+    // canvas read it as a member of the list before it (its "no" taken
+    // from there) where the automation ends. It is the one condition state
+    // with that test: the branch goes there, as drawn.
+    const drawnNoOps = noOpBranchStates(written).map((to) => ({ to }));
     // A rebuilt step's edges in, and its visual-only hint edges (the
     // standard parser draws one from the step before a Choose to each of
     // its later cases): kept as hints. Rebuilt as ordinary edges, a later
@@ -259,11 +292,14 @@ export function parseStateMachineStructure(
         }))
       );
     if (steps.length === 0) {
-      return { nodes: [], edges: target && target !== 'END' ? entryEdges([{ to: target }]) : [] };
+      return {
+        nodes: [],
+        edges: entryEdges([...(target && target !== 'END' ? [{ to: target }] : []), ...drawnNoOps]),
+      };
     }
     const key = `${fanOutHash(steps)}|${target ?? 'END'}`;
     const shared = rebuiltByContent.get(key);
-    if (shared) return { nodes: [], edges: entryEdges(shared) };
+    if (shared) return { nodes: [], edges: entryEdges([...shared, ...drawnNoOps]) };
     const onlyFrom = fromIds.length === 1 ? fromIds[0] : null;
     // #284: each branch machine read as a stand-in step, then rebuilt from
     // its own states in that step's place.
@@ -307,7 +343,7 @@ export function parseStateMachineStructure(
       }
     }
     rebuiltByContent.set(key, entries);
-    return { nodes: [], edges: entryEdges(entries) };
+    return { nodes: [], edges: entryEdges([...entries, ...drawnNoOps]) };
   };
 
   // Create edges between nodes based on transitions. A condition's
@@ -471,12 +507,136 @@ export function parseStateMachineStructure(
       if (n.type === 'condition' && fromStates.has(n.id) && markers[n.id])
         Object.assign(n.data, markers[n.id]);
     }
+    // #309: the state machine leaves out a line that only goes where
+    // another line gets to anyway (a shortcut); a condition it went to can
+    // come back with its one way in a condition's "yes" -- shaped like that
+    // condition's list member, which the drawing's plain condition wasn't.
+    // Unmarked, its empty "no" took the parent's else, and the reopened
+    // canvas went round where the automation ends. A condition the drawing
+    // recorded no marker for, going back nowhere, is then an if head.
+    const backEdgeIds = findBackEdges({ id: '', name: '', nodes, edges, version: 1 } as never);
+    const isIfHead = memberShapedIfHead(nodes, edges, backEdgeIds);
+    for (const n of nodes) {
+      if (n.type !== 'condition' || !fromStates.has(n.id) || markers[n.id]) continue;
+      const data = n.data as Record<string, unknown>;
+      if (typeof data._blockKey === 'string') continue;
+      if (edges.some((e) => e.source === n.id && backEdgeIds.has(e.id))) continue;
+      if (isIfHead(n)) data._blockKey = 'if_else';
+    }
   } else {
-    restoreConstructMarkers(nodes, edges, fromStates);
+    restoreConstructMarkers(
+      nodes,
+      edges,
+      fromStates,
+      new Map([...nodeInfoMap].map(([id, info]) => [id, info.errorExit]))
+    );
   }
-  dropInheritedAndMemberElse(nodes, edges, fromStates);
+  // #332: the error guards the canvas wouldn't read, kept as conditions --
+  // before the lists' inherited "no" lines are dropped, so a member whose
+  // "no" came from a guarded condition keeps it written out. Kept guards
+  // change the shape, so the reading is repeated on the new one.
+  const errorExits = new Map([...nodeInfoMap].map(([id, info]) => [id, info.errorExit]));
+  const before = structuredClone({ nodes, edges });
+  const guarded = new Set<string>();
+  for (let round = 0; ; round++) {
+    dropInheritedAndMemberElse(nodes, edges, fromStates, errorExits);
+    const more = unreadErrorGuards(nodes, edges, nodeInfoMap).filter((id) => !guarded.has(id));
+    if (more.length === 0 || round >= nodeInfoMap.size) break;
+    for (const id of more) guarded.add(id);
+    const fresh = structuredClone(before);
+    nodes.splice(0, nodes.length, ...fresh.nodes);
+    edges.splice(0, edges.length, ...fresh.edges);
+    for (const id of guarded) keepErrorGuard(nodes, edges, id, errorExits.get(id) ?? 'END');
+  }
+  markUnguardedLoopTestsAsIfs(nodes, edges, nodeInfoMap);
 
   return { nodes, edges };
+}
+
+/**
+ * #311: a condition state written without an error guard is an `if`, which
+ * Home Assistant sends to "no" when it can't check the test. Where the
+ * rebuilt canvas would read it as a loop's test (whose error leaves the
+ * loop), it becomes the If/Else card it is (analyzer/loops.ts untilExit).
+ */
+function markUnguardedLoopTestsAsIfs(
+  nodes: FlowNode[],
+  edges: FlowEdge[],
+  infos: Map<string, ParsedStateBlock>
+): void {
+  const flow = { id: '', name: '', nodes, edges, version: 1 } as never;
+  // Marking one can change another's reading (a list's head): until none
+  // is left, at most once each.
+  for (let round = 0; round <= infos.size; round++) {
+    const next = [...infos].find(([id, info]) => {
+      if (info.errorExit !== null) return false;
+      const node = nodes.find((n) => n.id === id);
+      if (node?.type !== 'condition') return false;
+      if (typeof (node.data as Record<string, unknown>)._blockKey === 'string') return false;
+      return untilExit(flow, id) !== null;
+    });
+    if (next === undefined) return;
+    const node = nodes.find((n) => n.id === next[0])!;
+    (node.data as Record<string, unknown>)._blockKey = 'if_else';
+  }
+}
+
+/**
+ * An error guard (unwrapErrorGuard) is folded into its state's condition
+ * only where the canvas reads that condition as a loop's test, whose error
+ * leaves the loop (analyzer/loops.ts untilExit). Anywhere else the canvas
+ * reads an error as "no" and goes on where the automation stops, so the
+ * guard is kept as the condition it is: a `not` of the same test on the
+ * "no" side, its "yes" the real false branch, its "no" the guard's exit.
+ */
+function unreadErrorGuards(
+  nodes: FlowNode[],
+  edges: FlowEdge[],
+  infos: Map<string, ParsedStateBlock>
+): string[] {
+  const flow = { id: '', name: '', nodes, edges, version: 1 } as never;
+  return [...infos]
+    .filter(([id, info]) => {
+      if (info.errorExit === null) return false;
+      if (nodes.find((n) => n.id === id)?.type !== 'condition') return false;
+      return untilExit(flow, id) === null;
+    })
+    .map(([id]) => id);
+}
+
+/** The error guard on `id`'s "no" side, kept as the `not` condition it is. */
+function keepErrorGuard(nodes: FlowNode[], edges: FlowEdge[], id: string, errorExit: string): void {
+  const node = nodes.find((n) => n.id === id);
+  const guardId = `${id}__error_guard`;
+  if (!node || nodes.some((n) => n.id === guardId)) return;
+  nodes.push({
+    id: guardId,
+    type: 'condition',
+    position: { x: 0, y: 0 },
+    // The same test as the condition reads it (its own fields, not the
+    // node's alias or markers).
+    data: {
+      condition: 'not',
+      conditions: [
+        Object.fromEntries(
+          Object.entries(node.data as Record<string, unknown>).filter(
+            ([k, v]) => !k.startsWith('_') && k !== 'alias' && v !== undefined
+          )
+        ),
+      ],
+    } as ConditionNode['data'],
+  });
+  for (const e of edges) {
+    if (e.source === id && e.sourceHandle === 'false') {
+      e.source = guardId;
+      e.sourceHandle = 'true';
+      e.id = `${e.id}__guarded`;
+    }
+  }
+  edges.push(createEdge(id, guardId, 'false'));
+  if (errorExit !== 'END' && nodes.some((n) => n.id === errorExit)) {
+    edges.push(createEdge(guardId, errorExit, 'false'));
+  }
 }
 
 /** The variable a stand-in step for a branch machine sets (#284). */
@@ -639,13 +799,20 @@ function spliceMachine(
   );
   if (!standIn) return;
   const id = standIn.id;
-  const exitTo = (to: string): FlowEdge[] =>
-    machine.exits.map((x) => createEdge(x.source, to, x.sourceHandle ?? undefined));
+  // A line out keeps its kind: the standard parser draws a hint line from
+  // the step before a Choose to each of its later cases, and made an
+  // ordinary line, a later case ran whatever the cases before it decided
+  // (#296, #149's class).
+  const exitTo = (to: string, type?: FlowEdge['type']): FlowEdge[] =>
+    machine.exits.map((x) => ({
+      ...createEdge(x.source, to, x.sourceHandle ?? undefined),
+      ...(type !== undefined ? { type } : {}),
+    }));
   const edges: FlowEdge[] = [];
   for (const e of result.edges) {
     if (e.target === id)
       edges.push({ ...e, id: createEdge(e.source, machine.entry).id, target: machine.entry });
-    else if (e.source === id) edges.push(...exitTo(e.target));
+    else if (e.source === id) edges.push(...exitTo(e.target, e.type));
     else edges.push(e);
   }
   result.edges = [...edges, ...machine.edges];
@@ -850,14 +1017,17 @@ function restoreCountLoopReentry(nodes: FlowNode[], edges: FlowEdge[]): void {
  * an AND-list member's false branch out explicitly (the list head's else);
  * the graph convention leaves it off (the member shares the head's). A
  * decompiled member keeps its false edge only if it goes somewhere other
- * than the head's else. Needs the markers first: a member is a condition
+ * than the head's else, or goes elsewhere than the head when its test can't
+ * be checked (#298). Needs the markers first: a member is a condition
  * with no `_blockKey` whose one way in is the single true edge of a
  * condition.
  */
 function dropInheritedAndMemberElse(
   nodes: FlowNode[],
   edges: FlowEdge[],
-  stateIds: Set<string>
+  stateIds: Set<string>,
+  /** Each state's error exit (ParsedStateBlock.errorExit). */
+  errorExits: Map<string, string | null>
 ): void {
   const byId = new Map(nodes.map((n) => [n.id, n]));
   const falseOf = (id: string): string[] =>
@@ -886,7 +1056,15 @@ function dropInheritedAndMemberElse(
     const parent = parentOf(n);
     if (!parent) continue;
     const own = falseOf(n.id);
-    if (own.length > 0 && JSON.stringify(own) === JSON.stringify(falseOf(parent.id)))
+    // #298: and where its test can't be checked it goes where the head's
+    // does: an until test's own "no" line (error guard, bug #63) going where
+    // the list's else does is the member's own, not the list's.
+    const sameErrorExit = (errorExits.get(n.id) ?? null) === (errorExits.get(parent.id) ?? null);
+    if (
+      own.length > 0 &&
+      JSON.stringify(own) === JSON.stringify(falseOf(parent.id)) &&
+      sameErrorExit
+    )
       toDrop.push(n.id);
   }
   for (const id of toDrop) {
@@ -923,7 +1101,9 @@ function dropInheritedAndMemberElse(
 function restoreConstructMarkers(
   nodes: FlowNode[],
   edges: FlowEdge[],
-  stateIds: Set<string>
+  stateIds: Set<string>,
+  /** Each state's error exit (ParsedStateBlock.errorExit). */
+  errorExits: Map<string, string | null>
 ): void {
   const backEdgeIds = findBackEdges({ id: '', name: '', nodes, edges, version: 1 } as never);
   const byId = new Map(nodes.map((n) => [n.id, n]));
@@ -1031,7 +1211,19 @@ function restoreConstructMarkers(
     if (whileHeadsByStep.has(e.target) && byId.get(e.target)?.type === 'condition') continue;
     if (doWhileTests.has(e.source)) continue;
     const source = byId.get(e.source);
-    if (source?.type === 'condition' && !backTargets.has(source.id) && !isCountTest(source)) {
+    // #304: and only a test the state machine wrote as one -- its else an
+    // error guard (bug #63: a test that can't be checked leaves the loop).
+    // Written plain, an error reads as "no" and goes round; marked a Repeat
+    // Until card, the reopened canvas left the loop there and the
+    // automation opened read-only (the every-small-drawing test, reopened
+    // without hints).
+    const guarded = (errorExits.get(e.source) ?? null) !== null;
+    if (
+      source?.type === 'condition' &&
+      !backTargets.has(source.id) &&
+      !isCountTest(source) &&
+      guarded
+    ) {
       untilTests.add(source.id);
     }
   }
@@ -1081,32 +1273,31 @@ function restoreConstructMarkers(
     if (source?.type === 'condition' && isCountTest(source) && e.sourceHandle === 'true') continue;
     if (isDoWhileBackEdge(e)) continue;
     const target = byId.get(e.target);
-    if (target?.type === 'condition' && !isCountTest(target)) whileHeads.add(target.id);
+    // #292's class (the every-small-drawing test, reopened without hints):
+    // a test whose round is on its "no" side -- the line back can't be
+    // reached from its "yes" side -- is no Repeat While card: marked one,
+    // a test that can't be checked went round (a card's error takes "no")
+    // where the saved automation leaves the loop. Left plain, it reads
+    // as drawn (analyzer/loops.ts untilExit).
+    if (target?.type === 'condition' && !isCountTest(target)) {
+      const fromYes = new Set<string>();
+      const todo = edges
+        .filter((x) => x.source === target.id && x.sourceHandle === 'true')
+        .map((x) => x.target);
+      while (todo.length > 0) {
+        const id = todo.pop()!;
+        if (fromYes.has(id)) continue;
+        fromYes.add(id);
+        for (const x of edges) if (x.source === id && !backEdgeIds.has(x.id)) todo.push(x.target);
+      }
+      if (fromYes.has(e.source) || e.source === target.id) whileHeads.add(target.id);
+    }
   }
   // (A branch machine's move out of its branch, #284, is END to the
   // machine: read as the main dispatcher's END is -- a canvas fuzz case at
   // seed 20261023 had a Choose test after an until in a branch come back
   // as the until's list member, so the loop went round on its "no".)
-  const falseTargets = (id: string): string[] =>
-    edges
-      .filter((e) => e.source === id && e.sourceHandle === 'false' && e.target !== MACHINE_EXIT)
-      .map((e) => e.target);
-  /** The edge into a run of disabled pass-through steps ending at `edge`'s
-   * target, standing for `edge` (one way in, one way out, `enabled: false`). */
-  const throughDisabled = (edge: FlowEdge): FlowEdge => {
-    let current = edge;
-    for (let hops = 0; hops < nodes.length; hops++) {
-      const source = byId.get(current.source);
-      const data = (source?.data ?? {}) as Record<string, unknown>;
-      if (!source || source.type === 'condition' || source.type === 'trigger') return current;
-      if (data.enabled !== false) return current;
-      const into = edges.filter((e) => e.target === source.id && !backEdgeIds.has(e.id));
-      const outOf = edges.filter((e) => e.source === source.id);
-      if (into.length !== 1 || outOf.length !== 1) return current;
-      current = into[0];
-    }
-    return current;
-  };
+  const isIfHead = memberShapedIfHead(nodes, edges, backEdgeIds);
   for (const n of nodes) {
     // Only conditions rebuilt from dispatch states. Nodes parsed from a
     // state's inline fan-out came through the native parser, which already
@@ -1144,13 +1335,49 @@ function restoreConstructMarkers(
       if (!isMember) data._blockKey = 'if_else';
       continue;
     }
-    // A condition whose false branch ends the flow, shaped like the 2nd
-    // member of an AND list (its one way in is the single true edge of a
-    // condition), would inherit that parent's else (bug #27) -- wrong
-    // unless the parent's false branch ends the flow too, in which case
-    // reading it as a list member means the same thing and keeps it in the
-    // list (e.g. a `while: [A, B]`). Mark it as an if head only then.
-    if (falseTargets(n.id).length > 0) continue;
+    if (isIfHead(n)) data._blockKey = 'if_else';
+  }
+}
+
+/**
+ * Whether a condition rebuilt from a state is an if head the canvas would
+ * read as a list member: its false branch ends the flow, and it is shaped
+ * like the 2nd member of an AND list (its one way in is the single true
+ * edge of a condition), so it would inherit that parent's else (bug #27)
+ * -- wrong unless the parent's false branch ends the flow too, in which
+ * case reading it as a list member means the same thing and keeps it in
+ * the list (e.g. a `while: [A, B]`). A real member comes back with its
+ * false edge written out (the state machine renders a member's inherited
+ * else), so it is never one of these.
+ */
+function memberShapedIfHead(
+  nodes: FlowNode[],
+  edges: FlowEdge[],
+  backEdgeIds: Set<string>
+): (n: FlowNode) => boolean {
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const falseTargets = (id: string): string[] =>
+    edges
+      .filter((e) => e.source === id && e.sourceHandle === 'false' && e.target !== MACHINE_EXIT)
+      .map((e) => e.target);
+  /** The edge into a run of disabled pass-through steps ending at `edge`'s
+   * target, standing for `edge` (one way in, one way out, `enabled: false`). */
+  const throughDisabled = (edge: FlowEdge): FlowEdge => {
+    let current = edge;
+    for (let hops = 0; hops < nodes.length; hops++) {
+      const source = byId.get(current.source);
+      const data = (source?.data ?? {}) as Record<string, unknown>;
+      if (!source || source.type === 'condition' || source.type === 'trigger') return current;
+      if (data.enabled !== false) return current;
+      const into = edges.filter((e) => e.target === source.id && !backEdgeIds.has(e.id));
+      const outOf = edges.filter((e) => e.source === source.id);
+      if (into.length !== 1 || outOf.length !== 1) return current;
+      current = into[0];
+    }
+    return current;
+  };
+  return (n) => {
+    if (falseTargets(n.id).length > 0) return false;
     // Bug #266: through disabled steps, which the strategies take out
     // before reading the graph (analyzer/disabled-steps.ts): a condition
     // after one is, by then, right after the condition before it.
@@ -1160,19 +1387,15 @@ function restoreConstructMarkers(
     const fromConditionYes = incoming.some(
       (e) => e.sourceHandle === 'true' && byId.get(e.source)?.type === 'condition'
     );
-    if (!fromConditionYes) continue;
+    if (!fromConditionYes) return false;
     // Bug #86 (2026-09-27): one with other ways in as well -- where a
     // parallel's branches meet again, one of them ending in an until loop
     // -- is never a list member, but read as one it joined that
     // condition's list (the until loop ran until both passed).
-    if (incoming.length > 1) {
-      data._blockKey = 'if_else';
-      continue;
-    }
+    if (incoming.length > 1) return true;
     const parent = byId.get(incoming[0].source);
-    if (parent?.type !== 'condition') continue;
-    if (falseTargets(parent.id).length > 0) data._blockKey = 'if_else';
-  }
+    return parent?.type === 'condition' && falseTargets(parent.id).length > 0;
+  };
 }
 
 /**
@@ -1227,6 +1450,11 @@ export interface ParsedStateBlock {
   extras: unknown[];
   thenExtras: unknown[];
   elseExtras: unknown[];
+  /** Where a condition state goes when its test can't be checked, when its
+   * else is an error guard (bug #63; 'END' to end); null without one. */
+  errorExit: string | null;
+  /** A condition state's test, as written (its `if:`). */
+  test?: unknown;
 }
 
 /**
@@ -1246,6 +1474,17 @@ function unwrapErrorGuard(branch: unknown, test: unknown): unknown {
   if (!negation || negation.condition !== 'not') return branch;
   if (JSON.stringify(negation.conditions) !== JSON.stringify(test)) return branch;
   return guard.then;
+}
+
+/** Where an error guard (see unwrapErrorGuard) goes when the test can't be
+ * checked ('END' to end); null when `branch` is no error guard. */
+function errorGuardExit(branch: unknown, test: unknown): string | null {
+  if (unwrapErrorGuard(branch, test) === branch || !Array.isArray(branch)) return null;
+  const guard = branch[0] as Record<string, unknown>;
+  const move = (Array.isArray(guard.else) ? guard.else : []).find(isTransitionStep) as
+    | { variables: { current_node: string } }
+    | undefined;
+  return move?.variables.current_node ?? null;
 }
 
 /** `{ variables: { current_node: X } }` and nothing else. */
@@ -1423,12 +1662,14 @@ export function parseStateMachineChooseBlock(
   let extras: unknown[] = [];
   let thenExtras: unknown[] = [];
   let elseExtras: unknown[] = [];
+  let errorExit: string | null = null;
   const ifItem = (sequence as Record<string, unknown>[]).find(
     (item) => item && typeof item === 'object' && Array.isArray(item.if)
   );
   if (nodeType === 'condition' && ifItem) {
     thenExtras = branchExtras(ifItem.then);
     elseExtras = branchExtras(unwrapErrorGuard(ifItem.else, ifItem.if));
+    errorExit = errorGuardExit(ifItem.else, ifItem.if);
   } else if (nodeType !== 'condition') {
     const items = (sequence as unknown[]).filter((item) => !isTransitionStep(item));
     const first = items[0] as Record<string, unknown> | undefined;
@@ -1447,6 +1688,8 @@ export function parseStateMachineChooseBlock(
     trueTarget,
     falseTarget,
     ownStep,
+    errorExit,
+    ...(nodeType === 'condition' && ifItem ? { test: ifItem.if } : {}),
     extras,
     thenExtras,
     elseExtras,

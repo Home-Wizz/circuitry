@@ -16,7 +16,28 @@
     "inProgress": "Diese Automation wird bereits gespeichert; warten Sie, bis das Speichern abgeschlossen ist.",
     "keptElsewhere": "In einer YAML-Datei gespeichert; dort bearbeiten",
     "registryNotSet": "Gespeichert, aber Symbol, Bereich, Labels oder Kategorie konnten nicht gesetzt werden. Setzen Sie sie in den Automatisierungseinstellungen von Home Assistant.",
-    "readingDiffers": "Schreibgeschützt geöffnet: der Canvas läuft nicht wie diese Automatisierung; als Kopie speichern und vergleichen"
+    "readingDiffers": "Schreibgeschützt geöffnet: der Canvas läuft nicht wie diese Automatisierung; als Kopie speichern und vergleichen",
+    "chooseGatesNothing": {
+      "title": "Diese Auswahl hält nichts an",
+      "body": "Jede Option von {{choose}} führt direkt weiter zu {{next}}, und wenn keine passt, geht es dort ebenfalls weiter. Was danach kommt, läuft also, egal was die Optionen sagen.",
+      "hint": "Um anzuhalten, wenn nichts passt, gib der letzten Option eine „Sonst“-Linie zu einer Stopp-Karte.",
+      "theChoose": "der Auswahl",
+      "theNext": "der nächsten Karte",
+      "saveAnyway": "Trotzdem speichern",
+      "addStop": "Stopp hinzufügen"
+    },
+    "blocked": {
+      "title_one": "Home Assistant würde hier 1 Sache ablehnen oder braucht sie ausgefüllt. Behebe sie und speichere dann.",
+      "title_other": "Home Assistant würde hier {{count}} Dinge ablehnen oder braucht sie ausgefüllt. Behebe sie und speichere dann.",
+      "settings": "Automatisierungseinstellungen",
+      "whereSettings": "Automatisierungswerkzeuge › Einstellungen…",
+      "showCard": "Karte zeigen",
+      "kind": {
+        "trigger": "Wenn",
+        "condition": "Und",
+        "action": "Dann"
+      }
+    }
   },
   "import": {
     "title": "Automatisierung öffnen",

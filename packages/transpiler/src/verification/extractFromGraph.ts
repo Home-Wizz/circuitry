@@ -5,7 +5,13 @@ import {
   type FlowNode,
   TRIGGER_KEYS_KEEPING_NULL,
 } from '@circuitry/shared';
-import { untilExit } from '../analyzer/loops';
+import {
+  goesRoundEarlyInAWhile,
+  hasCycleWithin,
+  loopStructure,
+  twoWaysOutOfALoop,
+  untilExit,
+} from '../analyzer/loops';
 import { findBackEdges } from '../analyzer/topology';
 import { undominated } from '../utils/undominated';
 import type { BProgram, BStep } from './behaviorProgram';
@@ -56,7 +62,7 @@ interface Ctx {
   sharedEntries: Map<string, SharedLoopEntryError>;
   /** #284, the same for a line back no loop owns (#114), by the step it
    * leaves from. */
-  unownedEdges: Map<string, { error: Error; targets: string[] }>;
+  unownedEdges: Map<string, { error: Error; targets: string[]; loop?: Set<string> }>;
   /** Set only by findTreeContinuedPathEnds: where to record them. */
   pathEnds?: PathEnd[];
   /** One entry per parallel (fan-out) the walk is inside, innermost last:
@@ -134,6 +140,9 @@ interface LoopInfo {
    * drawn they run each round beside going round; HA's `repeat` can only
    * go round, so a walk reaching the loop refuses). */
   beside?: string[];
+  /** #293: a do-while's test on the way round (not its own) that ends on one
+   * side: no repeat says the round stops there. */
+  endsOnTheWay?: string;
   /** For 'count' only -- see extractCountValue's doc comment. */
   count?: string;
   /** For 'count' only -- see counterVarNameFromCondition's doc comment. The
@@ -250,9 +259,14 @@ function detectLoops(ctx: Ctx): Map<string, LoopInfo> {
     // (the same loop-back as the head's): that is the same loop, recorded
     // from the member. Keep whichever record has the longer list (the
     // head's).
+    // Bug #294: the same kind both ways round -- a do-while is recorded as
+    // a negated until, so an until on a list's "no" side and a do-while on
+    // its member's "yes" side, back to the same step, looked like one loop
+    // recorded twice, and the other side's round was lost.
     if (
       existing &&
       existing.kind === info.kind &&
+      Boolean(existing.negated) === Boolean(info.negated) &&
       existing.testNodeId !== info.testNodeId &&
       ((existing.testNodeIds ?? []).includes(info.testNodeId) ||
         (info.testNodeIds ?? []).includes(existing.testNodeId))
@@ -331,30 +345,47 @@ function detectLoops(ctx: Ctx): Map<string, LoopInfo> {
       (source.type !== 'condition' || isBodyExitIntoEnclosingLoop)
     ) {
       // while: entry = the test node itself. Bug #263: a step that loops
-      // back from the head's "no" side -- the body is the no side, the
+      // back from the test's "no" side -- the body is the no side, the
       // exit the yes side: `while: [not C]`. Read as a while on the yes
       // side, its body came out empty (native wrote it so, and this
-      // agreed).
-      const yesSide = forwardOutgoing(ctx, target.id)
+      // agreed). Bug #292: the test may be a list (`and`); its "yes" side
+      // is the last member's -- a member's own "no" line is the list's
+      // "no", so reaching the step through it from the head's "yes" side
+      // is no round on the yes side.
+      const testNodeIds = loopConditionChain(ctx, target.id, 'while');
+      const lastTestId = testNodeIds[testNodeIds.length - 1];
+      const trueEdges = forwardOutgoing(ctx, lastTestId).filter((e) => e.sourceHandle === 'true');
+      const falseEdges = forwardOutgoing(ctx, target.id).filter((e) => e.sourceHandle === 'false');
+      // Bug #294: a way out that comes back round the loop (an if/else
+      // meeting at a Join that goes back to the test): no side leaves, so
+      // no repeat says it. Read as a while, what follows it was the steps
+      // already read, nothing, and the loop ended where the canvas goes on.
+      if (
+        forwardReach(
+          ctx,
+          falseEdges.map((e) => e.target)
+        ).has(source.id)
+      ) {
+        unowned(source.id, target.id);
+        continue;
+      }
+      const yesSide = trueEdges.map((e) => e.target);
+      // Whether the round is on the yes side: its own lines count even when
+      // they are lines back (a "yes" line straight back round).
+      const yesLines = (ctx.outgoing.get(lastTestId) ?? [])
         .filter((e) => e.sourceHandle === 'true')
         .map((e) => e.target);
-      if (source.type !== 'condition' && !forwardReach(ctx, yesSide).has(source.id)) {
+      if (source.type !== 'condition' && !forwardReach(ctx, yesLines).has(source.id)) {
         setLoop(target.id, {
           kind: 'while',
           testNodeId: target.id,
-          testNodeIds: [target.id],
-          bodyEntryIds: forwardOutgoing(ctx, target.id)
-            .filter((e) => e.sourceHandle === 'false')
-            .map((e) => e.target),
+          testNodeIds,
+          bodyEntryIds: falseEdges.map((e) => e.target),
           exitTargetIds: yesSide,
           negated: true,
         });
         continue;
       }
-      const testNodeIds = loopConditionChain(ctx, target.id, 'while');
-      const lastTestId = testNodeIds[testNodeIds.length - 1];
-      const trueEdges = forwardOutgoing(ctx, lastTestId).filter((e) => e.sourceHandle === 'true');
-      const falseEdges = forwardOutgoing(ctx, target.id).filter((e) => e.sourceHandle === 'false');
       setLoop(target.id, {
         kind: 'while',
         testNodeId: target.id,
@@ -394,12 +425,33 @@ function detectLoops(ctx: Ctx): Map<string, LoopInfo> {
       // Read as a count loop (below) its body walk stopped at once and the
       // count was empty.
       const falseEdges = forwardOutgoing(ctx, source.id).filter((e) => e.sourceHandle === 'false');
+      // Bug #293: a test on the way round with a side that just ends (in a
+      // fan-out's branch): the round stops there, which `repeat: until`
+      // can't say. Read as an `if` with nothing in it, the loop went round
+      // on its last test alone, and native wrote it so.
+      const onTheWay = new Set<string>();
+      const way = [edge.target];
+      while (way.length > 0) {
+        const id = way.pop()!;
+        if (id === source.id || onTheWay.has(id)) continue;
+        onTheWay.add(id);
+        for (const e of forwardOutgoing(ctx, id)) way.push(e.target);
+      }
+      // Only tests the loop's test is reached from (one beside it ending is
+      // a branch of its own, #267).
+      const reachesTest = (id: string) => forwardReach(ctx, [id]).has(source.id);
+      const endsOnTheWay = [...onTheWay].find((id) => {
+        if (ctx.nodesById.get(id)?.type !== 'condition' || !reachesTest(id)) return false;
+        const sides = new Set((ctx.outgoing.get(id) ?? []).map((e) => e.sourceHandle));
+        return !sides.has('true') || !sides.has('false');
+      });
       setLoop(edge.target, {
         kind: 'until',
         testNodeId: source.id,
         bodyEntryIds: [edge.target],
         exitTargetIds: falseEdges.map((e) => e.target),
         negated: true,
+        ...(endsOnTheWay !== undefined ? { endsOnTheWay } : {}),
         beside: forwardOutgoing(ctx, source.id)
           .filter((e) => e.sourceHandle === 'true')
           .map((e) => e.target),
@@ -481,23 +533,127 @@ function detectLoops(ctx: Ctx): Map<string, LoopInfo> {
   // of the loops was written once. No structure holds it (the state
   // machine follows the lines). Each loop is kept by the step a walk
   // meets it at, so a walk that never gets there is unaffected.
+  // #303: a member of one loop's test list too (an until's list whose
+  // last member is another loop's test): written, the outer loop checked
+  // it again after the inner one had.
   const entryOfTest = new Map<string, string>();
   for (const [entryId, loop] of loops) {
-    const other = entryOfTest.get(loop.testNodeId);
-    if (other === undefined) {
-      entryOfTest.set(loop.testNodeId, entryId);
-      continue;
+    for (const test of new Set([loop.testNodeId, ...(loop.testNodeIds ?? [])])) {
+      const other = entryOfTest.get(test);
+      if (other === undefined) {
+        entryOfTest.set(test, entryId);
+        continue;
+      }
+      if (other === entryId) continue;
+      for (const id of [other, entryId]) {
+        if (ctx.unownedEdges.has(id)) continue;
+        ctx.unownedEdges.set(id, {
+          error: new Error(
+            `"${test}" is the test of two loops (going back to "${other}" and to "${entryId}"); no repeat holds both`
+          ),
+          // Reached by a walk, always a problem.
+          targets: [id],
+        });
+      }
     }
-    for (const id of [other, entryId]) {
+  }
+  // #302: two loops that overlap, neither inside the other: one's test a
+  // step of the other's round (from its start to the lines back into it)
+  // while its own start is outside that round. Read as nested repeats, the
+  // first written used the shared step up and the other's line back was
+  // lost; native wrote the same and this agreed.
+  // A loop's round: the steps its start reaches going on that reach one of
+  // the lines back into it -- what its start reaches, met with what reaches
+  // those lines' sources (each one search, forward lines only). It used to
+  // ask both of every step, a search each, for every loop: on a long
+  // automation each save took more than twice as long (the 150-step save,
+  // #224's test, went from under 3 s to about 7 under load).
+  const forwardInto = new Map<string, string[]>();
+  for (const n of ctx.flow.nodes)
+    for (const e of forwardOutgoing(ctx, n.id))
+      forwardInto.set(e.target, [...(forwardInto.get(e.target) ?? []), n.id]);
+  const spread = (from: string[], next: (id: string) => string[]): Set<string> => {
+    const seen = new Set<string>();
+    const queue = [...from];
+    while (queue.length > 0) {
+      const id = queue.shift()!;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      queue.push(...next(id));
+    }
+    return seen;
+  };
+  const roundOf = (entryId: string): Set<string> => {
+    const ends = ctx.flow.edges
+      .filter((e) => ctx.backEdgeIds.has(e.id) && e.target === entryId)
+      .map((e) => e.source);
+    const fromStart = spread([entryId], (id) => forwardOutgoing(ctx, id).map((e) => e.target));
+    const toEnds = spread(ends, (id) => forwardInto.get(id) ?? []);
+    return new Set([entryId, ...[...fromStart].filter((id) => toEnds.has(id))]);
+  };
+  for (const [outerEntry] of loops) {
+    const round = roundOf(outerEntry);
+    for (const [innerEntry, inner] of loops) {
+      if (innerEntry === outerEntry) continue;
+      const tests = inner.testNodeIds ?? [inner.testNodeId];
+      const shared = tests.find((t) => round.has(t));
+      if (shared === undefined || round.has(innerEntry)) continue;
+      for (const id of [outerEntry, innerEntry]) {
+        if (ctx.unownedEdges.has(id)) continue;
+        ctx.unownedEdges.set(id, {
+          error: new Error(
+            `the loops going back to "${innerEntry}" and to "${outerEntry}" overlap ("${shared}" is in both, neither inside the other); no repeat holds them`
+          ),
+          targets: [id],
+        });
+      }
+    }
+  }
+  // #315: a loop entered at more than one step (an irreducible region):
+  // repeats nest, each entered at its start, so none holds it. Native
+  // wrote one copy per way in, one of them without a step, and this read
+  // it the same way.
+  for (const loop of loopStructure(ctx.flow).loops) {
+    if (!loop.irreducible) continue;
+    const heads = [...loop.heads].sort();
+    for (const id of heads) {
       if (ctx.unownedEdges.has(id)) continue;
       ctx.unownedEdges.set(id, {
         error: new Error(
-          `"${loop.testNodeId}" is the test of two loops (going back to "${other}" and to "${entryId}"); no repeat holds both`
+          `the loop going round ${heads.map((h) => `"${h}"`).join(' and ')} is entered at more than one step; no repeat holds it`
         ),
-        // Reached by a walk, always a problem.
         targets: [id],
+        // #337: only a walk that goes round it: a branch whose end cuts
+        // the loop (the branches meet in it) reads no loop there.
+        loop: loop.nodes,
       });
     }
+  }
+  // #317: a path in a while's body going back to the test before the step
+  // its condition's branches meet at: a body is one list, so no repeat
+  // holds it (native wrote the meeting step after the if, for that path
+  // too, and this read it the same way).
+  const early = goesRoundEarlyInAWhile(ctx.flow);
+  if (early !== null && !ctx.unownedEdges.has(early.head)) {
+    ctx.unownedEdges.set(early.head, {
+      error: new Error(
+        `a path from "${early.at}" goes back round to "${early.head}" before "${early.meeting}", where its branches meet; no repeat holds it`
+      ),
+      targets: [early.head],
+    });
+  }
+  // #318: a loop two of its tests lead out of, to a common step: one of
+  // those ways out is a break, which no repeat holds (native wrote the
+  // first test as an if in a loop on the second, and this read it the
+  // same way).
+  const twoOut = twoWaysOutOfALoop(ctx.flow);
+  if (twoOut !== null && !ctx.unownedEdges.has(twoOut.head)) {
+    ctx.unownedEdges.set(twoOut.head, {
+      error: new Error(
+        `"${twoOut.first}" and "${twoOut.second}" both lead out of the loop at "${twoOut.head}" and on to the same step; no repeat holds two ways out`
+      ),
+      targets: [twoOut.head],
+    });
   }
   return loops;
 }
@@ -704,6 +860,11 @@ function findConvergenceSet(
     minimal = [];
   }
   if (minimal.length <= 1) return minimal;
+  // #321: an if's branches meet at a set of steps only where no run goes
+  // to one of them and not the others (a fan-out to all of them). Where one
+  // run goes to a step and another to a path that ends, they don't meet at
+  // all: each branch runs its own way on.
+  if (exclusive && !noRunSplitsTheMeeting(ctx, groups, minimal, stop)) return [];
 
   const withDistance = minimal.map((id) => ({
     id,
@@ -749,7 +910,9 @@ function runGetsAround(
     let run: Run;
     if (meeting.has(id)) run = { runsIt: true, around: false };
     else if (after.has(id)) run = { runsIt: false, around: true };
-    else if (stopHas(stop, id)) run = { runsIt: false, around: false };
+    // #323: a run that reaches where the walk stops (an outer meeting)
+    // without the meeting point goes on past it there too.
+    else if (stopHas(stop, id)) run = { runsIt: false, around: true };
     else if (ctx.nodesById.get(id)?.type === 'condition') {
       const yes = together(
         forwardOutgoing(ctx, id)
@@ -767,6 +930,49 @@ function runGetsAround(
     return run;
   };
   return groups.some((group) => together(group).around);
+}
+
+/** #321: whether `members` can be where `groups` (an if's branches) meet:
+ * no run reaches one of them without the others -- a condition's run takes
+ * either side, a step's runs every line out of it (a fan-out). A run that
+ * ends first, at none of them (a `stop` in a branch), doesn't count. */
+function noRunSplitsTheMeeting(
+  ctx: Ctx,
+  groups: string[][],
+  members: string[],
+  stop: string | Set<string> | null
+): boolean {
+  const memberSet = new Set(members);
+  return members.every((target) => {
+    type Reach = 'hit' | 'miss' | 'none';
+    const seen = new Map<string, Reach>();
+    const ofLines = (ids: string[]): Reach => {
+      const each = ids.map(reach);
+      return each.includes('hit') ? 'hit' : each.includes('miss') ? 'miss' : 'none';
+    };
+    const reach = (id: string): Reach => {
+      const known = seen.get(id);
+      if (known !== undefined) return known;
+      seen.set(id, 'none');
+      let result: Reach;
+      if (id === target) result = 'hit';
+      else if (memberSet.has(id)) result = 'miss';
+      else if (stopHas(stop, id)) result = 'none';
+      else if (ctx.nodesById.get(id)?.type === 'condition') {
+        const side = (h: 'true' | 'false') =>
+          ofLines(
+            forwardOutgoing(ctx, id)
+              .filter((e) => e.sourceHandle === h)
+              .map((e) => e.target)
+          );
+        const sides = [side('true'), side('false')];
+        result = sides.includes('miss') ? 'miss' : sides.includes('hit') ? 'hit' : 'none';
+      } else result = ofLines(forwardOutgoing(ctx, id).map((e) => e.target));
+      seen.set(id, result);
+      return result;
+    };
+    return groups.every((group) => ofLines(group) !== 'miss');
+  });
 }
 
 /** An enabled `stop` step with nothing after it and one way in: a stop of
@@ -909,6 +1115,38 @@ function stopHas(stop: string | Set<string> | null, id: string): boolean {
   return stop instanceof Set ? stop.has(id) : stop === id;
 }
 
+/** #319: a while's or until's way out with no line is a path end (decision
+ * D1: the run stops there), not the end of the loop and on to whatever the
+ * tree reading carries on with (an outer loop's next round) -- unless the
+ * loop is a branch (inside a parallel, or a step in it also leads out),
+ * where a path that ends ends only its branch. The way out is
+ * a while's head's "no" side (its "yes" when negated), an until's last
+ * test's "yes" side (its "no" when negated). */
+function recordLoopExitEnd(ctx: Ctx, loop: LoopInfo, stop: string | Set<string> | null): void {
+  if (loop.exitTargetIds.length > 0) return;
+  // Inside a parallel branch a path that ends ends only its branch; a stop
+  // there would end the others too.
+  if (ctx.parallels.length > 0) return;
+  const tests = loop.testNodeIds ?? [loop.testNodeId];
+  const at = loop.kind === 'until' ? tests[tests.length - 1] : tests[0];
+  // The same where a step in the loop also leads out of it (a line round an
+  // outer loop beside this one): the loop is a branch of that fan-out.
+  const { loops, innermost } = loopStructure(ctx.flow);
+  const index = innermost.get(at);
+  if (index === undefined) return;
+  const inLoop = loops[index].nodes;
+  const stepLeads = [...inLoop].some(
+    (id) =>
+      ctx.nodesById.get(id)?.type !== 'condition' &&
+      (ctx.outgoing.get(id) ?? []).some((e) => !inLoop.has(e.target))
+  );
+  if (stepLeads) return;
+  const exitIsYes = (loop.kind === 'until') !== (loop.negated === true);
+  const handle = exitIsYes ? 'true' : 'false';
+  if ((ctx.outgoing.get(at) ?? []).some((e) => e.sourceHandle === handle)) return;
+  recordPathEnd(ctx, stop, at, handle);
+}
+
 /** Records a path end when findTreeContinuedPathEnds is collecting them:
  * only where something would run after it in the tree reading (`stop` is
  * set: an enclosing if's meeting point or loop test), and not inside a
@@ -986,11 +1224,18 @@ function walkBranches(
   // that ends in a branch ends only that branch (bug #260: a `stop` there
   // ended the whole run after one round). Not a fan-out that nothing
   // leaves round the loop from (#154: there the automation stops).
+  // On the same side: a test whose "yes" goes back round and whose "no"
+  // fans out runs one or the other, so nothing goes round after that
+  // parallel (#328: its ends were read as only ending their branches, no
+  // stop was written, and the tree reading carried on to an outer meeting).
   const goesRoundToo = ctx.flow.nodes.some((n) => {
     const out = ctx.outgoing.get(n.id) ?? [];
+    const fan = ids.map((id) => out.find((e) => e.target === id && !ctx.backEdgeIds.has(e.id)));
+    if (fan.some((e) => e === undefined)) return false;
+    const side = fan[0]?.sourceHandle;
     return (
-      out.some((e) => ctx.backEdgeIds.has(e.id)) &&
-      ids.every((id) => out.some((e) => e.target === id && !ctx.backEdgeIds.has(e.id)))
+      fan.every((e) => e?.sourceHandle === side) &&
+      out.some((e) => ctx.backEdgeIds.has(e.id) && e.sourceHandle === side)
     );
   });
   ctx.parallels.push(!goesRoundToo && pathEndsAfter(ctx, ids, stop));
@@ -1080,6 +1325,39 @@ function forwardReach(ctx: Ctx, starts: string[]): Set<string> {
     for (const e of forwardOutgoing(ctx, id)) queue.push(e.target);
   }
   return seen;
+}
+
+/** Whether a line back round leaves the steps reached from `starts`
+ * before `bound` (#346). */
+function goesRoundBefore(ctx: Ctx, starts: string[], bound: Set<string>): boolean {
+  const region = new Set<string>();
+  const queue = starts.filter((id) => !bound.has(id));
+  while (queue.length > 0) {
+    const id = queue.shift()!;
+    if (region.has(id)) continue;
+    region.add(id);
+    for (const e of forwardOutgoing(ctx, id)) if (!bound.has(e.target)) queue.push(e.target);
+  }
+  return [...region].some((id) =>
+    (ctx.outgoing.get(id) ?? []).some(
+      (e) => ctx.backEdgeIds.has(e.id) && !region.has(e.target) && !bound.has(e.target)
+    )
+  );
+}
+
+/** Whether an enabled `stop` step is reached from `starts` before `until`. */
+function stopsBefore(ctx: Ctx, starts: string[], until: string): boolean {
+  const seen = new Set<string>();
+  const queue = starts.filter((id) => id !== until);
+  while (queue.length > 0) {
+    const id = queue.shift()!;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const data = ctx.nodesById.get(id)?.data as Record<string, unknown> | undefined;
+    if (data !== undefined && 'stop' in data && data.enabled !== false) return true;
+    for (const e of forwardOutgoing(ctx, id)) if (e.target !== until) queue.push(e.target);
+  }
+  return false;
 }
 
 /** Bug #267: runs `walkOn` as branches beside the way the walk carries on,
@@ -1263,7 +1541,12 @@ function walk(
   // A line back no loop owns, unless it leads out of what this walk reads
   // (to where its branch ends): that isn't this walk's loop (#284).
   const unownedLine = ctx.unownedEdges.get(nodeId);
-  if (unownedLine?.targets.some((t) => !stopHas(stop, t))) throw unownedLine.error;
+  if (
+    unownedLine?.targets.some((t) => !stopHas(stop, t)) &&
+    (unownedLine.loop === undefined ||
+      hasCycleWithin(ctx.flow, new Set([...unownedLine.loop].filter((id) => !stopHas(stop, id)))))
+  )
+    throw unownedLine.error;
   const loop = nodeId === suppressLoopId ? undefined : ctx.loopsByEntry.get(nodeId);
   if (loop) {
     if (loop.kind === 'while') {
@@ -1271,6 +1554,7 @@ function walk(
       const body = insideLoop(ctx, () =>
         buildContinuation(ctx, loop.bodyEntryIds, loop.testNodeId, new Set(), nodeId)
       );
+      recordLoopExitEnd(ctx, loop, stop);
       const after = buildContinuation(ctx, loop.exitTargetIds, stop, visited);
       return [{ k: 'repeat', mode: 'while', test: cond, body }, ...after];
     }
@@ -1283,10 +1567,15 @@ function walk(
         throw new Error(
           `the test "${loop.testNodeId}" goes back round its loop and also on to "${loop.beside[0]}", which no repeat says`
         );
+      if (loop.endsOnTheWay !== undefined)
+        throw new Error(
+          `the test "${loop.endsOnTheWay}" on the way round the loop tested at "${loop.testNodeId}" ends on one side, which no repeat says`
+        );
       const cond = loopTest(ctx, loop);
       const body = insideLoop(ctx, () =>
         buildContinuation(ctx, loop.bodyEntryIds, loop.testNodeId, new Set(), nodeId)
       );
+      recordLoopExitEnd(ctx, loop, stop);
       const after = buildContinuation(ctx, loop.exitTargetIds, stop, visited);
       return [{ k: 'repeat', mode: 'until', test: cond, body }, ...after];
     }
@@ -1482,7 +1771,10 @@ function buildConditionChain(
           // the meeting point but ends the automation; it doesn't keep the
           // other branches from meeting (native.ts's withoutStopOnly).
           [thenTargets, elseTargets].map((g) => g.filter((id) => !isStopOnly(ctx, id))),
-          null,
+          // #323: bounded by where this walk stops (native's bounded walk
+          // does the same), so a run going on to an outer meeting without
+          // the inner one counts as getting past it.
+          stop,
           true
         ).filter((id) => !stopHas(stop, id))
       : [];
@@ -1491,6 +1783,25 @@ function buildConditionChain(
       ? new Set([...stopIds(stop), ...meetingBound(ctx, innerConvergence)])
       : stop;
 
+  // #342: a side's line to where the walk carries on runs there, after
+  // this if and what follows it -- unless that ends the automation first
+  // (a `stop` before getting there): then it runs beside, which no reading
+  // after it gives.
+  for (const left of [...thenTargets, ...elseTargets].filter((id) => stopHas(stop, id))) {
+    if (stopsBefore(ctx, innerConvergence, left))
+      throw new Error(`"${left}" runs beside a branch that ends the automation before it`);
+  }
+  // #346: the meeting point runs after the if; a side going back round
+  // its loop before getting there doesn't run it, which that reading says.
+  if (innerConvergence.length > 0) {
+    const meet = new Set(innerConvergence);
+    for (const side of [thenTargets, elseTargets]) {
+      if (side.length > 0 && goesRoundBefore(ctx, side, meet))
+        throw new Error(
+          `a side goes back round its loop before "${innerConvergence[0]}", where the sides meet`
+        );
+    }
+  }
   if (innerConvergence.length > 0) {
     ctx.carryOns.push({
       parallels: ctx.parallels.length,

@@ -1,7 +1,7 @@
 import type { FlowGraph, FlowNode } from '@circuitry/shared';
 import { normalizeGraph } from '../analyzer/normalize';
 import { graphActionToCompiled } from '../verification/compiledAction';
-import { walkGraph } from './graph-walk';
+import { type PreparedWalk, prepareGraphWalk, walkGraph } from './graph-walk';
 import {
   createRuntime,
   type Inputs,
@@ -18,13 +18,30 @@ import {
  * compiled YAML, so a strategy and its gate twin that misread a shape the
  * same way still disagree with it.
  */
-export function runGraph(graph: FlowGraph, inputs: Inputs = {}, maxSteps = 5000): RunResult {
+/** What runs of a graph read from it alone: made once for several runs. */
+export interface PreparedRun {
+  flow: FlowGraph;
+  walk: PreparedWalk;
+}
+
+export function prepareGraphRun(graph: FlowGraph): PreparedRun {
   const flow = normalizeGraph(graph, {
     meetings: false,
     copies: false,
     lines: false,
     stops: false,
   });
+  return { flow, walk: prepareGraphWalk(flow) };
+}
+
+export function runGraph(
+  graph: FlowGraph,
+  inputs: Inputs = {},
+  maxSteps = 5000,
+  /** prepareGraphRun(graph), made once for several runs (#297). */
+  prepared: PreparedRun = prepareGraphRun(graph)
+): RunResult {
+  const { flow } = prepared;
   // The triggers (for `trigger.id`) and user variables the compiled YAML
   // carries too.
   const runtime = createRuntime(
@@ -40,19 +57,24 @@ export function runGraph(graph: FlowGraph, inputs: Inputs = {}, maxSteps = 5000)
       Object.entries(node.data as Record<string, unknown>).filter(([k]) => !k.startsWith('_'))
     );
   try {
-    walkGraph(flow, Number((inputs as { triggerIdx?: number }).triggerIdx ?? 0), {
-      tick: () => runtime.tick(),
-      test: (node) => runtime.testConditions(conditionOf(node)),
-      run: (node) => {
-        // As written to YAML: without keys left undefined (a
-        // `set_conversation_response` step has no `action`).
-        const compiled = graphActionToCompiled(node);
-        runtime.runStep(
-          Object.fromEntries(Object.entries(compiled).filter(([, v]) => v !== undefined))
-        );
+    walkGraph(
+      flow,
+      Number((inputs as { triggerIdx?: number }).triggerIdx ?? 0),
+      {
+        tick: () => runtime.tick(),
+        test: (node) => runtime.testConditions(conditionOf(node)),
+        run: (node) => {
+          // As written to YAML: without keys left undefined (a
+          // `set_conversation_response` step has no `action`).
+          const compiled = graphActionToCompiled(node);
+          runtime.runStep(
+            Object.fromEntries(Object.entries(compiled).filter(([, v]) => v !== undefined))
+          );
+        },
+        isStop: (e) => e instanceof StopSignal,
       },
-      isStop: (e) => e instanceof StopSignal,
-    });
+      prepared.walk
+    );
   } catch (e) {
     if (e instanceof StepLimit) return { trace: runtime.trace, finished: false };
     throw e;
