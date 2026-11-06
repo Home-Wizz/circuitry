@@ -327,5 +327,7 @@ describe('FUZZ: canvas block-factory composition -> FlowTranspiler (maximal inte
     // Sanity check that this is actually exercising the native/success path
     // most of the time, not just generating garbage that always fails.
     expect(succeeded).toBeGreaterThan(N * 0.5);
-  });
+    // 2000 graphs take about 4 s alone, over the 5 s default when the
+    // machine is busy: a timeout there says nothing about the product.
+  }, 30_000);
 });
